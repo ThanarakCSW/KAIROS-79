@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="th" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KAIROS-79 (K79) • XAU/USD Precision Gold Timing &amp; Risk System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <!-- Sleek 2-Tier Top Command Bar -->
+  <header class="topbar">
+    <div class="topbar-primary">
+      <div class="topbar-left">
+        <div class="brand-badge" title="KAIROS-79 (K79) — ระบบจับจังหวะทองคำและคัดกรองความเสี่ยงเชิงรุก">
+          <span class="pulse-gold"></span>
+          <span class="brand-wordmark">KAIROS-79</span>
+          <span class="brand-divider"></span>
+          <span class="symbol-name">XAU/USD</span>
+        </div>
+
+        <span class="topbar-divider" aria-hidden="true"></span>
+
+        <div class="ticker-group">
+          <span id="livePrice" class="live-price">2657.75</span>
+          <span id="bidAskPill" class="bid-ask-pill">Bid — / Ask —</span>
+        </div>
+
+        <div class="market-meta-pills">
+          <span id="trendBadge" class="meta-pill pill-neutral">Trend: —</span>
+          <span id="sessionBadge" class="meta-pill">Session: —</span>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <span id="wsStatus" class="conn-indicator">
+          <i class="conn-dot"></i> <span id="wsStatusText">Connecting</span>
+        </span>
+
+        <label class="icon-btn" title="เปิด/ปิดเสียงแจ้งเตือนเมื่อมีสัญญาณ">
+          <input type="checkbox" id="soundEnabled" checked hidden />
+          <span id="soundIcon">🔔</span>
+        </label>
+
+        <button id="btnOpenSettings" class="btn-outline">
+          ⚙️ ตั้งค่าพอร์ต &amp; API
+        </button>
+      </div>
+    </div>
+
+    <div class="topbar-toolbar">
+      <div class="toolbar-controls">
+        <div class="segmented-control" id="styleSelector" title="เลือกโหมดการเทรด (บังคับโอกาสถึง TP > 50% ทั้งสองโหมด)">
+          <button class="seg-btn seg-btn-text style-btn active" data-style="intraday">🎯 โหมดปกติ (Intraday)</button>
+          <button class="seg-btn seg-btn-text style-btn" data-style="scalping">⚡ เทรดสั้น (Scalping)</button>
+        </div>
+
+        <span class="topbar-divider" aria-hidden="true"></span>
+
+        <div class="segmented-control" id="tfSelector" title="เลือกไทม์เฟรมหลัก">
+          <button class="seg-btn tf-btn" data-tf="M1">M1</button>
+          <button class="seg-btn tf-btn active" data-tf="M5">M5</button>
+          <button class="seg-btn tf-btn" data-tf="M15">M15</button>
+          <button class="seg-btn tf-btn" data-tf="H1">H1</button>
+          <button class="seg-btn tf-btn" data-tf="H4">H4</button>
+        </div>
+
+        <span class="topbar-divider" aria-hidden="true"></span>
+
+        <div class="segmented-control" id="chartModeSelector" title="สลับดูกราฟโซน AI SMC หรือกราฟ TradingView XAUUSD แท้">
+          <button class="seg-btn seg-btn-text chart-mode-btn active" data-chart-mode="ai">📊 กราฟโซน AI</button>
+          <button class="seg-btn seg-btn-text chart-mode-btn" data-chart-mode="tv">📺 TradingView แท้</button>
+        </div>
+      </div>
+
+      <div class="toolbar-actions">
+        <button id="btnAnalyzeNow" class="btn-ai-glow">
+          <span class="sparkle">✦</span> ให้ Gemini วิเคราะห์กราฟตอนนี้
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main 2-Column Workspace -->
+  <main class="workspace">
+    <!-- Left: Interactive Chart + Bottom Drawer Tabs -->
+    <section class="chart-stage">
+      <div class="chart-wrapper">
+        <!-- Floating Chart HUD Overlay -->
+        <div class="chart-hud">
+          <div class="hud-row">
+            <span class="hud-tag" id="atrBadge">ATR(14): —</span>
+            <span class="hud-tag ema-tag"><i class="dot ema20"></i><span id="hudEma20">EMA20: —</span></span>
+            <span class="hud-tag ema-tag"><i class="dot ema50"></i><span id="hudEma50">EMA50: —</span></span>
+            <span class="hud-tag ema-tag"><i class="dot ema200"></i><span id="hudEma200">EMA200: —</span></span>
+            <span class="hud-tag fan-tag"><i class="dot fan-p50"></i>Monte Carlo 15,000 Paths</span>
+          </div>
+          <div class="hud-row" id="mtfHudRow"></div>
+          <div class="hud-factors" id="zoneStrip"></div>
+        </div>
+
+        <div id="chartContainer" class="chart-canvas-host">
+          <canvas id="fallbackCanvas" class="fallback-canvas"></canvas>
+        </div>
+        <div id="tvWidgetContainer" class="chart-canvas-host" style="display:none;"></div>
+      </div>
+
+      <!-- Compact Bottom Dock (Tabs for SMC Zones, MTF & Candle Behavior, USD News, and Replay Simulator) -->
+      <div class="bottom-dock">
+        <div class="dock-tabs">
+          <div class="dock-tab-group">
+            <button class="dock-tab active" data-dock="zones">📐 โซน SMC ที่ยังใช้งานได้</button>
+            <button class="dock-tab" data-dock="mtf">🌐 4 ไทม์เฟรม • DXY • VWAP/POC</button>
+            <button class="dock-tab" data-dock="tracker">🏆 สถิติความแม่นยำ (Win-Rate)</button>
+            <button class="dock-tab" data-dock="news">📰 ปฏิทินข่าวกล่องแดง USD</button>
+            <button class="dock-tab" data-dock="replay">🎬 โหมดจำลองย้อนหลัง (Replay)</button>
+          </div>
+          <span id="feedSourceLabel" class="feed-source-label">Feed: —</span>
+        </div>
+
+        <div class="dock-body">
+          <!-- Tab: SMC Zones -->
+          <div id="dock-zones" class="dock-pane active">
+            <div id="smcZonesList" class="compact-cards-row"></div>
+          </div>
+
+          <!-- Tab: MTF S&R + Institutional Levels + Macro + Candlestick Behavior -->
+          <div id="dock-mtf" class="dock-pane">
+            <div id="mtfCandlesList" class="compact-cards-row"></div>
+          </div>
+
+          <!-- Tab: Signal Performance Tracker -->
+          <div id="dock-tracker" class="dock-pane">
+            <div id="signalTrackerList" class="compact-cards-row"></div>
+          </div>
+
+          <!-- Tab: News -->
+          <div id="dock-news" class="dock-pane">
+            <div id="newsPanel" class="compact-cards-row"></div>
+          </div>
+
+          <!-- Tab: Replay Controls -->
+          <div id="dock-replay" class="dock-pane">
+            <div class="replay-bar">
+              <span class="replay-hint">ใช้ทดสอบการทำงานของ SMC &amp; AI ย้อนหลังทีละแท่ง หรือกด Live Feed เพื่อดูราคาตลาดจริง:</span>
+              <div class="replay-actions">
+                <button id="btnResetSetup" class="btn-chip">⏪ กระโดดไปจุดเกิด Setup</button>
+                <button id="btnStepBar" class="btn-chip">⏭ เดินหน้า +1 แท่ง</button>
+                <button id="btnAutoReplay" class="btn-chip">▶ เล่นอัตโนมัติ</button>
+                <button id="btnLiveMode" class="btn-chip chip-live">📡 กลับสู่กราฟจริง (Live Feed)</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right: Focused MT5 Ticket + Tabbed AI Advisor -->
+    <aside class="command-sidebar">
+      <!-- 1. Hero MT5 Execution Ticket -->
+      <div class="ticket-hero" id="ticketCard">
+        <div class="ticket-top">
+          <div class="signal-title-block">
+            <span class="kicker" id="statusSub">🟢 พร้อมเข้าในโซน</span>
+            <div class="signal-main">
+              <h2 id="ticketSideTitle">BUY XAUUSD</h2>
+              <span id="verdictBadge" class="verdict-pill pass">PASS</span>
+            </div>
+          </div>
+
+          <div class="confluence-meter" title="คะแนนความแม่นยำจากจุดร่วม SMC + EMA">
+            <span class="conf-label">Confluence</span>
+            <strong id="confluenceBadge">85%</strong>
+          </div>
+        </div>
+
+        <!-- 2x2 Click-to-Copy Tiles for MT5 -->
+        <div class="mt5-tiles">
+          <button class="mt5-tile tile-lot copy-trigger" data-copy-target="valLot" title="คลิกเพื่อคัดลอก Lot Size">
+            <div class="tile-head">
+              <span>VOLUME (LOT)</span>
+              <span class="copy-hint">คัดลอก</span>
+            </div>
+            <div class="tile-val"><strong id="valLot">0.10</strong></div>
+            <div class="tile-sub" id="riskUsdSub">ความเสี่ยง $50.00 (1%)</div>
+          </button>
+
+          <button class="mt5-tile tile-entry copy-trigger" data-copy-target="valEntry" title="คลิกเพื่อคัดลอกราคา Entry ล่วงหน้า">
+            <div class="tile-head">
+              <span id="entryHeadLabel">ENTRY (LIMIT ล่วงหน้า)</span>
+              <span class="copy-hint">คัดลอก</span>
+            </div>
+            <div class="tile-val"><strong id="valEntry">2657.75</strong></div>
+            <div class="tile-sub" id="entryDistSub">จุดดักเข้าล่วงหน้า (ยังไม่ผ่าน)</div>
+          </button>
+
+          <button class="mt5-tile tile-sl copy-trigger" data-copy-target="valSL" title="คลิกเพื่อคัดลอกราคา Stop Loss">
+            <div class="tile-head">
+              <span>STOP LOSS</span>
+              <span class="copy-hint">คัดลอก</span>
+            </div>
+            <div class="tile-val"><strong id="valSL">2654.20</strong></div>
+            <div class="tile-sub" id="slDistSub">ห่าง $3.55 (รวม Spread)</div>
+          </button>
+
+          <button class="mt5-tile tile-tp copy-trigger" data-copy-target="valTP" title="คลิกเพื่อคัดลอกราคา Take Profit">
+            <div class="tile-head">
+              <span>TAKE PROFIT</span>
+              <span class="copy-hint">คัดลอก</span>
+            </div>
+            <div class="tile-val"><strong id="valTP">2665.80</strong></div>
+            <div class="tile-sub" id="tpProfitSub">R:R 1:2.27 (+$80.50)</div>
+          </button>
+        </div>
+
+        <!-- Sleek 15,000-Path Monte Carlo Summary Strip -->
+        <div class="mc-strip">
+          <div class="mc-strip-head">
+            <span id="simTitleText">🎲 ผลจำลอง 15,000 ความเป็นไปได้</span>
+            <strong id="valEV" class="ev-tag">EV +0.72R</strong>
+          </div>
+
+          <div class="mc-multi-bar">
+            <div id="barWin" class="mc-seg seg-win" style="width: 54%"></div>
+            <div id="barSweep" class="mc-seg seg-sweep" style="width: 10%"></div>
+            <div id="barStop" class="mc-seg seg-stop" style="width: 36%"></div>
+          </div>
+
+          <div class="mc-legend-row">
+            <span>🟢 ชนะแตะ TP: <strong id="valWinPct">54%</strong></span>
+            <span>🟡 เสี่ยงโดนกวาดหาง: <strong id="valSweepPct">10%</strong></span>
+            <span>🔴 ชน SL: <strong id="valStopPct">36%</strong></span>
+          </div>
+        </div>
+
+        <button id="btnCopyAllTicket" class="btn-copy-ticket">
+          📋 คัดลอกโพยคำสั่ง MT5 ทั้งชุด
+        </button>
+      </div>
+
+      <!-- 2. Tabbed AI Advisor & Risk Gate Inspector (No More Clutter!) -->
+      <div class="advisor-panel">
+        <div class="advisor-tabs">
+          <button class="adv-tab active" data-tab="scenarios">🧠 แผนรับมือ 3 Scenarios</button>
+          <button class="adv-tab" data-tab="risks">🛡️ จุดบอด &amp; ด่านตรวจ</button>
+          <button class="adv-tab" data-tab="deep">📊 วิเคราะห์เจาะลึก</button>
+        </div>
+
+        <!-- Tab 1: 3 Scenarios (Default View) -->
+        <div id="tab-scenarios" class="adv-pane active">
+          <div class="ai-provider-bar">
+            <span id="aiTimestamp" class="ai-provider-tag">Gemini Full Chart AI</span>
+          </div>
+
+          <div id="aiHeadline" class="ai-callout">—</div>
+
+          <div class="scenario-cards">
+            <div class="sc-card sc-primary">
+              <div class="sc-header">
+                <strong id="scenATitle">🟢 Scenario A (แผนหลัก)</strong>
+                <span id="scenAProb" class="sc-badge">54%</span>
+              </div>
+              <p id="scenADetail">—</p>
+            </div>
+
+            <div class="sc-card sc-sweep">
+              <div class="sc-header">
+                <strong id="scenBTitle">🟡 Scenario B (ดัก Liquidity Sweep)</strong>
+                <span id="scenBProb" class="sc-badge">10%</span>
+              </div>
+              <p id="scenBDetail">—</p>
+            </div>
+
+            <div class="sc-card sc-invalid">
+              <div class="sc-header">
+                <strong id="scenCTitle">🔴 Scenario C (จุดยกเลิกแผน)</strong>
+                <span id="scenCProb" class="sc-badge">15%</span>
+              </div>
+              <p id="scenCDetail">—</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Blind Spots & Risk Gate Checklist -->
+        <div id="tab-risks" class="adv-pane">
+          <div class="pane-section">
+            <h4>⚠️ จุดบอดที่ต้องระวังก่อนกดออเดอร์</h4>
+            <ul id="aiBlindSpots" class="clean-list warn-list"></ul>
+          </div>
+          <div class="pane-section">
+            <h4>✅ ผลตรวจด่านความเสี่ยง (Deterministic Risk Gate)</h4>
+            <div id="gateChecklist" class="gate-stack"></div>
+          </div>
+        </div>
+
+        <!-- Tab 3: Full Confluence Summary & Verdict -->
+        <div id="tab-deep" class="adv-pane">
+          <div class="pane-section">
+            <h4>🔍 สรุปโครงสร้างกราฟและจุดร่วม (Confluence Analysis)</h4>
+            <p id="aiSummary" class="deep-prose">—</p>
+          </div>
+          <div class="pane-section">
+            <h4>📈 ข้อสรุปทางสถิติจาก 15,000 เส้นทาง</h4>
+            <p id="simVerdictText" class="sim-verdict-box">—</p>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Slide-Over Settings Modal Drawer (Hidden until clicked) -->
+  <div id="settingsModal" class="modal-backdrop hidden">
+    <div class="modal-drawer">
+      <div class="modal-header">
+        <div>
+          <h3>⚙️ ตั้งค่าพอร์ต &amp; Gemini AI</h3>
+          <p>ปรับขนาดทุน ความเสี่ยง ค่าชดเชยราคาโบรกเกอร์ MT5 และคีย์ AI</p>
+        </div>
+        <button id="btnCloseSettings" class="btn-close">✕</button>
+      </div>
+
+      <form id="settingsForm" class="modal-form">
+        <div class="form-row">
+          <label>
+            <span>ขนาดพอร์ต Equity ($)</span>
+            <input type="number" step="100" id="cfgBalance" value="5000" />
+            <small>ใช้คำนวณ Lot Size ทองคำอัตโนมัติ</small>
+          </label>
+          <label>
+            <span>ความเสี่ยงต่อไม้ (% Risk)</span>
+            <input type="number" step="0.1" id="cfgRiskPct" value="1.0" />
+            <small>แนะนำ 0.5% – 2.0% ต่อออเดอร์</small>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label>
+            <span>ส่วนต่างราคาโบรกเกอร์ Offset ($)</span>
+            <input type="number" step="0.1" id="cfgOffset" value="0.0" />
+            <small>เช่น +0.50 หรือ -1.20 เพื่อให้ตรงจอ MT5</small>
+          </label>
+          <label>
+            <span>ค่า Spread โบรกเกอร์ (Points)</span>
+            <input type="number" step="1" id="cfgSpread" value="25" />
+            <small>เช่น 25 points = $0.25 นำไปเผื่อในระยะ SL</small>
+          </label>
+        </div>
+
+        <label class="full-field">
+          <span>🔑 Google Gemini API Key (จาก aistudio.google.com/apikey)</span>
+          <input type="password" id="cfgGeminiKey" placeholder="AIzaSy... (เว้นว่างไว้หากใช้คีย์เดิมที่บันทึกแล้ว)" />
+          <small>เมื่อใส่คีย์แล้ว Gemini 2.5 Flash จะวิเคราะห์แท่งเทียนและตัดสินใจแผนเทรดทั้งหมด</small>
+        </label>
+
+        <div class="modal-actions">
+          <button type="button" id="btnCancelSettings" class="btn-outline">ยกเลิก</button>
+          <button type="submit" class="btn-ai-glow">💾 บันทึก &amp; คำนวณใหม่ทันที</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden">คัดลอกสำเร็จ!</div>
+  <script src="/app.js"></script>
+</body>
+</html>

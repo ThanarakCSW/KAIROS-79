@@ -1,0 +1,31 @@
+# Local config containing API keys and personal account settings
+config.json
+config.json.tmp
+*.local.json
+
+# Environment variables & secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Python caches & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*.log

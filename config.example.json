@@ -1,0 +1,38 @@
+{
+  "symbol": "XAUUSD",
+  "account_balance": 5000.0,
+  "risk_per_trade_pct": 1.0,
+  "max_daily_loss_pct": 3.0,
+  "max_trades_per_day": 4,
+  "min_reward_risk": 1.5,
+  "min_sl_atr_mult": 0.8,
+  "max_sweep_risk_pct": 25.0,
+  "contract_size": 100,
+  "min_lot": 0.01,
+  "max_lot": 10.0,
+  "lot_step": 0.01,
+  "broker_price_offset": 0.0,
+  "broker_spread_points": 25.0,
+  "point_size": 0.01,
+  "default_timeframe": "M5",
+  "trading_style": "intraday",
+  "min_win_prob_pct": 50.0,
+  "simulation_replays": 15000,
+  "simulation_bars_ahead": 36,
+  "simulation_seed": 19,
+  "news_blackout_minutes": 30,
+  "ai": {
+    "enabled": true,
+    "provider": "gemini",
+    "model": "gemini-2.5-flash",
+    "api_key_env": "GEMINI_API_KEY",
+    "auto_trigger_min_confluence": 65,
+    "api_key": ""
+  },
+  "data_feed": {
+    "mode": "live_or_replay",
+    "yahoo_symbol": "GC=F",
+    "binance_ws_url": "wss://stream.binance.com:9443/ws/paxgusdt@trade",
+    "poll_interval_seconds": 15
+  }
+}
