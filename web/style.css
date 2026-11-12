@@ -476,7 +476,7 @@ body {
 
 /* Bottom Dock */
 .bottom-dock {
-  height: 142px;
+  height: 158px;
   flex-shrink: 0;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
@@ -491,9 +491,10 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0 12px;
-  height: 38px;
+  height: 36px;
   background: rgba(255, 255, 255, 0.02);
   border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
 }
 
 .dock-tab-group {
@@ -508,7 +509,7 @@ body {
   font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 600;
-  padding: 7px 12px;
+  padding: 6px 12px;
   border-bottom: 2px solid transparent;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -533,7 +534,7 @@ body {
   flex: 1;
   padding: 10px 12px;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: auto;
 }
 
 .dock-pane {
@@ -543,7 +544,97 @@ body {
 
 .dock-pane.active {
   display: flex;
+  align-items: stretch;
+}
+
+/* Priority Flow Overview Grid (No Truncation) */
+.flow-overview-grid {
+  display: grid;
+  grid-template-columns: 310px 1fr;
+  gap: 10px;
+  width: 100%;
+}
+
+@media (max-width: 960px) {
+  .flow-overview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.flow-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--border-hover);
+  border-radius: 9px;
+  padding: 9px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.flow-card.bull { border-left-color: var(--bull); }
+.flow-card.bear { border-left-color: var(--bear); }
+.flow-card.warn { border-left-color: var(--warn); }
+
+.flow-card-head {
+  display: flex;
+  justify-content: space-between;
   align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.flow-pill {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+}
+
+.vol-meter-track {
+  height: 7px;
+  border-radius: 99px;
+  background: #1e293b;
+  display: flex;
+  overflow: hidden;
+  gap: 2px;
+}
+
+.vol-meter-buy { background: var(--bull); height: 100%; transition: width 0.25s ease; }
+.vol-meter-sell { background: var(--bear); height: 100%; transition: width 0.25s ease; }
+
+.flow-sub-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.flow-headline {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #f8fafc;
+  line-height: 1.4;
+}
+
+.flow-causes-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cause-chip {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-subtle);
+  padding: 2px 8px;
+  border-radius: 5px;
 }
 
 .compact-cards-row {
@@ -555,7 +646,8 @@ body {
 }
 
 .mini-zone-card {
-  min-width: 225px;
+  min-width: 245px;
+  flex: 1;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   border-left: 3px solid var(--border-hover);
@@ -580,58 +672,14 @@ body {
 
 .mini-zone-price {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-primary);
 }
 
 .mini-zone-sub {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.replay-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  flex-wrap: wrap;
-}
-
-.replay-hint {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.replay-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.btn-chip {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  border: 1px solid var(--border-subtle);
-  padding: 6px 12px;
-  border-radius: 8px;
-  font-family: var(--font-sans);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.btn-chip:hover {
-  border-color: var(--gold);
-}
-
-.chip-live {
-  background: var(--bull-soft);
-  color: #34d399;
-  border-color: rgba(16, 185, 129, 0.35);
+  line-height: 1.38;
 }
 
 /* ---------------- Right Column: Command Sidebar ---------------- */
@@ -649,6 +697,19 @@ body {
   padding: 14px;
   flex-shrink: 0;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  transition: border-color 0.2s ease;
+}
+
+.ticket-hero.is-wait {
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.ticket-hero.is-ready-bull {
+  border-color: rgba(16, 185, 129, 0.45);
+}
+
+.ticket-hero.is-ready-bear {
+  border-color: rgba(244, 63, 94, 0.45);
 }
 
 .ticket-top {

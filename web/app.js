@@ -409,11 +409,25 @@
       "meta-pill " +
       (trend.bias === "BULLISH" ? "pill-bull" : trend.bias === "BEARISH" ? "pill-bear" : "pill-neutral");
 
-    // Floating Chart HUD
-    el("atrBadge").textContent = `ATR(14): $${Number(st.atr14 || 0).toFixed(2)}`;
-    el("hudEma20").textContent = `EMA20: ${trend.ema20 || "-"}`;
-    el("hudEma50").textContent = `EMA50: ${trend.ema50 || "-"}`;
-    el("hudEma200").textContent = `EMA200: ${trend.ema200 || "-"}`;
+    const vf = state.market_flow || st.volume_flow || {};
+    if (el("volFlowBadge") && vf.rvol !== undefined) {
+      const rvolNum = Number(vf.rvol || 1.0).toFixed(2);
+      el("volFlowBadge").textContent = `Vol ${rvolNum}x • ${vf.badge_th || vf.volume_label_th || ""}`;
+      el("volFlowBadge").title = vf.headline_th || "";
+      el("volFlowBadge").className =
+        "meta-pill " +
+        (vf.flow_type === "TREND_EXPANSION"
+          ? trend.bias === "BEARISH"
+            ? "pill-bear"
+            : "pill-bull"
+          : "pill-neutral");
+    }
+
+    // Compact Single-Row Floating Chart HUD
+    el("atrBadge").textContent = `ATR: $${Number(st.atr14 || 0).toFixed(2)}`;
+    el("hudEma20").textContent = `20: ${trend.ema20 || "-"}`;
+    el("hudEma50").textContent = `50: ${trend.ema50 || "-"}`;
+    el("hudEma200").textContent = `200: ${trend.ema200 || "-"}`;
 
     const mtf = state.mtf || {};
     const macro = state.macro || {};
@@ -421,48 +435,20 @@
     const inst = st.institutional_levels || {};
     const rsiDiv = st.rsi_divergence || {};
     const cb = st.candle_behavior || {};
-    const dr = cb.get ? {} : cb.dealing_range || {};
+    const dr = cb.dealing_range || {};
 
-    if (el("mtfHudRow")) {
+    if (el("hudMtfCompact")) {
       const tfs = mtf.timeframes || {};
-      const tfBadges = ["M5", "M15", "H1", "H4"]
+      const mtfMini = ["H4", "H1", "M15", "M5"]
         .filter((k) => tfs[k])
-        .map((k) => {
-          const b = tfs[k].bias;
-          const dotColor = b === "BULLISH" ? "#10b981" : b === "BEARISH" ? "#f43f5e" : "#94a3b8";
-          const arrow = b === "BULLISH" ? "▲" : b === "BEARISH" ? "▼" : "◆";
-          return `<span class="hud-tag"><i class="dot" style="background:${dotColor}"></i>${k}: ${arrow} ${b}</span>`;
-        });
-      if (macro.dxy_price) {
-        const smtTag =
-          macro.smt_divergence && macro.smt_divergence !== "NONE"
-            ? ` • ⚡ ${macro.smt_divergence}`
-            : "";
-        tfBadges.push(
-          `<span class="hud-tag">💵 DXY: ${Number(macro.dxy_price).toFixed(2)} (${macro.dxy_change_pct >= 0 ? "+" : ""}${macro.dxy_change_pct}%)${smtTag}</span>`
-        );
-      }
-      if (rsiDiv.rsi14) {
-        const divText = rsiDiv.divergence && rsiDiv.divergence !== "NONE" ? ` • ${rsiDiv.divergence}` : "";
-        tfBadges.push(`<span class="hud-tag">📈 RSI(14): ${rsiDiv.rsi14}${divText}</span>`);
-      }
-      if (inst.vwap && inst.poc) {
-        tfBadges.push(
-          `<span class="hud-tag">⚖️ VWAP: ${inst.vwap.toFixed(2)} • POC: ${inst.poc.toFixed(2)}</span>`
-        );
-      }
-      if (dr.zone) {
-        tfBadges.push(
-          `<span class="hud-tag">กรอบ 60 แท่ง: ${dr.zone} (${Number(dr.position_pct || 50).toFixed(0)}%)</span>`
-        );
-      }
+        .map((k) => `${k}${tfs[k].bias === "BULLISH" ? "▲" : tfs[k].bias === "BEARISH" ? "▼" : "◆"}`)
+        .join(" ");
       const scalp = st.scalping || {};
       if (state.trading_style === "scalping" && scalp.ema9) {
-        tfBadges.unshift(
-          `<span class="hud-tag" style="border-color:rgba(245,184,65,0.45);color:#fde68a">⚡ SCALP EMA9/21: ${scalp.ema9}/${scalp.ema21} • StochRSI: ${scalp.stoch_rsi_k} (${scalp.squeeze_state})</span>`
-        );
+        el("hudMtfCompact").textContent = `⚡ EMA9/21: ${scalp.ema9}/${scalp.ema21} • ${mtfMini || "Scalping"}`;
+      } else {
+        el("hudMtfCompact").textContent = `MTF: ${mtfMini || "-"}`;
       }
-      el("mtfHudRow").innerHTML = tfBadges.join("");
     }
 
     // Sync active trading style and timeframe buttons
@@ -473,216 +459,184 @@
       b.classList.toggle("active", b.dataset.tf === state.timeframe);
     });
 
-    const factors = setup.confluence_factors || [];
-    el("zoneStrip").innerHTML = factors
-      .slice(0, 5)
-      .map((f) => `<span class="factor-pill">✦ ${f}</span>`)
-      .join("");
-
-    // Bottom Dock: SMC Zones
-    const obCards = (smc.order_blocks || []).slice(0, 4).map(
-      (ob) => `
-      <div class="mini-zone-card ${ob.bias === "BULLISH" ? "bull" : "bear"}">
-        <div class="mini-zone-top">
-          <strong>${ob.kind}</strong>
-          <span class="mini-zone-price">${ob.low.toFixed(2)} – ${ob.high.toFixed(2)}</span>
-        </div>
-        <div class="mini-zone-sub">Score ${ob.confluence_score}/100 • ${(ob.confluence_factors || [])[0] || ""}</div>
-      </div>`
-    );
-    const fvgCards = (smc.fvgs || []).slice(-3).map(
-      (f) => `
-      <div class="mini-zone-card ${f.bias === "BULLISH" ? "bull" : "bear"}">
-        <div class="mini-zone-top">
-          <strong>${f.kind}</strong>
-          <span class="mini-zone-price">${f.low.toFixed(2)} – ${f.high.toFixed(2)}</span>
-        </div>
-        <div class="mini-zone-sub">Imbalance Width: $${f.width_usd.toFixed(2)}</div>
-      </div>`
-    );
-    el("smcZonesList").innerHTML =
-      obCards.concat(fvgCards).join("") || `<div class="mini-zone-card">กำลังสแกนหาโซน SMC ใหม่...</div>`;
-
-    // Bottom Dock: Multi-Timeframe S&R + Institutional Levels + Macro + Candlestick Behavior
-    if (el("mtfCandlesList")) {
-      const mtfCards = [];
-
-      // 1. Macro DXY & US10Y + SMT Divergence
-      if (macro.dxy_price) {
-        const mClass =
-          macro.macro_gold_bias === "BULLISH"
-            ? "bull"
-            : macro.macro_gold_bias === "BEARISH"
+    // Bottom Dock Tab 1 (Default): Volume & Causal Market Flow Overview
+    if (el("marketFlowList")) {
+      const rvol = Number(vf.rvol || 1.0);
+      const buyPct = Number(vf.buy_volume_pct || 50);
+      const sellPct = Number(vf.sell_volume_pct || 50);
+      const curVol = Number(vf.current_volume || 0).toLocaleString();
+      const avgVol = Number(vf.avg_volume_20 || 0).toLocaleString();
+      const volClass = buyPct >= 55 ? "bull" : sellPct >= 55 ? "bear" : "warn";
+      const flowClass =
+        vf.flow_type === "TREND_EXPANSION"
+          ? trend.bias === "BEARISH"
             ? "bear"
-            : "warn";
-        mtfCards.push(`
-          <div class="mini-zone-card ${mClass}">
-            <div class="mini-zone-top">
-              <strong>💵 DXY ${Number(macro.dxy_price).toFixed(2)} &amp; US10Y ${Number(macro.us10y_yield || 4.25).toFixed(2)}%</strong>
-              <span class="mini-zone-price">${macro.smt_divergence !== "NONE" ? "⚡ SMT DIV" : macro.dxy_bias}</span>
-            </div>
-            <div class="mini-zone-sub">${macro.summary_th || ""}</div>
-          </div>
-        `);
-      }
+            : "bull"
+          : "warn";
+      const causes = (vf.causes_th || []).slice(0, 3);
 
-      // 2. Institutional Levels: PDH/PDL, Asian Session Range, VWAP & Volume Profile POC
-      if (inst.pdh) {
-        mtfCards.push(`
-          <div class="mini-zone-card ${inst.price_vs_vwap === "ABOVE_VWAP" ? "bull" : "bear"}">
-            <div class="mini-zone-top">
-              <strong>🏦 PDH ${inst.pdh.toFixed(2)} • PDL ${inst.pdl.toFixed(2)}</strong>
-              <span class="mini-zone-price">POC ${inst.poc.toFixed(2)}</span>
-            </div>
-            <div class="mini-zone-sub">VWAP: <b>${inst.vwap.toFixed(2)}</b> • Value Area: ${inst.val.toFixed(2)}–${inst.vah.toFixed(2)} • ${inst.asian_summary_th || ""}</div>
+      el("marketFlowList").innerHTML = `
+        <div class="flow-card ${volClass}">
+          <div class="flow-card-head">
+            <strong>📊 วอลุ่ม &amp; แรงซื้อ-ขาย (RVOL ${rvol.toFixed(2)}x)</strong>
+            <span class="flow-pill">${vf.volume_label_th || "-"}</span>
           </div>
-        `);
-      }
-
-      // 3. RSI(14) & Momentum Divergence
-      if (rsiDiv.rsi14) {
-        const rClass =
-          rsiDiv.divergence_bias === "BULLISH"
-            ? "bull"
-            : rsiDiv.divergence_bias === "BEARISH"
-            ? "bear"
-            : "warn";
-        mtfCards.push(`
-          <div class="mini-zone-card ${rClass}">
-            <div class="mini-zone-top">
-              <strong>📈 RSI(14): ${rsiDiv.rsi14} (${rsiDiv.rsi_state})</strong>
-              <span class="mini-zone-price">${rsiDiv.divergence}</span>
-            </div>
-            <div class="mini-zone-sub">${rsiDiv.summary_th || ""}</div>
+          <div class="vol-meter-track">
+            <div class="vol-meter-buy" style="width:${Math.max(4, buyPct)}%"></div>
+            <div class="vol-meter-sell" style="width:${Math.max(4, sellPct)}%"></div>
           </div>
-        `);
-      }
-
-      // 4. 4-Timeframe Trend & S&R Matrix
-      const tfs = mtf.timeframes || {};
-      ["H4", "H1", "M15", "M5"].forEach((tfKey) => {
-        const info = tfs[tfKey];
-        if (!info) return;
-        const sup = info.nearest_support ? `${info.nearest_support.mid.toFixed(2)}` : "-";
-        const res = info.nearest_resistance ? `${info.nearest_resistance.mid.toFixed(2)}` : "-";
-        const cardClass = info.bias === "BULLISH" ? "bull" : info.bias === "BEARISH" ? "bear" : "warn";
-        mtfCards.push(`
-          <div class="mini-zone-card ${cardClass}">
-            <div class="mini-zone-top">
-              <strong>🌐 ${tfKey} (${info.bias})</strong>
-              <span class="mini-zone-price">${info.regime}</span>
-            </div>
-            <div class="mini-zone-sub">แนวรับ ${tfKey}: <b>${sup}</b> • แนวต้าน ${tfKey}: <b>${res}</b></div>
+          <div class="flow-sub-meta">
+            <span>🟢 ซื้อ <b>${buyPct.toFixed(0)}%</b> • 🔴 ขาย <b>${sellPct.toFixed(0)}%</b></span>
+            <span>Vol: <b>${curVol}</b> / เฉลี่ย ${avgVol}</span>
           </div>
-        `);
-      });
-
-      const htfZones = (mtf.htf_sr_zones || []).filter((z) => z.is_mtf_confluence).slice(0, 2);
-      htfZones.forEach((hz) => {
-        mtfCards.push(`
-          <div class="mini-zone-card ${hz.role === "support" ? "bull" : "bear"}">
-            <div class="mini-zone-top">
-              <strong>⭐ โซนทับซ้อน ${(hz.confluent_timeframes || [hz.timeframe]).join("+")}</strong>
-              <span class="mini-zone-price">${hz.low.toFixed(2)} – ${hz.high.toFixed(2)}</span>
-            </div>
-            <div class="mini-zone-sub">${hz.role === "support" ? "แนวรับร่วมหลาย TF" : "แนวต้านร่วมหลาย TF"} (ชน ${hz.touches} ครั้ง)</div>
+          <div class="flow-sub-meta">
+            <span>${vf.pressure_summary_th || "-"}</span>
+            <span>แกว่ง ${Number(vf.range_expansion_ratio || 1.0).toFixed(2)}x ATR</span>
           </div>
-        `);
-      });
+        </div>
 
-      if (cb.lookback_bars) {
-        mtfCards.push(`
-          <div class="mini-zone-card ${cb.bullish_pressure_pct >= 52 ? "bull" : cb.bullish_pressure_pct <= 48 ? "bear" : "warn"}">
-            <div class="mini-zone-top">
-              <strong>🕯️ พฤติกรรมแท่งเทียน ${cb.lookback_bars} แท่ง</strong>
-              <span class="mini-zone-price">แรงซื้อ ${cb.bullish_pressure_pct}%</span>
-            </div>
-            <div class="mini-zone-sub">${cb.wick_summary_th || ""} • ${dr.summary_th || ""}</div>
+        <div class="flow-card ${flowClass}">
+          <div class="flow-card-head">
+            <strong>${vf.badge_th || "🌊 สรุปสาเหตุกระแสตลาด"}</strong>
+            <span class="flow-pill">${state.timeframe || "M5"} • ${trend.regime || "-"}</span>
           </div>
-        `);
-      }
-
-      const recentPats = (cb.recent_patterns || []).slice(-3).reverse();
-      recentPats.forEach((p) => {
-        mtfCards.push(`
-          <div class="mini-zone-card ${p.bias === "BULLISH" ? "bull" : "bear"}">
-            <div class="mini-zone-top">
-              <strong>🕯️ ${p.pattern}</strong>
-              <span class="mini-zone-price">@ ${Number(p.price).toFixed(2)}</span>
-            </div>
-            <div class="mini-zone-sub">${p.label_th}</div>
+          <div class="flow-headline">${vf.headline_th || "กำลังวิเคราะห์ข้อมูลปริมาณซื้อขายและกระแสตลาด..."}</div>
+          <div class="flow-causes-row">
+            ${causes.map((c) => `<span class="cause-chip">• ${c}</span>`).join("")}
           </div>
-        `);
-      });
-
-      el("mtfCandlesList").innerHTML = mtfCards.join("");
+        </div>
+      `;
     }
 
-    // Bottom Dock: Signal Performance Tracker (Walk-Forward Win-Rate & R Verification)
-    if (el("signalTrackerList")) {
-      const tCards = [];
-      if (tracker.total_signals !== undefined) {
-        const cumR = Number(tracker.cumulative_r || 0);
-        tCards.push(`
-          <div class="mini-zone-card ${cumR >= 0 ? "bull" : "bear"}">
+    // Bottom Dock Tab 2: Top SMC Zones + Key MTF/Institutional/Macro Structure
+    if (el("structureOverviewList")) {
+      const structCards = [];
+
+      // 4-TF + Institutional summary card
+      const tfs = mtf.timeframes || {};
+      const tfLine = ["H4", "H1", "M15", "M5"]
+        .filter((k) => tfs[k])
+        .map((k) => `${k}:<b>${tfs[k].bias === "BULLISH" ? "▲UP" : tfs[k].bias === "BEARISH" ? "▼DN" : "◆FLAT"}</b>`)
+        .join(" • ");
+      const htfSup = mtf.nearest_htf_support ? `${mtf.nearest_htf_support.mid.toFixed(2)} (${mtf.nearest_htf_support.timeframe})` : "-";
+      const htfRes = mtf.nearest_htf_resistance ? `${mtf.nearest_htf_resistance.mid.toFixed(2)} (${mtf.nearest_htf_resistance.timeframe})` : "-";
+      structCards.push(`
+        <div class="mini-zone-card ${mtf.overall_bias === "BULLISH" ? "bull" : mtf.overall_bias === "BEARISH" ? "bear" : "warn"}" style="min-width:290px">
+          <div class="mini-zone-top">
+            <strong>🌐 โครงสร้าง 4 ไทม์เฟรม (${mtf.overall_bias || "-"})</strong>
+            <span class="mini-zone-price">รับ ${htfSup} | ต้าน ${htfRes}</span>
+          </div>
+          <div class="mini-zone-sub">${tfLine || "-"}<br/>${inst.vwap ? `VWAP: <b>${inst.vwap.toFixed(2)}</b> • POC: <b>${inst.poc.toFixed(2)}</b> • PDH/L: ${inst.pdh.toFixed(2)}/${inst.pdl.toFixed(2)}` : ""}</div>
+        </div>
+      `);
+
+      // Top 2 Unmitigated Order Blocks
+      (smc.order_blocks || []).slice(0, 2).forEach((ob) => {
+        structCards.push(`
+          <div class="mini-zone-card ${ob.bias === "BULLISH" ? "bull" : "bear"}">
             <div class="mini-zone-top">
-              <strong>🏆 Win Rate: ${Number(tracker.win_rate_pct || 0).toFixed(1)}% (${tracker.win_count || 0}W / ${tracker.loss_count || 0}L)</strong>
-              <span class="mini-zone-price">${cumR >= 0 ? "+" : ""}${cumR.toFixed(2)}R</span>
+              <strong>📐 ${ob.kind}</strong>
+              <span class="mini-zone-price">${ob.low.toFixed(2)} – ${ob.high.toFixed(2)}</span>
             </div>
-            <div class="mini-zone-sub">Profit Factor: <b>${tracker.profit_factor || 1.0}</b> • ตรวจสัญญาณจริงบนกราฟ ${tracker.timeframe || ""} (รวมระบบแบ่งปิด TP1 + บังทุน)</div>
+            <div class="mini-zone-sub">Score ${ob.confluence_score}/100 • ${(ob.confluence_factors || [])[0] || "โซนรอเข้าล่วงหน้า"}</div>
+          </div>
+        `);
+      });
+
+      // Top FVG
+      const topFvg = (smc.fvgs || []).slice(-1)[0];
+      if (topFvg) {
+        structCards.push(`
+          <div class="mini-zone-card ${topFvg.bias === "BULLISH" ? "bull" : "bear"}">
+            <div class="mini-zone-top">
+              <strong>⚡ ${topFvg.kind}</strong>
+              <span class="mini-zone-price">${topFvg.low.toFixed(2)} – ${topFvg.high.toFixed(2)}</span>
+            </div>
+            <div class="mini-zone-sub">ช่องว่าง Imbalance กว้าง $${topFvg.width_usd.toFixed(2)}</div>
           </div>
         `);
       }
-      ((tracker.recent_signals) || []).forEach((sig) => {
-        const cls =
-          sig.outcome.startsWith("WIN")
-            ? "bull"
-            : sig.outcome === "OPEN"
-            ? "warn"
-            : "bear";
-        tCards.push(`
+
+      // Macro DXY + RSI
+      if (macro.dxy_price) {
+        const mClass = macro.macro_gold_bias === "BULLISH" ? "bull" : macro.macro_gold_bias === "BEARISH" ? "bear" : "warn";
+        structCards.push(`
+          <div class="mini-zone-card ${mClass}">
+            <div class="mini-zone-top">
+              <strong>💵 DXY ${Number(macro.dxy_price).toFixed(2)} (${macro.dxy_change_pct >= 0 ? "+" : ""}${macro.dxy_change_pct}%)</strong>
+              <span class="mini-zone-price">RSI ${rsiDiv.rsi14 || "-"}</span>
+            </div>
+            <div class="mini-zone-sub">${macro.summary_th || ""}${rsiDiv.divergence && rsiDiv.divergence !== "NONE" ? ` • ${rsiDiv.divergence}` : ""}</div>
+          </div>
+        `);
+      }
+
+      el("structureOverviewList").innerHTML = structCards.join("") || `<div class="mini-zone-card">กำลังสแกนหาโซน SMC ใหม่...</div>`;
+    }
+
+    // Bottom Dock Tab 3: Signal Win-Rate Stats & Upcoming USD Red News
+    if (el("statsNewsList")) {
+      const sCards = [];
+      const cumR = Number(tracker.cumulative_r || 0);
+      sCards.push(`
+        <div class="mini-zone-card ${cumR >= 0 ? "bull" : "bear"}" style="min-width:270px">
+          <div class="mini-zone-top">
+            <strong>🏆 Win Rate: ${Number(tracker.win_rate_pct || 0).toFixed(1)}% (${tracker.win_count || 0}W / ${tracker.loss_count || 0}L)</strong>
+            <span class="mini-zone-price">${cumR >= 0 ? "+" : ""}${cumR.toFixed(2)}R</span>
+          </div>
+          <div class="mini-zone-sub">Profit Factor: <b>${tracker.profit_factor || 1.0}</b> • ตรวจสัญญาณจริงบนกราฟ ${tracker.timeframe || state.timeframe}</div>
+        </div>
+      `);
+
+      const redList = news.upcoming_usd_red_news || [];
+      if (redList.length) {
+        redList.slice(0, 2).forEach((ev) => {
+          sCards.push(`
+            <div class="mini-zone-card ${Math.abs(ev.minutes_away) <= 30 ? "bear" : "warn"}">
+              <div class="mini-zone-top">
+                <strong>🔴 ${ev.title}</strong>
+                <span class="mini-zone-price">${ev.time_bkk}</span>
+              </div>
+              <div class="mini-zone-sub">${ev.minutes_away > 0 ? `อีก ${ev.minutes_away} นาที` : `${Math.abs(ev.minutes_away)} นาทีที่แล้ว`} • คาดการณ์: ${ev.forecast}</div>
+            </div>
+          `);
+        });
+      } else {
+        sCards.push(`
+          <div class="mini-zone-card ${session.is_rollover_danger ? "warn" : "bull"}">
+            <div class="mini-zone-top">
+              <strong>✅ ปลอดข่าวกล่องแดง USD (${session.session || "-"})</strong>
+              <span class="mini-zone-price">${session.liquidity || ""}</span>
+            </div>
+            <div class="mini-zone-sub">${session.label_th || "ไม่มีข่าว High Impact ในช่วงเวลานี้"}</div>
+          </div>
+        `);
+      }
+
+      ((tracker.recent_signals) || []).slice(0, 2).forEach((sig) => {
+        const cls = sig.outcome.startsWith("WIN") ? "bull" : sig.outcome === "OPEN" ? "warn" : "bear";
+        sCards.push(`
           <div class="mini-zone-card ${cls}">
             <div class="mini-zone-top">
               <strong>${sig.side} @ ${Number(sig.entry).toFixed(2)} (${sig.time_bkk})</strong>
               <span class="mini-zone-price">${sig.pnl_r > 0 ? `+${sig.pnl_r}R` : sig.pnl_r < 0 ? `${sig.pnl_r}R` : "OPEN"}</span>
             </div>
-            <div class="mini-zone-sub">${sig.outcome_label_th} • TP1: ${Number(sig.tp1).toFixed(2)} | TP2: ${Number(sig.target).toFixed(2)} | SL: ${Number(sig.stop).toFixed(2)}</div>
+            <div class="mini-zone-sub">${sig.outcome_label_th} • TP2 ${Number(sig.target).toFixed(2)} | SL ${Number(sig.stop).toFixed(2)}</div>
           </div>
         `);
       });
-      el("signalTrackerList").innerHTML = tCards.join("");
-    }
 
-    // Bottom Dock: USD Red News
-    const redList = news.upcoming_usd_red_news || [];
-    const sessionCard = `
-      <div class="mini-zone-card ${session.is_rollover_danger ? "warn" : "bull"}">
-        <div class="mini-zone-top">
-          <strong>${session.session || "-"}</strong>
-          <span>${session.liquidity || ""}</span>
-        </div>
-        <div class="mini-zone-sub">${session.label_th || "-"}</div>
-      </div>`;
-    const newsCards = redList.length
-      ? redList
-          .map(
-            (ev) => `
-        <div class="mini-zone-card ${Math.abs(ev.minutes_away) <= 30 ? "bear" : "warn"}">
-          <div class="mini-zone-top">
-            <strong>🔴 ${ev.title}</strong>
-            <span>${ev.time_bkk}</span>
-          </div>
-          <div class="mini-zone-sub">${
-            ev.minutes_away > 0 ? `อีก ${ev.minutes_away} นาที` : `${Math.abs(ev.minutes_away)} นาทีที่แล้ว`
-          } • คาดการณ์: ${ev.forecast}</div>
-        </div>`
-          )
-          .join("")
-      : `<div class="mini-zone-card bull"><div class="mini-zone-top"><strong>✅ ปลอดข่าวกล่องแดง USD</strong></div><div class="mini-zone-sub">ไม่มีข่าว High Impact ในช่วงเวลานี้</div></div>`;
-    el("newsPanel").innerHTML = sessionCard + newsCards;
+      el("statsNewsList").innerHTML = sCards.join("");
+    }
 
     // Right Sidebar: Hero MT5 Ticket (with > 50% TP Win Probability Continuous Scanner)
     const winProbPassed = tk.win_prob_passed !== false;
+    const ticketCard = el("ticketCard");
+    if (ticketCard) {
+      ticketCard.className =
+        "ticket-hero " +
+        (!winProbPassed ? "is-wait" : tk.side === "SELL" ? "is-ready-bear" : "is-ready-bull");
+    }
     const styleTag = state.trading_style === "scalping" ? "⚡ SCALP" : "🎯 INTRADAY";
     if (!winProbPassed) {
       el("ticketSideTitle").textContent = `⏳ รอจังหวะ (WAIT)`;
@@ -824,8 +778,6 @@
           renderDashboard(doc);
         } else if (doc.type === "tick") {
           handleLiveTick(doc);
-        } else if (doc.type === "auto_replay_status") {
-          el("btnAutoReplay").textContent = doc.auto_replay ? "⏸ หยุดเล่น" : "▶ เล่นอัตโนมัติ";
         }
       } catch (_) {}
     };
@@ -929,14 +881,7 @@
       if (e.target === modal) modal.classList.add("hidden");
     });
 
-    // Replay & AI actions
-    el("btnResetSetup").addEventListener("click", () => sendWs({ action: "reset_replay", cursor: 234 }));
-    el("btnStepBar").addEventListener("click", () => sendWs({ action: "step_replay", steps: 1 }));
-    el("btnAutoReplay").addEventListener("click", () => sendWs({ action: "toggle_auto_replay" }));
-    el("btnLiveMode").addEventListener("click", () => {
-      sendWs({ action: "live_mode" });
-      showToast("สลับกลับสู่กราฟราคาจริง (Live Feed)");
-    });
+    // AI action (Replay mode removed per user request)
     el("btnAnalyzeNow").addEventListener("click", () => {
       sendWs({ action: "analyze_now" });
       showToast("กำลังส่งกราฟและผลจำลอง 15,000 เส้นทางให้ Gemini วิเคราะห์...");

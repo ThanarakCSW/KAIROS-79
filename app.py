@@ -40,7 +40,11 @@ from engine.risk_gate import evaluate_risk_and_size
 from engine.signal_tracker import evaluate_signal_performance
 from engine.simulate import optimize_setup_for_win_prob, run_simulation
 from engine.smc import analyze_smc
-from engine.structure import analyze_multi_timeframe, analyze_structure
+from engine.structure import (
+    analyze_multi_timeframe,
+    analyze_structure,
+    build_market_flow_narrative,
+)
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(ROOT_DIR, "config.json")
@@ -142,6 +146,14 @@ class TradingAssistantCore:
         news = evaluate_news_window(
             blackout_minutes=int(self.config.get("news_blackout_minutes") or 30)
         )
+        market_flow = build_market_flow_narrative(
+            structure=structure,
+            mtf=mtf,
+            macro=macro,
+            smc=smc,
+            news=news,
+        )
+        structure["volume_flow"] = market_flow
 
         # Let Gemini analyze the full chart (raw bars + MTF + Macro + SMC + 15,000-path baseline) and decide the setup
         chosen_setup, gemini_raw = evaluate_chart_with_gemini_or_fallback(
@@ -232,6 +244,7 @@ class TradingAssistantCore:
             "is_new_signal_alert": is_new_signal_alert,
             "bars": chart_bars,
             "structure": structure,
+            "market_flow": market_flow,
             "mtf": mtf,
             "macro": macro,
             "signal_tracker": signal_tracker,

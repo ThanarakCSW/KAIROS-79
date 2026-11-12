@@ -72,6 +72,7 @@ class TestAppIntegration(unittest.TestCase):
         self.assertEqual(state["simulation"]["replays"], 15000)
         self.assertGreater(len(state["bars"]), 50)
         self.assertIn("structure", state)
+        self.assertIn("market_flow", state)
         self.assertIn("mtf", state)
         self.assertIn("macro", state)
         self.assertIn("signal_tracker", state)
@@ -79,6 +80,14 @@ class TestAppIntegration(unittest.TestCase):
         self.assertIn("simulation", state)
         self.assertIn("risk_ticket", state)
         self.assertIn("ai_advisory", state)
+
+        # Verify Volume & Market Flow causal narrative
+        mf = state["market_flow"]
+        self.assertGreater(mf["rvol"], 0.0)
+        self.assertAlmostEqual(mf["buy_volume_pct"] + mf["sell_volume_pct"], 100.0, places=0)
+        self.assertIn(mf["flow_type"], ("MARKET_SLOWDOWN", "PULLBACK_SLOWDOWN", "TREND_EXPANSION"))
+        self.assertIn("เนื่องจาก", mf["headline_th"])
+        self.assertGreaterEqual(len(mf["causes_th"]), 1)
 
         # Verify 4 new Institutional Upgrade components
         inst = state["structure"]["institutional_levels"]

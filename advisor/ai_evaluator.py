@@ -167,6 +167,7 @@ def call_gemini_full_chart_analyst(
         "atr14": structure["atr14"],
         "broker_spread_points": config.get("broker_spread_points", 25),
         "trend_and_ema": structure["trend"],
+        "volume_and_market_flow": structure.get("volume_flow") or {},
         "scalping_signals": structure.get("scalping") or {},
         "institutional_levels": structure.get("institutional_levels") or {},
         "rsi_divergence": structure.get("rsi_divergence") or {},
@@ -357,11 +358,19 @@ def build_deterministic_advisory(
             f"({cb.get('wick_summary_th', '')}, {dr.get('summary_th', '')}){pat_str}"
         )
 
+    vf = structure.get("volume_flow") or {}
+    flow_note = ""
+    if vf and vf.get("headline_th"):
+        flow_note = (
+            f" | วอลุ่ม & กระแสตลาด (RVOL {vf.get('rvol', 1.0):.2f}x • แรงซื้อ {vf.get('buy_volume_pct', 50):.0f}% / แรงขาย {vf.get('sell_volume_pct', 50):.0f}%): "
+            f"{vf.get('headline_th')}"
+        )
+
     confluence_summary = (
         f"โครงสร้างหลัก ({structure['timeframe']}) อยู่ในสภาวะ {trend['regime']} ({trend['bias']}) โดยมีการเรียงตัวของเส้นค่าเฉลี่ยแบบ "
         f"{trend['ema_alignment']} (EMA20={trend['ema20']:.2f}, EMA50={trend['ema50']:.2f}, EMA200={trend['ema200']:.2f}) "
         f"โซนเข้าเทรดมีปัจจัยหนุน {len(factors)} ข้อ: {', '.join(factors)}"
-        f"{mtf_note}{inst_note}{macro_rsi_note}{candle_note} "
+        f"{flow_note}{mtf_note}{inst_note}{macro_rsi_note}{candle_note} "
         f"| เมื่อจำลองกราฟล่วงหน้า {simulation['replays']:,} ความเป็นไปได้ พบโอกาสชนะแตะ TP ก่อนที่ {probs['win_pct']:.1f}% "
         f"(คุ้มทุนที่ {probs['break_even_win_pct']:.1f}%) ให้ค่าคาดหวังทางสถิติ EV = {ev_r:+.2f}R (R:R 1:{rr:.2f})"
     )

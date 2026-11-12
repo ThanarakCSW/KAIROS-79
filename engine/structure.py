@@ -807,6 +807,279 @@ def analyze_scalping_signals(
     }
 
 
+def analyze_volume_and_flow(
+    bars: List[Dict[str, Any]],
+    trend: Dict[str, Any],
+    atr_val: float,
+    inst_levels: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Analyze real bar volume, Relative Volume (RVOL), Buy vs Sell volume delta, and baseline market flow."""
+    window = bars[-20:] if len(bars) >= 20 else bars
+    vols = [max(1, int(b.get("v") or 1)) for b in window]
+    curr_vol = vols[-1]
+    avg_vol_20 = round(sum(vols) / len(vols), 1)
+    recent_3_vol = round(sum(vols[-3:]) / min(3, len(vols)), 1)
+
+    rvol_curr = round(curr_vol / max(1.0, avg_vol_20), 2)
+    rvol_3bar = round(recent_3_vol / max(1.0, avg_vol_20), 2)
+    eff_rvol = round(max(rvol_curr, rvol_3bar), 2)
+
+    # Compute Buying Volume vs Selling Volume over the 20-bar window using intrabar close position
+    buy_vol_sum = 0.0
+    sell_vol_sum = 0.0
+    ranges_20: List[float] = []
+    for b in window:
+        hi, lo, cl, op = float(b["h"]), float(b["l"]), float(b["c"]), float(b["o"])
+        v = max(1.0, float(b.get("v") or 1.0))
+        rng = max(0.05, hi - lo)
+        ranges_20.append(rng)
+        buy_ratio = (cl - lo) / rng
+        # Boost slightly if solid bullish/bearish body
+        if cl > op:
+            buy_ratio = min(1.0, buy_ratio * 1.1)
+        elif cl < op:
+            buy_ratio = max(0.0, buy_ratio * 0.9)
+        buy_vol_sum += v * buy_ratio
+        sell_vol_sum += v * (1.0 - buy_ratio)
+
+    total_vol_sum = max(1.0, buy_vol_sum + sell_vol_sum)
+    buy_vol_pct = round((buy_vol_sum / total_vol_sum) * 100.0, 1)
+    sell_vol_pct = round(100.0 - buy_vol_pct, 1)
+    delta_pct = round(buy_vol_pct - sell_vol_pct, 1)
+
+    avg_range_20 = sum(ranges_20) / len(ranges_20)
+    avg_range_5 = sum(ranges_20[-5:]) / min(5, len(ranges_20))
+    range_expansion_ratio = round(avg_range_5 / max(0.05, avg_range_20), 2)
+
+    if eff_rvol >= 1.50:
+        vol_state = "CLIMAX_SURGE"
+        vol_label_th = f"🔥 วอลุ่มพุ่งทะลัก ({eff_rvol:.2f}x ของค่าเฉลี่ย)"
+    elif eff_rvol >= 1.12:
+        vol_state = "HIGH_ACTIVE"
+        vol_label_th = f"🟢 วอลุ่มเข้าหนาแน่น ({eff_rvol:.2f}x ของค่าเฉลี่ย)"
+    elif eff_rvol >= 0.82:
+        vol_state = "NORMAL"
+        vol_label_th = f"⚖️ วอลุ่มระดับปกติ ({eff_rvol:.2f}x ของค่าเฉลี่ย)"
+    else:
+        vol_state = "LOW_SLOWDOWN"
+        vol_label_th = f"⏸️ วอลุ่มเบาบาง/ชะลอตัว ({eff_rvol:.2f}x ของค่าเฉลี่ย)"
+
+    regime = trend.get("regime", "RANGING")
+    bias = trend.get("bias", "NEUTRAL")
+    is_slowdown = (
+        vol_state == "LOW_SLOWDOWN"
+        or range_expansion_ratio < 0.78
+        or regime in ("RANGING", "BULLISH_PULLBACK", "BEARISH_PULLBACK")
+    )
+
+    if is_slowdown and regime == "RANGING":
+        flow_state = "SLOWDOWN_CONSOLIDATION"
+        flow_headline_th = (
+            f"⏸️ ตลาดชะลอตัวและแกว่งสะสมพลังในกรอบ เนื่องจาก {vol_label_th} "
+            f"และกรอบการแกว่งตัวหดแคบลง ({range_expansion_ratio:.2f}x) รอเลือกทางใกล้ VWAP ({inst_levels.get('vwap', 0):.2f})"
+        )
+    elif is_slowdown:
+        flow_state = "PULLBACK_SLOWDOWN"
+        dir_th = "ขาขึ้น" if bias == "BULLISH" else "ขาลง"
+        flow_headline_th = (
+            f"⏸️ ตลาดชะลอตัวพักฐานในเทรนด์{dir_th} เนื่องจากแรงไล่ราคาพักตัวชั่วคราว ({vol_label_th} | "
+            f"แรงซื้อ {buy_vol_pct:.0f}% vs แรงขาย {sell_vol_pct:.0f}%)"
+        )
+    elif bias == "BULLISH":
+        flow_state = "BULLISH_TREND_FLOW"
+        flow_headline_th = (
+            f"🌊 เกิดกระแสเทรนด์ขาขึ้น (Bullish Flow) เนื่องจากมีแรงซื้อสะสมนำตลาด ({buy_vol_pct:.0f}% vs แรงขาย {sell_vol_pct:.0f}%) "
+            f"พร้อม {vol_label_th} ดันราคาไต่เหนือ EMA20/50"
+        )
+    else:
+        flow_state = "BEARISH_TREND_FLOW"
+        flow_headline_th = (
+            f"🩸 เกิดกระแสเทรนด์ขาลง (Bearish Flow) เนื่องจากมีแรงเทขายกดดันต่อเนื่อง ({sell_vol_pct:.0f}% vs แรงซื้อ {buy_vol_pct:.0f}%) "
+            f"พร้อม {vol_label_th} กดราคาต่ำกว่า EMA20/50"
+        )
+
+    return {
+        "current_volume": curr_vol,
+        "avg_volume_20": avg_vol_20,
+        "recent_3bar_volume": recent_3_vol,
+        "rvol": eff_rvol,
+        "rvol_current_bar": rvol_curr,
+        "buy_volume_pct": buy_vol_pct,
+        "sell_volume_pct": sell_vol_pct,
+        "volume_delta_pct": delta_pct,
+        "range_expansion_ratio": range_expansion_ratio,
+        "volume_state": vol_state,
+        "volume_label_th": vol_label_th,
+        "flow_state": flow_state,
+        "headline_th": flow_headline_th,
+        "causes_th": [flow_headline_th],
+    }
+
+
+def build_market_flow_narrative(
+    structure: Dict[str, Any],
+    mtf: Optional[Dict[str, Any]] = None,
+    macro: Optional[Dict[str, Any]] = None,
+    smc: Optional[Dict[str, Any]] = None,
+    news: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Synthesize a complete causal Market Flow & Volume explanation ('ชะลอตัวเนื่องจาก...' / 'เกิดเทรนด์เนื่องจาก...')
+    combining Volume (RVOL & Delta), Session/News, DXY/US10Y Macro, MTF Alignment, and SMC Structure."""
+    base_vf = dict(structure.get("volume_flow") or {})
+    trend = structure.get("trend") or {}
+    inst = structure.get("institutional_levels") or {}
+    regime = trend.get("regime", "RANGING")
+    bias = trend.get("bias", "NEUTRAL")
+
+    rvol = float(base_vf.get("rvol") or 1.0)
+    buy_pct = float(base_vf.get("buy_volume_pct") or 50.0)
+    sell_pct = float(base_vf.get("sell_volume_pct") or 50.0)
+    rng_ratio = float(base_vf.get("range_expansion_ratio") or 1.0)
+    vol_state = str(base_vf.get("volume_state") or "NORMAL")
+
+    session_info = (news or {}).get("session") or {}
+    session_name = str(session_info.get("session") or "MARKET")
+    upcoming_news = (news or {}).get("upcoming_usd_red_news") or []
+    in_blackout = bool((news or {}).get("in_news_blackout"))
+
+    mtf_status = (mtf or {}).get("alignment_status", "")
+    dxy_chg = float((macro or {}).get("dxy_change_pct") or 0.0)
+    dxy_price = float((macro or {}).get("dxy_price") or 0.0)
+    us10y = float((macro or {}).get("us10y_yield") or 0.0)
+    smt = str((macro or {}).get("smt_divergence") or "NONE")
+
+    breaks = (smc or {}).get("structure_breaks") or []
+    sweeps = (smc or {}).get("liquidity_sweeps") or []
+    last_break = breaks[-1] if breaks else None
+    last_sweep = sweeps[-1] if sweeps else None
+
+    slowdown_reasons: List[str] = []
+    trend_reasons: List[str] = []
+
+    # 1. Check Slowdown / Consolidation causes
+    if vol_state == "LOW_SLOWDOWN" or rvol < 0.88:
+        slowdown_reasons.append(
+            f"ปริมาณการซื้อขาย (Volume) เบาบางลงเหลือเพียง {rvol:.2f}x ของค่าเฉลี่ย 20 แท่ง (แรงซื้อ {buy_pct:.0f}% vs แรงขาย {sell_pct:.0f}%)"
+        )
+    if rng_ratio < 0.85:
+        slowdown_reasons.append(
+            f"กรอบการแกว่งตัวของแท่งเทียนหดแคบลง ({rng_ratio:.2f}x ของระยะปกติ) สะท้อนการพักตัวสะสมออเดอร์"
+        )
+    if "ASIAN" in session_name.upper() or session_info.get("is_rollover_danger"):
+        slowdown_reasons.append(
+            f"อยู่ในช่วง {session_info.get('label_th', session_name)} ซึ่งสถาบันการเงินฝั่งยุโรปและสหรัฐฯ ยังไม่เปิดเต็มตัว"
+        )
+    if upcoming_news:
+        ev = upcoming_news[0]
+        mins = int(ev.get("minutes_away") or 0)
+        if 0 < mins <= 180:
+            slowdown_reasons.append(
+                f"นักลงทุนชะลอการเปิดสถานะก้อนใหญ่เพื่อรอดูตัวเลขข่าวกล่องแดง USD ({ev.get('title')}) ในอีก {mins} นาที"
+            )
+    if mtf_status == "MIXED_CONFLICT":
+        slowdown_reasons.append(
+            "ทิศทางไทม์เฟรมใหญ่ (H4/H1) และไทม์เฟรมย่อย (M15/M5) ขัดแย้งกัน ทำให้ราคายังเลือกทางไม่เด็ดขาด"
+        )
+    if abs(float(inst.get("dist_vwap_usd") or 0.0)) <= float(structure.get("atr14") or 2.0) * 0.45:
+        slowdown_reasons.append(
+            f"ราคาเคลื่อนไหวเกาะติดค่าเฉลี่ยสถาบัน VWAP ({inst.get('vwap', 0):.2f}) และจุดที่มีวอลุ่มสะสมสูงสุด POC ({inst.get('poc', 0):.2f})"
+        )
+
+    # 2. Check Active Trend / Momentum causes
+    if bias == "BULLISH":
+        if buy_pct >= 53.0 or rvol >= 1.05:
+            trend_reasons.append(
+                f"มีวอลุ่มแรงซื้อไหลเข้า {buy_pct:.0f}% (ชนะแรงขาย {sell_pct:.0f}%) ด้วยความหนาแน่น Volume {rvol:.2f}x ของค่าเฉลี่ย"
+            )
+        if last_break and last_break.get("direction") == "BULLISH":
+            trend_reasons.append(
+                f"แท่งเทียนพุ่งทะลุโครงสร้าง {last_break['type']} (Break of Structure) เหนือระดับ {last_break['level']:.2f}"
+            )
+        if last_sweep and str(last_sweep.get("implication", "")).startswith("BULLISH"):
+            trend_reasons.append(
+                f"เกิดการกวาดสภาพคล่องฝั่งขาย (Liquidity Sweep) ที่ {last_sweep['level']:.2f} แล้วมีแรงซื้อดึงกลับทันที"
+            )
+        if dxy_chg < -0.03:
+            trend_reasons.append(
+                f"ได้แรงหนุนจากดัชนีดอลลาร์ DXY ที่อ่อนค่าลง ({dxy_chg:+.2f}% ที่ระดับ {dxy_price:.2f}) หนุนราคาทองคำ"
+            )
+        elif smt == "BULLISH_SMT_DIVERGENCE":
+            trend_reasons.append("เกิดสัญญาณ Bullish SMT Divergence ระหว่างทองคำกับดัชนีดอลลาร์ DXY")
+        if "STRONG_BULLISH" in mtf_status or "MODERATE_BULLISH" in mtf_status:
+            trend_reasons.append("โครงสร้างหลายไทม์เฟรม (M15/H1/H4) เรียงตัวสอดคล้องกันในฝั่งขาขึ้น")
+    elif bias == "BEARISH":
+        if sell_pct >= 53.0 or rvol >= 1.05:
+            trend_reasons.append(
+                f"มีวอลุ่มแรงขายกดดัน {sell_pct:.0f}% (มากกว่าแรงซื้อ {buy_pct:.0f}%) ด้วยความหนาแน่น Volume {rvol:.2f}x ของค่าเฉลี่ย"
+            )
+        if last_break and last_break.get("direction") == "BEARISH":
+            trend_reasons.append(
+                f"แท่งเทียนทุบหลุดโครงสร้าง {last_break['type']} (Break of Structure) ต่ำกว่าระดับ {last_break['level']:.2f}"
+            )
+        if last_sweep and str(last_sweep.get("implication", "")).startswith("BEARISH"):
+            trend_reasons.append(
+                f"เกิดการกวาดสภาพคล่องฝั่งซื้อ (Liquidity Sweep) ที่ {last_sweep['level']:.2f} แล้วถูกแรงขายตบกลับลงมา"
+            )
+        if dxy_chg > 0.03:
+            trend_reasons.append(
+                f"ถูกกดดันจากดัชนีดอลลาร์ DXY ที่แข็งค่าขึ้น ({dxy_chg:+.2f}% ที่ระดับ {dxy_price:.2f}) และ US10Y ที่ {us10y:.2f}%"
+            )
+        elif smt == "BEARISH_SMT_DIVERGENCE":
+            trend_reasons.append("เกิดสัญญาณ Bearish SMT Divergence ระหว่างทองคำกับดัชนีดอลลาร์ DXY")
+        if "STRONG_BEARISH" in mtf_status or "MODERATE_BEARISH" in mtf_status:
+            trend_reasons.append("โครงสร้างหลายไทม์เฟรม (M15/H1/H4) เรียงตัวสอดคล้องกันในฝั่งขาลง")
+
+    if "LONDON" in session_name.upper() or "NEW YORK" in session_name.upper() or "OVERLAP" in session_name.upper():
+        trend_reasons.append(f"อยู่ในช่วงตลาด {session_name} ซึ่งมีเม็ดเงินสถาบันหมุนเวียนสูง")
+
+    # Decide primary state: Slowdown vs Active Trend (or Trend with temporary Pullback Slowdown)
+    is_primarily_slowdown = (
+        regime == "RANGING"
+        or vol_state == "LOW_SLOWDOWN"
+        or rng_ratio < 0.78
+        or in_blackout
+    )
+
+    if is_primarily_slowdown:
+        primary_causes = slowdown_reasons[:3] if slowdown_reasons else [
+            f"ปริมาณการซื้อขายทรงตัว ({rvol:.2f}x) และราคาแกว่งตัวในกรอบสมดุลใกล้ VWAP ({inst.get('vwap', 0):.2f})"
+        ]
+        if regime in ("BULLISH_PULLBACK", "BEARISH_PULLBACK") or bias in ("BULLISH", "BEARISH"):
+            dir_th = "ขาขึ้น" if bias == "BULLISH" else "ขาลง"
+            flow_type = "PULLBACK_SLOWDOWN"
+            badge_th = f"⏸️ ชะลอตัวพักฐาน (ในโครงสร้าง{dir_th})"
+            summary_th = (
+                f"ตลาดกำลังชะลอตัวพักฐานในโครงสร้าง{dir_th} เนื่องจาก: "
+                + " • ".join(primary_causes)
+            )
+        else:
+            flow_type = "MARKET_SLOWDOWN"
+            badge_th = "⏸️ ตลาดชะลอตัว / สะสมพลัง"
+            summary_th = "ตลาดมีการชะลอตัวเนื่องจาก: " + " • ".join(primary_causes)
+        causes_list = primary_causes
+    else:
+        dir_th = "ขาขึ้น (Uptrend)" if bias == "BULLISH" else "ขาลง (Downtrend)"
+        flow_type = "TREND_EXPANSION"
+        badge_th = f"{'🌊 เกิดเทรนด์ขาขึ้น' if bias == 'BULLISH' else '🩸 เกิดเทรนด์ขาลง'} (Vol {rvol:.2f}x)"
+        primary_causes = trend_reasons[:3] if trend_reasons else [
+            f"เส้นค่าเฉลี่ย EMA20/50/200 เรียงตัวชัดเจน และมีแรง{'ซื้อ' if bias == 'BULLISH' else 'ขาย'}คุมตลาด ({max(buy_pct, sell_pct):.0f}%)"
+        ]
+        summary_th = f"กำลังเกิดเทรนด์{dir_th}เนื่องจาก: " + " • ".join(primary_causes)
+        if slowdown_reasons:
+            summary_th += f" (หมายเหตุการชะลอตัวระยะสั้น: {slowdown_reasons[0]})"
+        causes_list = primary_causes
+
+    base_vf.update({
+        "flow_type": flow_type,
+        "badge_th": badge_th,
+        "headline_th": summary_th,
+        "causes_th": causes_list,
+        "slowdown_causes_th": slowdown_reasons,
+        "trend_causes_th": trend_reasons,
+    })
+    return base_vf
+
+
 def analyze_structure(
     bars: List[Dict[str, Any]],
     timeframe: str = "M5",
@@ -853,6 +1126,7 @@ def analyze_structure(
     rsi_div = analyze_rsi_divergence(bars, swings, rsi_list)
     inst_levels = compute_institutional_levels(bars, current_price, atr_val)
     scalping = analyze_scalping_signals(bars, closes, current_price, atr_val, inst_levels)
+    volume_flow = analyze_volume_and_flow(bars, trend, atr_val, inst_levels)
 
     # Build time-aligned EMA series for chart rendering
     ema_chart = {
@@ -888,6 +1162,7 @@ def analyze_structure(
         "rsi_divergence": rsi_div,
         "institutional_levels": inst_levels,
         "scalping": scalping,
+        "volume_flow": volume_flow,
         "swings": {
             "highs": swings["highs"][-10:],
             "lows": swings["lows"][-10:],

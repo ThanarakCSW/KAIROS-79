@@ -31,6 +31,7 @@
 
         <div class="market-meta-pills">
           <span id="trendBadge" class="meta-pill pill-neutral">Trend: —</span>
+          <span id="volFlowBadge" class="meta-pill pill-neutral" title="ปริมาณการซื้อขายสัมพัทธ์ (RVOL) และสถานะกระแสตลาด">Vol: —</span>
           <span id="sessionBadge" class="meta-pill">Session: —</span>
         </div>
       </div>
@@ -89,17 +90,15 @@
     <!-- Left: Interactive Chart + Bottom Drawer Tabs -->
     <section class="chart-stage">
       <div class="chart-wrapper">
-        <!-- Floating Chart HUD Overlay -->
+        <!-- Compact Single-Row Floating Chart HUD (Only Key Info, Never Blocks Candles) -->
         <div class="chart-hud">
           <div class="hud-row">
-            <span class="hud-tag" id="atrBadge">ATR(14): —</span>
-            <span class="hud-tag ema-tag"><i class="dot ema20"></i><span id="hudEma20">EMA20: —</span></span>
-            <span class="hud-tag ema-tag"><i class="dot ema50"></i><span id="hudEma50">EMA50: —</span></span>
-            <span class="hud-tag ema-tag"><i class="dot ema200"></i><span id="hudEma200">EMA200: —</span></span>
-            <span class="hud-tag fan-tag"><i class="dot fan-p50"></i>Monte Carlo 15,000 Paths</span>
+            <span class="hud-tag" id="atrBadge">ATR: —</span>
+            <span class="hud-tag ema-tag"><i class="dot ema20"></i><span id="hudEma20">20: —</span></span>
+            <span class="hud-tag ema-tag"><i class="dot ema50"></i><span id="hudEma50">50: —</span></span>
+            <span class="hud-tag ema-tag"><i class="dot ema200"></i><span id="hudEma200">200: —</span></span>
+            <span class="hud-tag" id="hudMtfCompact">MTF: —</span>
           </div>
-          <div class="hud-row" id="mtfHudRow"></div>
-          <div class="hud-factors" id="zoneStrip"></div>
         </div>
 
         <div id="chartContainer" class="chart-canvas-host">
@@ -108,51 +107,31 @@
         <div id="tvWidgetContainer" class="chart-canvas-host" style="display:none;"></div>
       </div>
 
-      <!-- Compact Bottom Dock (Tabs for SMC Zones, MTF & Candle Behavior, USD News, and Replay Simulator) -->
+      <!-- Focused 3-Tab Bottom Dock (Priority-First Organization) -->
       <div class="bottom-dock">
         <div class="dock-tabs">
           <div class="dock-tab-group">
-            <button class="dock-tab active" data-dock="zones">📐 โซน SMC ที่ยังใช้งานได้</button>
-            <button class="dock-tab" data-dock="mtf">🌐 4 ไทม์เฟรม • DXY • VWAP/POC</button>
-            <button class="dock-tab" data-dock="tracker">🏆 สถิติความแม่นยำ (Win-Rate)</button>
-            <button class="dock-tab" data-dock="news">📰 ปฏิทินข่าวกล่องแดง USD</button>
-            <button class="dock-tab" data-dock="replay">🎬 โหมดจำลองย้อนหลัง (Replay)</button>
+            <button class="dock-tab active" data-dock="flow">📊 วอลุ่ม &amp; กระแสตลาด</button>
+            <button class="dock-tab" data-dock="structure">📐 โซนเข้า &amp; โครงสร้าง MTF</button>
+            <button class="dock-tab" data-dock="stats">🏆 สถิติ &amp; ข่าว USD</button>
           </div>
           <span id="feedSourceLabel" class="feed-source-label">Feed: —</span>
         </div>
 
         <div class="dock-body">
-          <!-- Tab: SMC Zones -->
-          <div id="dock-zones" class="dock-pane active">
-            <div id="smcZonesList" class="compact-cards-row"></div>
+          <!-- Tab 1 (Default): Volume & Causal Market Flow -->
+          <div id="dock-flow" class="dock-pane active">
+            <div id="marketFlowList" class="flow-overview-grid"></div>
           </div>
 
-          <!-- Tab: MTF S&R + Institutional Levels + Macro + Candlestick Behavior -->
-          <div id="dock-mtf" class="dock-pane">
-            <div id="mtfCandlesList" class="compact-cards-row"></div>
+          <!-- Tab 2: Top SMC Zones + MTF + Institutional Key Levels -->
+          <div id="dock-structure" class="dock-pane">
+            <div id="structureOverviewList" class="compact-cards-row"></div>
           </div>
 
-          <!-- Tab: Signal Performance Tracker -->
-          <div id="dock-tracker" class="dock-pane">
-            <div id="signalTrackerList" class="compact-cards-row"></div>
-          </div>
-
-          <!-- Tab: News -->
-          <div id="dock-news" class="dock-pane">
-            <div id="newsPanel" class="compact-cards-row"></div>
-          </div>
-
-          <!-- Tab: Replay Controls -->
-          <div id="dock-replay" class="dock-pane">
-            <div class="replay-bar">
-              <span class="replay-hint">ใช้ทดสอบการทำงานของ SMC &amp; AI ย้อนหลังทีละแท่ง หรือกด Live Feed เพื่อดูราคาตลาดจริง:</span>
-              <div class="replay-actions">
-                <button id="btnResetSetup" class="btn-chip">⏪ กระโดดไปจุดเกิด Setup</button>
-                <button id="btnStepBar" class="btn-chip">⏭ เดินหน้า +1 แท่ง</button>
-                <button id="btnAutoReplay" class="btn-chip">▶ เล่นอัตโนมัติ</button>
-                <button id="btnLiveMode" class="btn-chip chip-live">📡 กลับสู่กราฟจริง (Live Feed)</button>
-              </div>
-            </div>
+          <!-- Tab 3: Signal Accuracy & USD Red News -->
+          <div id="dock-stats" class="dock-pane">
+            <div id="statsNewsList" class="compact-cards-row"></div>
           </div>
         </div>
       </div>
@@ -241,12 +220,12 @@
         </button>
       </div>
 
-      <!-- 2. Tabbed AI Advisor & Risk Gate Inspector (No More Clutter!) -->
+      <!-- 2. Focused Tabbed AI Advisor -->
       <div class="advisor-panel">
         <div class="advisor-tabs">
-          <button class="adv-tab active" data-tab="scenarios">🧠 แผนรับมือ 3 Scenarios</button>
-          <button class="adv-tab" data-tab="risks">🛡️ จุดบอด &amp; ด่านตรวจ</button>
-          <button class="adv-tab" data-tab="deep">📊 วิเคราะห์เจาะลึก</button>
+          <button class="adv-tab active" data-tab="scenarios">🎯 สรุปแผนหลัก</button>
+          <button class="adv-tab" data-tab="risks">🛡️ ความเสี่ยง &amp; จุดบอด</button>
+          <button class="adv-tab" data-tab="deep">🔍 เจาะลึกเชิงสถิติ</button>
         </div>
 
         <!-- Tab 1: 3 Scenarios (Default View) -->
