@@ -234,6 +234,18 @@
         addHorizontalLine(topOb.low, `${topOb.kind}`, obColor, 1);
       }
 
+      // Key Historical Support & Resistance reference lines
+      const histSr = (state.structure && state.structure.historical_sr) || [];
+      const curP = Number((state.structure && state.structure.current_price) || 0);
+      const topRes = histSr.filter(z => z.effective_role === "resistance" || z.mid > curP).slice(0, 2);
+      const topSup = histSr.filter(z => z.effective_role === "support" || z.mid <= curP).slice(0, 2);
+      topRes.forEach(r => {
+        addHorizontalLine(r.mid, `ต้านเดิม (${r.touches_count}x ${r.timeframes ? r.timeframes[0] : ""})`, "rgba(244,63,94,0.65)", 3);
+      });
+      topSup.forEach(s => {
+        addHorizontalLine(s.mid, `รับเดิม (${s.touches_count}x ${s.timeframes ? s.timeframes[0] : ""})`, "rgba(16,185,129,0.65)", 3);
+      });
+
       const mtf = state.mtf || {};
       if (mtf.nearest_htf_resistance) {
         const r = mtf.nearest_htf_resistance;
@@ -666,6 +678,27 @@
         `);
       }
 
+      // Key Historical Support & Resistance Zones
+      const histSr = (st.historical_sr || []);
+      histSr.slice(0, 4).forEach((hz) => {
+        const isFlip = hz.is_flip;
+        const cls = isFlip ? "sr-flip" : hz.effective_role === "support" ? "bull" : "bear";
+        const roleIcon = isFlip ? "🔄" : hz.effective_role === "support" ? "🛡️" : "🧱";
+        structCards.push(`
+          <div class="mini-zone-card ${cls}">
+            <div class="mini-zone-top">
+              <strong>${roleIcon} ${hz.label_th}</strong>
+              <span class="mini-zone-price">${hz.mid.toFixed(2)}</span>
+            </div>
+            <div class="mini-zone-sub">
+              <span class="badge-hist-touches">ทดสอบ ${hz.touches_count} ครั้ง</span>
+              ${isFlip ? '<span class="badge-hist-flip">S/R Flip</span>' : ''}
+              <span>${hz.description_th || ""}</span>
+            </div>
+          </div>
+        `);
+      });
+
       el("structureOverviewList").innerHTML = structCards.join("") || `<div class="mini-zone-card">กำลังสแกนหาโซน SMC ใหม่...</div>`;
     }
 
@@ -782,7 +815,9 @@
 
     el("confluenceBadge").textContent = `${setup.confluence_score || 0}%`;
     el("valLot").textContent = Number(tk.lot_size || 0).toFixed(2);
-    el("riskUsdSub").textContent = `ความเสี่ยง $${Number(tk.actual_risk_usd || 0).toFixed(2)} (${tk.risk_pct_configured || 1}%)`;
+    const lev = tk.leverage || (state.config && state.config.leverage) || 100;
+    const marginInfo = tk.margin_required_usd ? ` • Margin $${Number(tk.margin_required_usd).toFixed(2)} (1:${Math.round(lev)})` : "";
+    el("riskUsdSub").textContent = `ความเสี่ยง $${Number(tk.actual_risk_usd || 0).toFixed(2)} (${tk.risk_pct_configured || 1}%)${marginInfo}`;
     el("valEntry").textContent = Number(tk.entry_mt5 || 0).toFixed(2);
     if (el("entryHeadLabel")) {
       const isMarket = (activeOrd && activeOrd.execution_type === "MARKET") || tk.execution_type === "MARKET";
@@ -850,6 +885,13 @@
     // Populate modal settings
     const cfg = state.config || {};
     if (document.activeElement !== el("cfgBalance")) el("cfgBalance").value = cfg.account_balance ?? 5000;
+    if (document.activeElement !== el("cfgLeverage") && el("cfgLeverage")) {
+      const curLev = cfg.leverage ?? 100;
+      el("cfgLeverage").value = curLev;
+      document.querySelectorAll(".btn-lev-chip").forEach((chip) => {
+        chip.classList.toggle("active", Number(chip.dataset.lev) === Number(curLev));
+      });
+    }
     if (document.activeElement !== el("cfgRiskPct")) el("cfgRiskPct").value = cfg.risk_per_trade_pct ?? 1.0;
     if (document.activeElement !== el("cfgOffset")) el("cfgOffset").value = cfg.broker_price_offset ?? 0.0;
     if (document.activeElement !== el("cfgSpread")) el("cfgSpread").value = cfg.broker_spread_points ?? 25;
@@ -1082,7 +1124,7 @@
       const sim = currentState.simulation || {};
       const text = [
         `[MT5 Trade Ticket] ${tk.side} XAUUSD (${tk.verdict})`,
-        `Volume: ${Number(tk.lot_size).toFixed(2)} Lot (Risk $${Number(tk.actual_risk_usd).toFixed(2)})`,
+        `Volume: ${Number(tk.lot_size).toFixed(2)} Lot (Risk $${Number(tk.actual_risk_usd).toFixed(2)}) • Margin $${Number(tk.margin_required_usd || 0).toFixed(2)} (Leverage 1:${Math.round(tk.leverage || 100)})`,
         `Entry: ${Number(tk.entry_mt5).toFixed(2)}`,
         `Stop Loss: ${Number(tk.stop_mt5).toFixed(2)}`,
         `Take Profit: ${Number(tk.target_mt5).toFixed(2)} (R:R 1:${tk.reward_risk})`,
@@ -1093,11 +1135,21 @@
       showToast("คัดลอกโพยคำสั่ง MT5 ทั้งชุดเรียบร้อย!");
     });
 
+    // Leverage Preset Buttons in Settings Modal
+    document.querySelectorAll(".btn-lev-chip").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        document.querySelectorAll(".btn-lev-chip").forEach((c) => c.classList.remove("active"));
+        chip.classList.add("active");
+        if (el("cfgLeverage")) el("cfgLeverage").value = chip.dataset.lev;
+      });
+    });
+
     // Save Settings Form
     el("settingsForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       const body = {
         account_balance: parseFloat(el("cfgBalance").value),
+        leverage: parseFloat(el("cfgLeverage") ? el("cfgLeverage").value : 100) || 100,
         risk_per_trade_pct: parseFloat(el("cfgRiskPct").value),
         broker_price_offset: parseFloat(el("cfgOffset").value),
         broker_spread_points: parseFloat(el("cfgSpread").value),

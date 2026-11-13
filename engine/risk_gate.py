@@ -103,6 +103,12 @@ def evaluate_risk_and_size(
     raw_lot = risk_budget_usd / loss_per_1lot if loss_per_1lot > 0 else 0.0
     lot_size = floor_lot(raw_lot, lot_step=lot_step, max_lot=max_lot)
 
+    leverage = max(1.0, float(config.get("leverage") or 100.0))
+    margin_required_usd = round((lot_size * contract_size * entry_mt5) / leverage, 2)
+    free_margin_usd = round(balance - margin_required_usd, 2)
+    margin_level_pct = round((balance / margin_required_usd) * 100.0, 1) if margin_required_usd > 0 else 9999.0
+    max_allowed_lot = floor_lot((balance * leverage) / (contract_size * entry_mt5), lot_step=lot_step, max_lot=max_lot)
+
     actual_risk_usd = round(lot_size * sl_distance_usd * contract_size, 2)
     potential_profit_usd = round(lot_size * tp_distance_usd * contract_size, 2)
     tp1_partial_profit_usd = round((lot_size * 0.5) * abs(tp1_mt5 - entry_mt5) * contract_size, 2)
@@ -210,6 +216,20 @@ def evaluate_risk_and_size(
             "อยู่ในช่วงตลาดเปลี่ยนวัน (Rollover Gap) โบรกเกอร์มักถ่าง Spread สูง ไม่ควรเข้าออเดอร์ใหม่"
         )
 
+    # 8. Leverage & Margin check
+    if margin_required_usd > balance:
+        reject_reasons.append(
+            f"Margin ไม่พอเปิดออเดอร์ (ต้องการ ${margin_required_usd:.2f} แต่มีทุน ${balance:.2f} ที่ Leverage 1:{int(leverage)}) — แนะนำเพิ่มทุนหรือปรับ Leverage"
+        )
+    elif margin_required_usd > balance * 0.70:
+        caution_warnings.append(
+            f"Margin usage สูง ({margin_required_usd / balance * 100:.1f}% ของทุน) ที่ Leverage 1:{int(leverage)} ระวังโดน Margin Call หากเปิดออเดอร์เพิ่ม"
+        )
+    else:
+        passed_checks.append(
+            f"Margin ใช้ ${margin_required_usd:.2f} ({margin_required_usd / balance * 100:.1f}%) คงเหลือ Free Margin ${free_margin_usd:.2f} (Leverage 1:{int(leverage)})"
+        )
+
     if reject_reasons:
         verdict = "REJECT"
         if not win_prob_passed:
@@ -256,6 +276,11 @@ def evaluate_risk_and_size(
         "reward_risk": rr,
         "sl_atr_ratio": sl_atr_ratio,
         "account_balance": r2(balance),
+        "leverage": leverage,
+        "margin_required_usd": margin_required_usd,
+        "free_margin_usd": free_margin_usd,
+        "margin_level_pct": margin_level_pct,
+        "max_allowed_lot": max_allowed_lot,
         "risk_pct_configured": risk_pct,
         "risk_budget_usd": risk_budget_usd,
         "actual_risk_usd": actual_risk_usd,

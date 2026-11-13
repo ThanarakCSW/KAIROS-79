@@ -192,6 +192,9 @@ class TestAppIntegration(unittest.TestCase):
             if payload_len == 126:
                 real_len = struct.unpack("!H", frame_bytes[2:4])[0]
                 ws_json = json.loads(frame_bytes[4 : 4 + real_len].decode("utf-8"))
+            elif payload_len == 127:
+                real_len = struct.unpack("!Q", frame_bytes[2:10])[0]
+                ws_json = json.loads(frame_bytes[10 : 10 + real_len].decode("utf-8"))
             else:
                 ws_json = json.loads(frame_bytes[2 : 2 + payload_len].decode("utf-8"))
             self.assertEqual(ws_json["type"], "full_state")

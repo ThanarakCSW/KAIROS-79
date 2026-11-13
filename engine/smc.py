@@ -647,12 +647,26 @@ def build_trade_setup(
             tfs_str = "+".join(best_hz.get("confluent_timeframes") or [best_hz["timeframe"]])
             confluence_factors.append(f"HTF {tfs_str} {expected_role.upper()} Zone ({best_hz['mid']:.2f})")
 
+    # Historical Multi-Touch Support / Resistance Confluence
+    hist_sr = list(structure_res.get("historical_sr") or [])
+    expected_eff_role = "support" if side == "BUY" else "resistance"
+    near_hist = [
+        hz
+        for hz in hist_sr
+        if hz.get("effective_role") == expected_eff_role
+        and abs(entry - float(hz["mid"])) <= atr_val * 0.75
+    ]
+    if near_hist:
+        best_hist = near_hist[0]
+        confluence_score = min(100, confluence_score + 8)
+        confluence_factors.append(f"แนวรับต้านเดิมย้อนหลัง ({best_hist['touches_count']}x @ {best_hist['mid']:.2f})")
+
     # Stop Loss placement: beyond distal edge of zone + ATR buffer + Broker Spread
     sl_buffer = max(atr_val * (0.32 if is_scalp else 0.45), spread_usd * 2.0)
     min_sl_atr = 0.72 if is_scalp else 0.90
     min_target_rr = 1.25 if is_scalp else 1.55
     default_target_rr = 1.45 if is_scalp else 2.0
-    combined_sr = sr_zones + htf_zones
+    combined_sr = sr_zones + htf_zones + hist_sr
     if side == "BUY":
         raw_stop = min(zone_low - sl_buffer, entry - max(atr_val * min_sl_atr, spread_usd * 3.0))
         stop = r2(raw_stop)

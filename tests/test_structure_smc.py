@@ -92,6 +92,34 @@ class TestStructureAndSMC(unittest.TestCase):
             self.assertIn(tf, mtf["timeframes"])
         self.assertGreater(len(mtf["htf_sr_zones"]), 0)
 
+    def test_historical_sr_detection_and_multi_touch_clustering(self):
+        """Verify deep historical support and resistance clustering, touches, and flip detection."""
+        mtf_bars = {
+            "M5": self.bars,
+            "M15": resample_bars(self.bars, "M15"),
+            "H1": resample_bars(self.bars, "H1"),
+            "H4": resample_bars(self.bars, "H4"),
+        }
+        st = analyze_structure(self.bars, timeframe="M5", mtf_bars_by_tf=mtf_bars)
+        self.assertIn("historical_sr", st)
+        hist = st["historical_sr"]
+        self.assertGreater(len(hist), 0)
+
+        for z in hist:
+            self.assertIn(z["effective_role"], ("support", "resistance"))
+            self.assertGreaterEqual(z["touches_count"], 1)
+            self.assertIn("label_th", z)
+            self.assertIn("description_th", z)
+            self.assertGreater(z["strength"], 0)
+            self.assertGreater(z["mid"], 0)
+
+        # Check that nearest historical support is below current price and nearest resistance is above
+        cur_p = float(st["current_price"])
+        if st["nearest_historical_support"]:
+            self.assertLessEqual(st["nearest_historical_support"]["mid"], cur_p + 0.5)
+        if st["nearest_historical_resistance"]:
+            self.assertGreaterEqual(st["nearest_historical_resistance"]["mid"], cur_p - 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -131,6 +131,27 @@ class TestRiskGate(unittest.TestCase):
         self.assertEqual(res_ready["recommended_action"], "BUY")
         self.assertEqual(res_ready["verdict"], "PASS")
 
+    def test_leverage_and_margin_sizing_checks(self):
+        """Verify margin required calculation and gate enforcement across leverage ratios."""
+        # 1. Normal account with 1:100 leverage
+        cfg_100 = dict(self.config, account_balance=5000.0, leverage=100.0)
+        res_100 = evaluate_risk_and_size(self.setup_buy, self.sim_good, self.news_clear, cfg_100)
+        # Entry ~2650, 0.10 lot -> 0.10 * 100 * 2650 / 100 = $265 margin
+        self.assertAlmostEqual(res_100["margin_required_usd"], (res_100["lot_size"] * 100 * res_100["entry_mt5"]) / 100.0, delta=1.0)
+        self.assertEqual(res_100["leverage"], 100.0)
+        self.assertGreater(res_100["free_margin_usd"], 0)
+
+        # 2. 1:1000 leverage -> 10x smaller margin requirement
+        cfg_1000 = dict(self.config, account_balance=5000.0, leverage=1000.0)
+        res_1000 = evaluate_risk_and_size(self.setup_buy, self.sim_good, self.news_clear, cfg_1000)
+        self.assertAlmostEqual(res_1000["margin_required_usd"], res_100["margin_required_usd"] / 10.0, delta=1.0)
+
+        # 3. Small account ($100) with 1:20 leverage -> lot 0.02 requires $265.05 margin > $100 balance -> REJECT
+        cfg_micro = dict(self.config, account_balance=100.0, leverage=20.0, risk_per_trade_pct=10.0)
+        res_micro = evaluate_risk_and_size(self.setup_buy, self.sim_good, self.news_clear, cfg_micro)
+        self.assertEqual(res_micro["verdict"], "REJECT")
+        self.assertTrue(any("Margin ไม่พอ" in r for r in res_micro["reject_reasons"]))
+
 
 if __name__ == "__main__":
     unittest.main()

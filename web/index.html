@@ -112,7 +112,7 @@
         <div class="dock-tabs">
           <div class="dock-tab-group">
             <button class="dock-tab active" data-dock="flow">📊 วอลุ่ม &amp; กระแสตลาด</button>
-            <button class="dock-tab" data-dock="structure">📐 โซนเข้า &amp; โครงสร้าง MTF</button>
+            <button class="dock-tab" data-dock="structure">📐 โซน SMC &amp; แนวรับต้านเดิมย้อนหลัง</button>
             <button class="dock-tab" data-dock="stats">🏆 สถิติ &amp; ข่าว USD</button>
           </div>
           <span id="feedSourceLabel" class="feed-source-label">Feed: —</span>
@@ -324,22 +324,39 @@
         <div class="form-row">
           <label>
             <span>ขนาดพอร์ต Equity ($)</span>
-            <input type="number" step="100" id="cfgBalance" value="5000" />
+            <input type="number" step="10" id="cfgBalance" value="5000" />
             <small>ใช้คำนวณ Lot Size ทองคำอัตโนมัติ</small>
           </label>
           <label>
-            <span>ความเสี่ยงต่อไม้ (% Risk)</span>
-            <input type="number" step="0.1" id="cfgRiskPct" value="1.0" />
-            <small>แนะนำ 0.5% – 2.0% ต่อออเดอร์</small>
+            <span>อัตราทด Leverage (1:X)</span>
+            <div class="input-with-presets">
+              <input type="number" step="10" min="1" max="5000" id="cfgLeverage" value="100" />
+              <div class="leverage-presets">
+                <button type="button" class="btn-lev-chip" data-lev="100">1:100</button>
+                <button type="button" class="btn-lev-chip" data-lev="200">1:200</button>
+                <button type="button" class="btn-lev-chip" data-lev="500">1:500</button>
+                <button type="button" class="btn-lev-chip" data-lev="1000">1:1000</button>
+                <button type="button" class="btn-lev-chip" data-lev="2000">1:2000</button>
+              </div>
+            </div>
+            <small>ใช้คำนวณ Margin Required &amp; Margin Usage</small>
           </label>
         </div>
 
         <div class="form-row">
           <label>
+            <span>ความเสี่ยงต่อไม้ (% Risk)</span>
+            <input type="number" step="0.1" id="cfgRiskPct" value="1.0" />
+            <small>แนะนำ 0.5% – 2.0% ต่อออเดอร์ (คุม Drawdown)</small>
+          </label>
+          <label>
             <span>ส่วนต่างราคาโบรกเกอร์ Offset ($)</span>
             <input type="number" step="0.1" id="cfgOffset" value="0.0" />
             <small>เช่น +0.50 หรือ -1.20 เพื่อให้ตรงจอ MT5</small>
           </label>
+        </div>
+
+        <div class="form-row">
           <label>
             <span>ค่า Spread โบรกเกอร์ (Points)</span>
             <input type="number" step="1" id="cfgSpread" value="25" />

@@ -224,7 +224,7 @@ def _read_sync_ws_text(sock: ssl.SSLSocket) -> Optional[str]:
 def fetch_tradingview_gold_bars(
     timeframe: str = "M5",
     symbol: str = TV_DEFAULT_SYMBOL,
-    limit: int = 260,
+    limit: int = 450,
     timeout: float = 3.5,
 ) -> Optional[Dict[str, Any]]:
     """Primary Tier 1: Fetch real-time XAUUSD OHLCV bars & Bid/Ask directly from TradingView WebSocket (`wss://data.tradingview.com`)."""
@@ -559,9 +559,9 @@ class MarketDataHub:
             tf_last_ts = self.last_fetch_ts_by_tf.get(tf, 0.0)
             if force_refresh or not cached or (now - tf_last_ts > ttl_seconds):
                 # Tier 1 (Primary): Direct TradingView WebSocket (`OANDA:XAUUSD` / `FOREXCOM:XAUUSD`)
-                tv_res = fetch_tradingview_gold_bars(tf, symbol=TV_DEFAULT_SYMBOL, limit=260)
+                tv_res = fetch_tradingview_gold_bars(tf, symbol=TV_DEFAULT_SYMBOL, limit=450)
                 if not tv_res:
-                    tv_res = fetch_tradingview_gold_bars(tf, symbol="FOREXCOM:XAUUSD", limit=260)
+                    tv_res = fetch_tradingview_gold_bars(tf, symbol="FOREXCOM:XAUUSD", limit=450)
                 if tv_res and tv_res.get("bars"):
                     live_bars = tv_res["bars"]
                     self.latest_spot_quote = tv_res.get("quote") or self.latest_spot_quote
@@ -585,7 +585,7 @@ class MarketDataHub:
                 live_bars = fetch_yahoo_gold_bars(tf)
                 feed_name = "yahoo_gcf_fallback"
                 if not live_bars:
-                    live_bars = fetch_binance_gold_bars(tf, limit=260)
+                    live_bars = fetch_binance_gold_bars(tf, limit=450)
                     feed_name = "binance_paxgusdt_fallback"
 
                 if live_bars:

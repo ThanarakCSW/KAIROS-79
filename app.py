@@ -115,8 +115,8 @@ class TradingAssistantCore:
             for b in raw_bars
         ]
 
-        structure = analyze_structure(chart_bars, timeframe=tf)
         mtf_bars = self.hub.get_mtf_bars(primary_tf=tf, primary_bars=chart_bars, offset_usd=offset)
+        structure = analyze_structure(chart_bars, timeframe=tf, mtf_bars_by_tf=mtf_bars)
         mtf = analyze_multi_timeframe(mtf_bars, primary_tf=tf, current_price=structure["current_price"])
         macro = self.hub.get_macro_correlation(chart_bars, timeframe=tf)
         smc = analyze_smc(
@@ -330,6 +330,7 @@ class TradingAssistantCore:
             "ai_advisory": ai_advisory,
             "config": {
                 "account_balance": self.config.get("account_balance", 5000.0),
+                "leverage": float(self.config.get("leverage") or 100.0),
                 "risk_per_trade_pct": self.config.get("risk_per_trade_pct", 1.0),
                 "min_reward_risk": self.config.get("min_reward_risk", 1.5),
                 "broker_price_offset": offset,
@@ -346,6 +347,7 @@ class TradingAssistantCore:
     def update_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         for key in (
             "account_balance",
+            "leverage",
             "risk_per_trade_pct",
             "min_reward_risk",
             "broker_price_offset",

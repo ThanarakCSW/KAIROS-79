@@ -207,6 +207,213 @@ def cluster_sr_zones(
     return zones[:max_zones]
 
 
+def detect_historical_sr_levels(
+    primary_bars: List[Dict[str, Any]],
+    current_price: float,
+    atr_val: float,
+    mtf_bars_by_tf: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    primary_tf: str = "M5",
+    max_levels: int = 8,
+) -> Dict[str, Any]:
+    """Detect robust historical Support & Resistance reaction zones backwards across deep bars and HTF pivots.
+
+    Identifies:
+      1. Multi-touch historical ceilings (Resistance) and floors (Support)
+      2. S/R Flip levels (previous support broken and retested as resistance, or vice versa)
+      3. Cross-timeframe confirmation (pivots verified on H1, H4, M15)
+    """
+    if not primary_bars:
+        return {
+            "all": [],
+            "supports": [],
+            "resistances": [],
+            "nearest_support": None,
+            "nearest_resistance": None,
+        }
+
+    raw_points: List[Dict[str, Any]] = []
+    n = len(primary_bars)
+
+    # 1. Detect swings on primary timeframe with both short (3,3) and medium (7,7) fractals
+    sw_short = detect_swings(
+        primary_bars, left=3, right=3, eq_tolerance=max(0.25, atr_val * 0.15)
+    )
+    for p in sw_short.get("all", []):
+        raw_points.append(
+            {
+                "price": float(p["price"]),
+                "t": int(p["t"]),
+                "kind": p["kind"],
+                "tf": primary_tf,
+                "weight": 1.0,
+            }
+        )
+
+    if n >= 25:
+        left_m = min(8, n // 4)
+        sw_med = detect_swings(
+            primary_bars, left=left_m, right=left_m, eq_tolerance=max(0.35, atr_val * 0.20)
+        )
+        for p in sw_med.get("all", []):
+            raw_points.append(
+                {
+                    "price": float(p["price"]),
+                    "t": int(p["t"]),
+                    "kind": p["kind"],
+                    "tf": primary_tf,
+                    "weight": 1.5,
+                }
+            )
+
+    # 2. Detect swings on Higher Timeframes (M15, H1, H4) if available
+    tf_weights = {"M5": 1.0, "M15": 2.0, "H1": 3.0, "H4": 4.5}
+    if mtf_bars_by_tf:
+        for tf_name in ("M15", "H1", "H4"):
+            bars_htf = mtf_bars_by_tf.get(tf_name) or []
+            if len(bars_htf) >= 7:
+                sw_htf = detect_swings(
+                    bars_htf, left=2, right=2, eq_tolerance=max(0.40, atr_val * 0.25)
+                )
+                w = tf_weights.get(tf_name, 2.0)
+                for p in sw_htf.get("all", []):
+                    raw_points.append(
+                        {
+                            "price": float(p["price"]),
+                            "t": int(p["t"]),
+                            "kind": p["kind"],
+                            "tf": tf_name,
+                            "weight": w,
+                        }
+                    )
+
+    if not raw_points:
+        return {
+            "all": [],
+            "supports": [],
+            "resistances": [],
+            "nearest_support": None,
+            "nearest_resistance": None,
+        }
+
+    # 3. Cluster points into horizontal price zones
+    cluster_tolerance = max(0.85, atr_val * 0.50)
+    sorted_pts = sorted(raw_points, key=lambda x: x["price"])
+    clusters: List[List[Dict[str, Any]]] = []
+
+    for pt in sorted_pts:
+        if not clusters:
+            clusters.append([pt])
+            continue
+        last_cluster = clusters[-1]
+        mid = sum(x["price"] for x in last_cluster) / len(last_cluster)
+        if abs(pt["price"] - mid) <= cluster_tolerance:
+            last_cluster.append(pt)
+        else:
+            clusters.append([pt])
+
+    # 4. Form historical S/R zone objects
+    zones: List[Dict[str, Any]] = []
+    for cl in clusters:
+        prices = [x["price"] for x in cl]
+        weights = [x["weight"] for x in cl]
+        total_w = sum(weights)
+        weighted_mid = sum(p * w for p, w in zip(prices, weights)) / max(1.0, total_w)
+        low_bound = min(prices)
+        high_bound = max(prices)
+
+        high_touches = sum(1 for x in cl if x["kind"] == "high")
+        low_touches = sum(1 for x in cl if x["kind"] == "low")
+        total_touches = len(cl)
+        is_flip = high_touches > 0 and low_touches > 0
+
+        tfs = sorted(
+            list(set(x["tf"] for x in cl)),
+            key=lambda k: tf_weights.get(k, 1.0),
+            reverse=True,
+        )
+        max_tf_w = max(x["weight"] for x in cl)
+        dist = abs(current_price - weighted_mid)
+
+        # Role determination
+        if is_flip:
+            role = "SR_FLIP"
+            effective_role = "support" if current_price >= weighted_mid else "resistance"
+            label_th = (
+                "S/R Flip (ต้านเดิมทะลุเป็นรับ)"
+                if effective_role == "support"
+                else "S/R Flip (รับเดิมหลุดเป็นต้าน)"
+            )
+        elif weighted_mid <= current_price:
+            role = "SUPPORT"
+            effective_role = "support"
+            label_th = f"แนวรับเดิมย้อนหลัง ({total_touches} ครั้ง)"
+        else:
+            role = "RESISTANCE"
+            effective_role = "resistance"
+            label_th = f"แนวต้านเดิมย้อนหลัง ({total_touches} ครั้ง)"
+
+        strength = min(100, int(total_touches * 20 + max_tf_w * 10 + (20 if is_flip else 0)))
+
+        tf_tag = "/".join(tfs[:2])
+        desc_th = f"ทดสอบ {total_touches} ครั้ง ({tf_tag}) • ห่าง ${dist:.2f}"
+
+        zones.append(
+            {
+                "mid": r2(weighted_mid),
+                "low": r2(low_bound),
+                "high": r2(high_bound),
+                "role": role,
+                "effective_role": effective_role,
+                "is_flip": is_flip,
+                "touches_count": total_touches,
+                "high_touches": high_touches,
+                "low_touches": low_touches,
+                "timeframes": tfs,
+                "strength": strength,
+                "distance_usd": r2(dist),
+                "first_t": min(x["t"] for x in cl),
+                "last_t": max(x["t"] for x in cl),
+                "label_th": label_th,
+                "description_th": desc_th,
+            }
+        )
+
+    # 5. Filter for high conviction (at least 2 touches, or confirmed by H1/H4)
+    solid_zones = [
+        z
+        for z in zones
+        if z["touches_count"] >= 2 or any(tf in ("H1", "H4") for tf in z["timeframes"])
+    ]
+    if len(solid_zones) < 4:
+        solid_zones = zones
+
+    # 6. Separate into supports (below current price) and resistances (above current price)
+    supports = sorted(
+        [z for z in solid_zones if z["effective_role"] == "support"],
+        key=lambda z: z["distance_usd"],
+    )
+    resistances = sorted(
+        [z for z in solid_zones if z["effective_role"] == "resistance"],
+        key=lambda z: z["distance_usd"],
+    )
+
+    nearest_support = supports[0] if supports else None
+    nearest_resistance = resistances[0] if resistances else None
+
+    # Combined top zones (e.g. up to 4 resistances + 4 supports)
+    top_resistances = resistances[: max(1, max_levels // 2)]
+    top_supports = supports[: max(1, max_levels // 2)]
+    combined = sorted(top_resistances + top_supports, key=lambda z: z["distance_usd"])
+
+    return {
+        "all": combined,
+        "supports": top_supports,
+        "resistances": top_resistances,
+        "nearest_support": nearest_support,
+        "nearest_resistance": nearest_resistance,
+    }
+
+
 def evaluate_trend_regime(
     current_price: float,
     ema20: Optional[float],
@@ -1085,8 +1292,9 @@ def analyze_structure(
     timeframe: str = "M5",
     swing_left: int = 3,
     swing_right: int = 3,
+    mtf_bars_by_tf: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
-    """Pure function: analyze full market structure, EMAs, ATR, and S&R zones from OHLCV bars."""
+    """Pure function: analyze full market structure, EMAs, ATR, S&R zones and Historical S/R from OHLCV bars."""
     if not bars:
         raise ValueError("Cannot analyze structure on empty bar list")
 
@@ -1111,6 +1319,13 @@ def analyze_structure(
         eq_tolerance=max(0.25, atr_val * 0.15),
     )
     sr_zones = cluster_sr_zones(swings, current_price, atr_val)
+    hist_sr = detect_historical_sr_levels(
+        primary_bars=bars,
+        current_price=current_price,
+        atr_val=atr_val,
+        mtf_bars_by_tf=mtf_bars_by_tf,
+        primary_tf=timeframe,
+    )
     trend = evaluate_trend_regime(
         current_price=current_price,
         ema20=e20_list[-1],
@@ -1169,8 +1384,12 @@ def analyze_structure(
             "all": swings["all"][-16:],
         },
         "sr_zones": sr_zones,
+        "historical_sr": hist_sr.get("all", []),
+        "historical_sr_details": hist_sr,
         "nearest_support": nearest_support,
         "nearest_resistance": nearest_resistance,
+        "nearest_historical_support": hist_sr.get("nearest_support"),
+        "nearest_historical_resistance": hist_sr.get("nearest_resistance"),
         "ema_series": ema_chart,
     }
 
