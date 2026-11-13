@@ -71,6 +71,30 @@ def init_mt5_client() -> bool:
         _mt5_initialized = False
         return False
 
+def resolve_mt5_symbol(preferred_symbol: Optional[str] = None) -> Optional[str]:
+    """Find the active symbol in MT5 (e.g. XAUUSD, EURUSD, GBPUSD) with broker suffix matching."""
+    if not init_mt5_client() or _mt5 is None:
+        return None
+    try:
+        pref = (preferred_symbol or "").strip()
+        if pref:
+            s_info = _mt5.symbol_info(pref)
+            if s_info:
+                if not s_info.visible:
+                    _mt5.symbol_select(pref, True)
+                return pref
+            for suf in ["m", ".", "c", "_i", "-", "b", "pro"]:
+                cand = pref + suf
+                s_info = _mt5.symbol_info(cand)
+                if s_info:
+                    if not s_info.visible:
+                        _mt5.symbol_select(cand, True)
+                    return cand
+        return resolve_mt5_gold_symbol(preferred_symbol)
+    except Exception:
+        return None
+
+
 def resolve_mt5_gold_symbol(preferred_symbol: Optional[str] = None) -> Optional[str]:
     """Find the active gold symbol in MT5 (e.g. XAUUSD, XAUUSDm, XAUUSD., GOLD)."""
     if not init_mt5_client() or _mt5 is None:
@@ -116,7 +140,7 @@ def fetch_mt5_broker_bars(
         return None
 
     try:
-        sym = resolve_mt5_gold_symbol(preferred_symbol)
+        sym = resolve_mt5_symbol(preferred_symbol) or resolve_mt5_gold_symbol(preferred_symbol)
         if not sym:
             return None
 
@@ -126,14 +150,19 @@ def fetch_mt5_broker_bars(
         if rates is None or len(rates) == 0:
             return None
 
+        sym_info = _mt5.symbol_info(sym)
+        digits = 5 if ("EUR" in sym or "GBP" in sym) else 2
+        if sym_info and hasattr(sym_info, "digits") and isinstance(getattr(sym_info, "digits"), int):
+            digits = int(sym_info.digits)
+
         bars = []
         for r in rates:
             bars.append({
                 "t": int(r["time"]),
-                "o": round(float(r["open"]), 2),
-                "h": round(float(r["high"]), 2),
-                "l": round(float(r["low"]), 2),
-                "c": round(float(r["close"]), 2),
+                "o": round(float(r["open"]), digits),
+                "h": round(float(r["high"]), digits),
+                "l": round(float(r["low"]), digits),
+                "c": round(float(r["close"]), digits),
                 "v": float(r["tick_volume"]),
             })
 
@@ -303,13 +332,41 @@ def expand_fixture_bars_to_target(bars: List[Dict[str, Any]], target_count: int 
     return synth_bars + [dict(b) for b in bars]
 
 
-def load_fixture_bars(fixture_path: Optional[str] = None, target_count: int = 15000) -> List[Dict[str, Any]]:
+def load_fixture_bars(fixture_path: Optional[str] = None, target_count: int = 15000, symbol: str = "XAUUSD") -> List[Dict[str, Any]]:
     path = fixture_path or DEFAULT_FIXTURE
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
     bars = doc["bars"] if isinstance(doc, dict) and "bars" in doc else doc
     raw = [dict(b) for b in bars]
-    return expand_fixture_bars_to_target(raw, target_count=target_count)
+    expanded = expand_fixture_bars_to_target(raw, target_count=target_count)
+    sym_u = symbol.upper()
+    if "EUR" in sym_u:
+        scale = 1.0550 / 2650.0
+        return [
+            {
+                "t": b["t"],
+                "o": round(float(b["o"]) * scale, 5),
+                "h": round(float(b["h"]) * scale, 5),
+                "l": round(float(b["l"]) * scale, 5),
+                "c": round(float(b["c"]) * scale, 5),
+                "v": b.get("v", 0),
+            }
+            for b in expanded
+        ]
+    elif "GBP" in sym_u:
+        scale = 1.2650 / 2650.0
+        return [
+            {
+                "t": b["t"],
+                "o": round(float(b["o"]) * scale, 5),
+                "h": round(float(b["h"]) * scale, 5),
+                "l": round(float(b["l"]) * scale, 5),
+                "c": round(float(b["c"]) * scale, 5),
+                "v": b.get("v", 0),
+            }
+            for b in expanded
+        ]
+    return expanded
 
 
 def resample_bars(m5_bars: List[Dict[str, Any]], target_tf: str) -> List[Dict[str, Any]]:
@@ -772,6 +829,7 @@ class MarketDataHub:
         self.last_fetch_ts = 0.0
         self.last_fetch_ts_by_tf: Dict[str, float] = {}
         self.cached_bars_by_tf: Dict[str, List[Dict[str, Any]]] = {}
+        self.cached_bars_by_sym_tf: Dict[str, List[Dict[str, Any]]] = {}
         self.latest_spot_quote: Optional[Dict[str, Any]] = None
         self.basis_shift: float = 0.0
         self.last_macro_ts: float = 0.0
@@ -794,19 +852,52 @@ class MarketDataHub:
     def latest_spot(self, val: Optional[Dict[str, Any]]) -> None:
         self.latest_spot_quote = val
 
-    def get_bars(self, timeframe: str = "M5", force_refresh: bool = False, ttl_seconds: float = 12.0) -> Dict[str, Any]:
+    def get_bars(
+        self,
+        timeframe: str = "M5",
+        force_refresh: bool = False,
+        ttl_seconds: float = 12.0,
+        symbol: Optional[str] = None,
+    ) -> Dict[str, Any]:
         tf = timeframe.upper()
+        sym = (symbol or self.preferred_symbol or "XAUUSD").upper()
+        cache_key = f"{sym}_{tf}"
         now = time.time()
 
         if not self.replay_mode:
-            cached = self.cached_bars_by_tf.get(tf)
-            tf_last_ts = self.last_fetch_ts_by_tf.get(tf, 0.0)
+            cached = self.cached_bars_by_sym_tf.get(cache_key) if sym != "XAUUSD" else self.cached_bars_by_tf.get(tf)
+            tf_last_ts = self.last_fetch_ts_by_tf.get(cache_key if sym != "XAUUSD" else tf, 0.0)
             if force_refresh or not cached or (now - tf_last_ts > ttl_seconds):
                 # Tier 0 (Native Broker Feed): Direct MetaTrader 5 Terminal Ingestion (Windows)
-                mt5_res = fetch_mt5_broker_bars(tf, preferred_symbol=self.preferred_symbol, limit=DEFAULT_BARS_LIMIT)
+                mt5_res = fetch_mt5_broker_bars(tf, preferred_symbol=sym, limit=DEFAULT_BARS_LIMIT)
                 if mt5_res and mt5_res.get("bars"):
                     live_bars = mt5_res["bars"]
-                    self.latest_spot_quote = mt5_res.get("quote") or self.latest_spot_quote
+                    self.last_fetch_ts = now
+                    self.last_fetch_ts_by_tf[cache_key if sym != "XAUUSD" else tf] = now
+                    self.cached_bars_by_sym_tf[cache_key] = live_bars
+                    if sym == "XAUUSD":
+                        self.cached_bars_by_tf[tf] = live_bars
+                        self.latest_spot_quote = mt5_res.get("quote") or self.latest_spot_quote
+                    return {
+                        "bars": [dict(b) for b in live_bars],
+                        "source": mt5_res["source"],
+                        "timeframe": tf,
+                        "live_quote": mt5_res.get("quote"),
+                        "symbol": sym,
+                    }
+
+                # For non-gold symbols when MT5 is offline/sandbox, fallback to scaled fixture
+                if sym != "XAUUSD":
+                    bars = load_fixture_bars(target_count=300, symbol=sym)
+                    self.cached_bars_by_sym_tf[cache_key] = bars
+                    self.last_fetch_ts_by_tf[cache_key] = now
+                    return {
+                        "bars": [dict(b) for b in bars],
+                        "source": "fixture_offline",
+                        "timeframe": tf,
+                        "symbol": sym,
+                        "live_quote": {"bid": bars[-1]["c"], "ask": bars[-1]["c"] + 0.00015, "price": bars[-1]["c"]},
+                    }
                     self.basis_shift = 0.0
                     self.source = mt5_res["source"]
                     self.last_fetch_ts = now

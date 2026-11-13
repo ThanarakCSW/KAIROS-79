@@ -5,9 +5,9 @@
 //+------------------------------------------------------------------+
 #property copyright   "Copyright 2026, KAIROS-79 AI Team"
 #property link        "https://github.com/ThanarakCSW/KAIROS-79"
-#property version     "1.05"
-#property description "KAIROS-79 MetaTrader 5 Bridge Expert Advisor (EA) v1.05"
-#property description "Connects MT5 on Windows/VPS directly to KAIROS-79 AI Web Platform."
+#property version     "1.06"
+#property description "KAIROS-79 MetaTrader 5 Bridge Expert Advisor (EA) v1.06 (Cross-Asset Breadth)"
+#property description "Connects MT5 on Windows/VPS directly to KAIROS-79 AI Web Platform with Multi-Symbol Support."
 #property description "Supports Auto ON/OFF, Hard SL, Daily Kill Switch, OnTradeTransaction Deal Sync, and Step Trailing."
 #property strict
 
@@ -486,16 +486,21 @@ void SendExecutionReport(
    const string comment,
    uint error_code = 0,
    const string error_msg = "",
-   const string order_type = ""
+   const string order_type = "",
+   const string symbol_name = ""
 )
 {
+   string rep_sym = (symbol_name != "") ? symbol_name : g_symbol;
+   int p_digits = (int)SymbolInfoInteger(rep_sym, SYMBOL_DIGITS);
+   if(p_digits <= 0) p_digits = (StringFind(rep_sym, "EUR") >= 0 || StringFind(rep_sym, "GBP") >= 0) ? 5 : 2;
+
    string part1 = StringFormat(
       "{\"action_id\":\"%s\",\"signal_id\":\"%s\",\"status\":\"%s\",\"ticket\":%I64u,\"symbol\":\"%s\",\"side\":\"%s\",\"order_type\":\"%s\",\"lot\":%.2f",
-      action_id, signal_id, status, ticket, g_symbol, side, order_type, lot
+      action_id, signal_id, status, ticket, rep_sym, side, order_type, lot
    );
    string part2 = StringFormat(
-      ",\"fill_price\":%.2f,\"slippage_points\":%.1f,\"sl\":%.2f,\"tp\":%.2f,\"profit\":%.2f,\"comment\":\"%s\",\"error_code\":%u,\"error_msg\":\"%s\"}",
-      fill_price, slippage_pts, sl, tp, profit, comment, error_code, error_msg
+      ",\"fill_price\":%.*f,\"slippage_points\":%.1f,\"sl\":%.*f,\"tp\":%.*f,\"profit\":%.2f,\"comment\":\"%s\",\"error_code\":%u,\"error_msg\":\"%s\"}",
+      p_digits, fill_price, slippage_pts, p_digits, sl, p_digits, tp, profit, comment, error_code, error_msg
    );
    string payload = part1 + part2;
 
@@ -566,6 +571,8 @@ void ExecuteOpenOrder(const string action_json)
    string signal_id   = JsonExtractString(action_json, "signal_id");
    string side        = JsonExtractString(action_json, "side");
    string order_type  = JsonExtractString(action_json, "order_type");
+   string sym_req     = JsonExtractString(action_json, "symbol");
+   string target_sym  = (sym_req != "") ? sym_req : g_symbol;
    double lot         = JsonExtractDouble(action_json, "lot", 0.01);
    double price       = JsonExtractDouble(action_json, "price", 0.0);
    double sl          = JsonExtractDouble(action_json, "sl", 0.0);
@@ -577,6 +584,9 @@ void ExecuteOpenOrder(const string action_json)
    string comment     = JsonExtractString(action_json, "comment");
    if(comment == "") comment = "KAIROS-79";
 
+   if(!SymbolInfoInteger(target_sym, SYMBOL_SELECT))
+      SymbolSelect(target_sym, true);
+
    // Deduplication Guard: never process same action_id twice
    if(IsActionProcessed(action_id))
    {
@@ -585,14 +595,14 @@ void ExecuteOpenOrder(const string action_json)
    }
    MarkActionProcessed(action_id);
 
-   PrintFormat("🚀 KAIROS-79 Processing OPEN_ORDER: Side=%s, Type=%s, Lot=%.2f, Price=%.2f, SL=%.2f, TP=%.2f (ActionID=%s)",
-      side, order_type, lot, price, sl, tp, action_id);
+   PrintFormat("🚀 KAIROS-79 Processing OPEN_ORDER [%s]: Side=%s, Type=%s, Lot=%.2f, Price=%.2f, SL=%.2f, TP=%.2f (ActionID=%s)",
+      target_sym, side, order_type, lot, price, sl, tp, action_id);
 
    // 0. Safety Check: Algo Trading must be enabled in MT5
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
    {
       Print("❌ MT5 Algo Trading is DISABLED! Please click the 'Algo Trading' button in MT5 toolbar to make it GREEN.");
-      SendExecutionReport(action_id, signal_id, "FAILED_ALGO_DISABLED", 0, side, lot, 0, 0, sl, tp, 0, comment, 10027, "Algo Trading button is disabled in MT5", order_type);
+      SendExecutionReport(action_id, signal_id, "FAILED_ALGO_DISABLED", 0, side, lot, 0, 0, sl, tp, 0, comment, 10027, "Algo Trading button is disabled in MT5", order_type, target_sym);
       return;
    }
 
@@ -600,7 +610,7 @@ void ExecuteOpenOrder(const string action_json)
    if(g_daily_kill_switch_tripped)
    {
       Print("🚨 Order rejected: Daily Drawdown Kill Switch is TRIPPED!");
-      SendExecutionReport(action_id, signal_id, "REJECTED_DAILY_KILL_SWITCH", 0, side, lot, 0, 0, sl, tp, 0, comment, 10090, "Daily loss kill switch tripped", order_type);
+      SendExecutionReport(action_id, signal_id, "REJECTED_DAILY_KILL_SWITCH", 0, side, lot, 0, 0, sl, tp, 0, comment, 10090, "Daily loss kill switch tripped", order_type, target_sym);
       return;
    }
 
@@ -608,7 +618,7 @@ void ExecuteOpenOrder(const string action_json)
    if(!is_manual && InpEnableRolloverGuard && IsInRolloverWindow())
    {
       Print("🛡️ Order rejected: Inside broker rollover spread danger window");
-      SendExecutionReport(action_id, signal_id, "REJECTED_ROLLOVER", 0, side, lot, 0, 0, sl, tp, 0, comment, 10091, "Rollover spread window", order_type);
+      SendExecutionReport(action_id, signal_id, "REJECTED_ROLLOVER", 0, side, lot, 0, 0, sl, tp, 0, comment, 10091, "Rollover spread window", order_type, target_sym);
       return;
    }
 
@@ -616,7 +626,7 @@ void ExecuteOpenOrder(const string action_json)
    if(!is_manual && created_at > 0 && g_last_server_time > 0 && (g_last_server_time - created_at) > 15)
    {
       PrintFormat("⏳ Order rejected: Action %s expired (%I64d sec old)", action_id, (g_last_server_time - created_at));
-      SendExecutionReport(action_id, signal_id, "REJECTED_EXPIRED", 0, side, lot, 0, 0, sl, tp, 0, comment, 10092, "Order command expired", order_type);
+      SendExecutionReport(action_id, signal_id, "REJECTED_EXPIRED", 0, side, lot, 0, 0, sl, tp, 0, comment, 10092, "Order command expired", order_type, target_sym);
       return;
    }
 
@@ -624,18 +634,18 @@ void ExecuteOpenOrder(const string action_json)
    if(InpMaxOpenPositions > 0 && CountMagicPositions() >= InpMaxOpenPositions)
    {
       PrintFormat("🛡️ Order rejected: Max open positions (%d) reached", InpMaxOpenPositions);
-      SendExecutionReport(action_id, signal_id, "REJECTED_MAX_POSITIONS", 0, side, lot, 0, 0, sl, tp, 0, comment, 10093, "Max concurrent positions reached", order_type);
+      SendExecutionReport(action_id, signal_id, "REJECTED_MAX_POSITIONS", 0, side, lot, 0, 0, sl, tp, 0, comment, 10093, "Max concurrent positions reached", order_type, target_sym);
       return;
    }
 
    // 1. Market Tick & USD Spread Filter
    MqlTick tick;
-   if(!SymbolInfoTick(g_symbol, tick))
+   if(!SymbolInfoTick(target_sym, tick))
    {
-      SendExecutionReport(action_id, signal_id, "FAILED", 0, side, lot, 0, 0, sl, tp, 0, comment, 10001, "Cannot get market tick", order_type);
+      SendExecutionReport(action_id, signal_id, "FAILED", 0, side, lot, 0, 0, sl, tp, 0, comment, 10001, "Cannot get market tick", order_type, target_sym);
       return;
    }
-   double pt = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+   double pt = SymbolInfoDouble(target_sym, SYMBOL_POINT);
    if(pt <= 0.0) pt = _Point;
    if(pt <= 0.0) pt = 0.01;
    double spread_usd = (tick.ask > tick.bid) ? (tick.ask - tick.bid) : 0.0;
@@ -644,12 +654,12 @@ void ExecuteOpenOrder(const string action_json)
    if(InpMaxSpreadUsd > 0.0 && spread_usd > InpMaxSpreadUsd)
    {
       PrintFormat("🛡️ Order rejected: Spread $%.2f (%.1f pts) exceeds max allowed $%.2f", spread_usd, current_spread_pts, InpMaxSpreadUsd);
-      SendExecutionReport(action_id, signal_id, "REJECTED_SPREAD", 0, side, lot, 0, 0, sl, tp, 0, comment, 10002, StringFormat("Spread $%.2f exceeded limit $%.2f", spread_usd, InpMaxSpreadUsd), order_type);
+      SendExecutionReport(action_id, signal_id, "REJECTED_SPREAD", 0, side, lot, 0, 0, sl, tp, 0, comment, 10002, StringFormat("Spread $%.2f exceeded limit $%.2f", spread_usd, InpMaxSpreadUsd), order_type, target_sym);
       return;
    }
 
    // Digits, Lot Cap & Normalization
-   int digits = (int)SymbolInfoInteger(g_symbol, SYMBOL_DIGITS);
+   int digits = (int)SymbolInfoInteger(target_sym, SYMBOL_DIGITS);
    if(digits <= 0) digits = _Digits;
    if(digits <= 0) digits = 2;
    if(InpMaxLotPerOrder > 0.0 && lot > InpMaxLotPerOrder)
@@ -660,13 +670,13 @@ void ExecuteOpenOrder(const string action_json)
    price = NormalizeDouble(price, digits);
    if(sl > 0.0) sl = NormalizeDouble(sl, digits);
    if(tp > 0.0) tp = NormalizeDouble(tp, digits);
-   lot = NormalizeLot(lot, g_symbol);
+   lot = NormalizeLot(lot, target_sym);
 
    // Set Slippage in USD -> Points, Magic and Filling
    ulong eff_slip_pts = GetSlippagePoints();
    m_trade.SetDeviationInPoints(eff_slip_pts);
    m_trade.SetExpertMagicNumber(InpMagicNumber);
-   SetupFillingMode(g_symbol);
+   SetupFillingMode(target_sym);
 
    bool ok = false;
    ulong opened_ticket = 0;
@@ -674,8 +684,8 @@ void ExecuteOpenOrder(const string action_json)
    double slip_pts = 0.0;
 
    // Check minimum stop distance (StopsLevel + FreezeLevel + spread buffer)
-   long stops_lvl = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   long freeze_lvl = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   long stops_lvl = SymbolInfoInteger(target_sym, SYMBOL_TRADE_STOPS_LEVEL);
+   long freeze_lvl = SymbolInfoInteger(target_sym, SYMBOL_TRADE_FREEZE_LEVEL);
    double min_stop_dist = MathMax((double)MathMax(stops_lvl, freeze_lvl) * pt, spread_usd + 0.25);
 
    // Determine whether to execute as Market or Pending Limit
@@ -701,7 +711,7 @@ void ExecuteOpenOrder(const string action_json)
       if(MathAbs(cur_mkt - price) > max_dev_usd)
       {
          PrintFormat("⏳ Market order rejected: price moved %.2f -> %.2f (dev > $%.2f)", price, cur_mkt, max_dev_usd);
-         SendExecutionReport(action_id, signal_id, "REJECTED_DEVIATION", 0, side, lot, 0, 0, sl, tp, 0, comment, 10094, "Market price deviated too far", "MARKET");
+         SendExecutionReport(action_id, signal_id, "REJECTED_DEVIATION", 0, side, lot, 0, 0, sl, tp, 0, comment, 10094, "Market price deviated too far", "MARKET", target_sym);
          return;
       }
    }
@@ -732,7 +742,7 @@ void ExecuteOpenOrder(const string action_json)
 
    // Detect supported expiration mode
    ENUM_ORDER_TYPE_TIME exp_mode = ORDER_TIME_GTC;
-   uint exp_flags = (uint)SymbolInfoInteger(g_symbol, SYMBOL_EXPIRATION_MODE);
+   uint exp_flags = (uint)SymbolInfoInteger(target_sym, SYMBOL_EXPIRATION_MODE);
    if(exp_flags != 0 && (exp_flags & SYMBOL_EXPIRATION_GTC) == 0)
    {
       if((exp_flags & SYMBOL_EXPIRATION_DAY) != 0)
@@ -746,13 +756,13 @@ void ExecuteOpenOrder(const string action_json)
    {
       if(side == "BUY")
       {
-         ok = m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment);
+         ok = m_trade.Buy(lot, target_sym, 0.0, sl, tp, comment);
          fill_p = m_trade.ResultPrice();
          slip_pts = (fill_p > 0.0 && tick.ask > 0.0 && pt > 0.0) ? (fill_p - tick.ask) / pt : 0.0;
       }
       else
       {
-         ok = m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
+         ok = m_trade.Sell(lot, target_sym, 0.0, sl, tp, comment);
          fill_p = m_trade.ResultPrice();
          slip_pts = (fill_p > 0.0 && tick.bid > 0.0 && pt > 0.0) ? (tick.bid - fill_p) / pt : 0.0;
       }
@@ -760,9 +770,9 @@ void ExecuteOpenOrder(const string action_json)
    else
    {
       if(side == "BUY")
-         ok = m_trade.BuyLimit(lot, price, g_symbol, sl, tp, exp_mode, 0, comment);
+         ok = m_trade.BuyLimit(lot, price, target_sym, sl, tp, exp_mode, 0, comment);
       else
-         ok = m_trade.SellLimit(lot, price, g_symbol, sl, tp, exp_mode, 0, comment);
+         ok = m_trade.SellLimit(lot, price, target_sym, sl, tp, exp_mode, 0, comment);
       fill_p = price;
    }
 
@@ -781,17 +791,17 @@ void ExecuteOpenOrder(const string action_json)
          Print("⚠️ Broker rejected filling mode (10030). Retrying with IOC / RETURN while keeping SL/TP...");
          m_trade.SetTypeFilling(ORDER_FILLING_IOC);
          if(execute_as_market)
-            ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment) : m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
+            ok = (side == "BUY") ? m_trade.Buy(lot, target_sym, 0.0, sl, tp, comment) : m_trade.Sell(lot, target_sym, 0.0, sl, tp, comment);
          else
-            ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, g_symbol, sl, tp, exp_mode, 0, comment) : m_trade.SellLimit(lot, price, g_symbol, sl, tp, exp_mode, 0, comment);
+            ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, target_sym, sl, tp, exp_mode, 0, comment) : m_trade.SellLimit(lot, price, target_sym, sl, tp, exp_mode, 0, comment);
 
          if(!ok)
          {
             m_trade.SetTypeFilling(ORDER_FILLING_RETURN);
             if(execute_as_market)
-               ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment) : m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
+               ok = (side == "BUY") ? m_trade.Buy(lot, target_sym, 0.0, sl, tp, comment) : m_trade.Sell(lot, target_sym, 0.0, sl, tp, comment);
             else
-               ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, g_symbol, sl, tp, exp_mode, 0, comment) : m_trade.SellLimit(lot, price, g_symbol, sl, tp, exp_mode, 0, comment);
+               ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, target_sym, sl, tp, exp_mode, 0, comment) : m_trade.SellLimit(lot, price, target_sym, sl, tp, exp_mode, 0, comment);
          }
          if(ok)
          {
@@ -810,11 +820,11 @@ void ExecuteOpenOrder(const string action_json)
       {
          PrintFormat("⚠️ Broker rejected initial Stops/Price (Error %d: %s). Opening & enforcing SL immediately...", err, desc);
          if(execute_as_market)
-            ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, g_symbol, 0.0, 0.0, 0.0, comment);
+            ok = (side == "BUY") ? m_trade.Buy(lot, target_sym, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, target_sym, 0.0, 0.0, 0.0, comment);
          else if(allow_mkt_fallback)
          {
             execute_as_market = true;
-            ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, g_symbol, 0.0, 0.0, 0.0, comment);
+            ok = (side == "BUY") ? m_trade.Buy(lot, target_sym, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, target_sym, 0.0, 0.0, 0.0, comment);
          }
 
          if(ok)
@@ -861,7 +871,7 @@ void ExecuteOpenOrder(const string action_json)
             {
                PrintFormat("🚨 CRITICAL: Failed to attach Hard SL on Ticket #%I64u — Closing position immediately!", opened_ticket);
                m_trade.PositionClose(opened_ticket, eff_slip_pts);
-               SendExecutionReport(action_id, signal_id, "FAILED_NO_SL", opened_ticket, side, lot, fill_p, 0, 0, 0, 0, comment, 10095, "Closed immediately because Hard SL could not be attached", "MARKET");
+               SendExecutionReport(action_id, signal_id, "FAILED_NO_SL", opened_ticket, side, lot, fill_p, 0, 0, 0, 0, comment, 10095, "Closed immediately because Hard SL could not be attached", "MARKET", target_sym);
                return;
             }
          }
@@ -872,15 +882,15 @@ void ExecuteOpenOrder(const string action_json)
    if(ok && opened_ticket > 0)
    {
       string rep_status = (execute_as_market ? "FILLED" : "PLACED");
-      PrintFormat("✅ KAIROS-79 Order %s: %s (%s) %.2f %s @ %.2f (Ticket #%I64u)", rep_status, side, exec_type_label, lot, g_symbol, fill_p, opened_ticket);
-      SendExecutionReport(action_id, signal_id, rep_status, opened_ticket, side, lot, fill_p, slip_pts, sl, tp, 0, comment, 0, "OK", exec_type_label);
+      PrintFormat("✅ KAIROS-79 Order %s: %s (%s) %.2f %s @ %.2f (Ticket #%I64u)", rep_status, side, exec_type_label, lot, target_sym, fill_p, opened_ticket);
+      SendExecutionReport(action_id, signal_id, rep_status, opened_ticket, side, lot, fill_p, slip_pts, sl, tp, 0, comment, 0, "OK", exec_type_label, target_sym);
    }
    else
    {
       uint err = m_trade.ResultRetcode();
       string desc = m_trade.ResultRetcodeDescription();
       PrintFormat("❌ KAIROS-79 Order Failed: %d (%s)", err, desc);
-      SendExecutionReport(action_id, signal_id, "FAILED", 0, side, lot, 0, 0, sl, tp, 0, comment, err, desc, exec_type_label);
+      SendExecutionReport(action_id, signal_id, "FAILED", 0, side, lot, 0, 0, sl, tp, 0, comment, err, desc, exec_type_label, target_sym);
    }
 }
 
@@ -1371,7 +1381,7 @@ void UpdateChartHUD()
    }
 
    string hud = "========================================\n"
-              + "  🤖 KAIROS-79 EA Bridge v1.05\n"
+              + "  🤖 KAIROS-79 EA Bridge v1.06\n"
               + "========================================\n"
               + "  Server URL:     " + g_server_url + "\n"
               + "  Status:         " + conn_text + "\n"
@@ -1380,11 +1390,11 @@ void UpdateChartHUD()
               + "  Daily DD Guard: " + kill_text + "\n"
               + "  Rollover Guard: " + rollover_text + "\n"
               + "  Magic Number:   " + IntegerToString(InpMagicNumber) + "\n"
-              + "  Symbol:         " + g_symbol + "\n"
+              + "  Symbol:         " + g_symbol + " (Cross-Asset Active)\n"
               + "  Open/Pending:   " + IntegerToString(CountMagicPositions()) + " / " + IntegerToString(OrdersTotal()) + "\n"
               + "  Poll Interval:  " + IntegerToString(g_next_poll_ms) + "ms\n"
               + "========================================\n"
-              + (g_server_online ? "  ✅ Telemetry, Hard-SL & Deal Sync Active" : trouble_hint);
+              + (g_server_online ? "  ✅ Multi-Symbol, Hard-SL & Deal Sync Active" : trouble_hint);
 
    Comment(hud);
 }
@@ -1408,7 +1418,7 @@ int OnInit()
    CheckDailyDrawdownGuard();
 
    Print("=======================================================");
-   Print("🚀 Starting KAIROS-79 MT5 Bridge EA v1.05 on ", g_symbol);
+   Print("🚀 Starting KAIROS-79 MT5 Bridge EA v1.06 (Cross-Asset Breadth) on ", g_symbol);
    Print("🔗 Configured Server URL: ", g_server_url);
    Print("🛡️ Magic Number: ", InpMagicNumber, " | MaxSpread=$", InpMaxSpreadUsd, " | HardSL=", (InpEnforceHardSL ? "ON" : "OFF"));
    if(StringFind(g_server_url, ":8080") >= 0)

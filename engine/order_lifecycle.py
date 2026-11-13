@@ -99,8 +99,12 @@ class OrderLifecycleManager:
         except Exception:
             pass
 
-    def has_active_order(self) -> bool:
-        """Check if any order is currently active (waiting for fill or currently live in MT5)."""
+    def has_active_order(self, symbol: Optional[str] = None) -> bool:
+        """Check if any order is currently active (waiting for fill or currently live in MT5).
+        If symbol is provided, checks active orders specifically for that symbol."""
+        if symbol:
+            sym_u = symbol.upper()
+            return bool(any(o.get("status") in ("PENDING", "FILLED") and o.get("symbol", "XAUUSD").upper() == sym_u for o in self.active_orders))
         return bool(any(o.get("status") in ("PENDING", "FILLED") for o in self.active_orders))
 
     def register_trade_setup(
@@ -111,12 +115,17 @@ class OrderLifecycleManager:
         timeframe: str = "M5",
         trading_style: str = "intraday",
         force_replace: bool = False,
+        symbol: Optional[str] = None,
         **kwargs,
     ) -> Optional[Dict[str, Any]]:
         """Register a new trade setup into active tracking.
-        If an order is already active (PENDING or FILLED), keeps the existing order unless force_replace=True."""
+        If an order is already active for this symbol (PENDING or FILLED), keeps the existing order unless force_replace=True."""
         setup = smc_setup or kwargs.get("trade_setup") or kwargs.get("smc") or {}
-        if self.has_active_order() and not force_replace:
+        sym = str(symbol or risk_ticket.get("symbol") or setup.get("symbol") or "XAUUSD").upper()
+        if self.has_active_order(symbol=sym) and not force_replace:
+            for o in self.active_orders:
+                if o.get("symbol", "XAUUSD").upper() == sym and o.get("status") in ("PENDING", "FILLED"):
+                    return o
             return self.active_order
 
         # Only accept setups that passed risk gate and have a valid direction
@@ -129,16 +138,26 @@ class OrderLifecycleManager:
         if "NOW" in str(setup.get("order_type") or "") or "NOW" in str(risk_ticket.get("order_type") or ""):
             exec_type = "MARKET"
 
-        entry_mt5 = r2(risk_ticket.get("entry_mt5") or current_price)
-        stop_mt5 = r2(risk_ticket.get("stop_mt5"))
-        tp1_mt5 = r2(risk_ticket.get("tp1_mt5"))
-        target_mt5 = r2(risk_ticket.get("target_mt5"))
+        is_forex = ("EUR" in sym or "GBP" in sym or ("USD" in sym and "XAU" not in sym))
+        pip_digits = int(risk_ticket.get("pip_digits") or (5 if is_forex else 2))
+        contract_size = float(risk_ticket.get("contract_size") or (100000.0 if is_forex else 100.0))
+        point_size = float(risk_ticket.get("point_size") or (0.00001 if is_forex else 0.01))
+
+        def r_sym(v: Optional[float]) -> float:
+            if v is None or math.isnan(v) or math.isinf(v):
+                return 0.0
+            return round(float(v), pip_digits) + 0.0
+
+        entry_mt5 = r_sym(risk_ticket.get("entry_mt5") or current_price)
+        stop_mt5 = r_sym(risk_ticket.get("stop_mt5"))
+        tp1_mt5 = r_sym(risk_ticket.get("tp1_mt5"))
+        target_mt5 = r_sym(risk_ticket.get("target_mt5"))
         lot_size = float(risk_ticket.get("lot_size") or 0.10)
         actual_risk_usd = float(risk_ticket.get("actual_risk_usd") or 50.0)
         reward_risk = float(risk_ticket.get("reward_risk") or 1.5)
 
         now_ts = int(time.time())
-        order_id = f"K79-{side}-{now_ts}-O1"
+        order_id = f"K79-{sym}-{side}-{now_ts}-O1"
 
         is_filled = exec_type == "MARKET"
         initial_status = "FILLED" if is_filled else "PENDING"
@@ -147,7 +166,10 @@ class OrderLifecycleManager:
         order = {
             "order_id": order_id,
             "order_index": 1,
-            "symbol": "XAUUSD",
+            "symbol": sym,
+            "pip_digits": pip_digits,
+            "contract_size": contract_size,
+            "point_size": point_size,
             "side": side,
             "purpose": "INITIAL",
             "purpose_th": "ไม้หลัก (Initial)",
@@ -165,9 +187,9 @@ class OrderLifecycleManager:
             "trailing_step_index": 0,
             "tp1_mt5": tp1_mt5,
             "target_mt5": target_mt5,
-            "breakeven_sl_mt5": r2(risk_ticket.get("breakeven_sl_mt5") or entry_mt5),
-            "scenario_b_reentry_mt5": r2(risk_ticket.get("scenario_b_reentry_mt5") or stop_mt5),
-            "scenario_c_invalidation_mt5": r2(risk_ticket.get("scenario_c_invalidation_mt5") or stop_mt5),
+            "breakeven_sl_mt5": r_sym(risk_ticket.get("breakeven_sl_mt5") or entry_mt5),
+            "scenario_b_reentry_mt5": r_sym(risk_ticket.get("scenario_b_reentry_mt5") or stop_mt5),
+            "scenario_c_invalidation_mt5": r_sym(risk_ticket.get("scenario_c_invalidation_mt5") or stop_mt5),
             "lot_size": lot_size,
             "actual_risk_usd": actual_risk_usd,
             "potential_profit_usd": float(risk_ticket.get("potential_profit_usd") or 100.0),
@@ -189,25 +211,28 @@ class OrderLifecycleManager:
             "close_price": None,
             "close_reason": None,
             "management_note_th": (
-                f"🚀 ออเดอร์เปิดแล้ว ({order_type_str}) — ตั้ง Stop Loss ที่ {stop_mt5:.2f} และ Take Profit ที่ {target_mt5:.2f}"
+                f"🚀 ออเดอร์เปิดแล้ว ({order_type_str}) — ตั้ง Stop Loss ที่ {stop_mt5} และ Take Profit ที่ {target_mt5}"
                 if is_filled
-                else f"⏳ ตั้งคำสั่ง {order_type_str} ที่ราคา {entry_mt5:.2f} ใน MT5 — รอราคาย่อมาเกี่ยวคำสั่ง (จุดเข้าคงเดิม ไม่เปลี่ยน)"
+                else f"⏳ ตั้งคำสั่ง {order_type_str} ที่ราคา {entry_mt5} ใน MT5 — รอราคาย่อมาเกี่ยวคำสั่ง (จุดเข้าคงเดิม ไม่เปลี่ยน)"
             ),
         }
 
-        self.active_orders = [order]
+        self.active_orders = [o for o in self.active_orders if o.get("symbol", "XAUUSD").upper() != sym] + [order]
         self._sync_primary()
         self.last_event = {
             "type": "NEW_ORDER_REGISTERED",
             "order_id": order_id,
+            "symbol": sym,
             "side": side,
             "status": initial_status,
             "message": (
-                f"🔔 สัญญาณเข้าทันที: {side} NOW @ {entry_mt5:.2f} (SL {stop_mt5:.2f} | TP {target_mt5:.2f})"
+                f"🔔 สัญญาณเข้าทันที ({sym}): {side} NOW @ {entry_mt5} (SL {stop_mt5} | TP {target_mt5})"
                 if is_filled
-                else f"🔔 สัญญาณตั้งดักล่วงหน้า: {side} LIMIT @ {entry_mt5:.2f} (SL {stop_mt5:.2f} | TP {target_mt5:.2f})"
+                else f"🔔 สัญญาณตั้งดักล่วงหน้า ({sym}): {side} LIMIT @ {entry_mt5} (SL {stop_mt5} | TP {target_mt5})"
             ),
         }
+        self.save_to_disk()
+        return order
         self.save_to_disk()
         return order
 
@@ -594,6 +619,7 @@ class OrderLifecycleManager:
         ts: Optional[int] = None,
         contract_size: float = 100.0,
         config: Optional[Dict[str, Any]] = None,
+        symbol: str = "XAUUSD",
     ) -> Optional[Dict[str, Any]]:
         """Evaluate active orders against the latest price tick / candle bar.
         Returns the last significant state transition event if occurred."""
@@ -605,23 +631,31 @@ class OrderLifecycleManager:
         now_ts = int(ts or time.time())
         last_event = None
 
+        sym_u = (symbol or "XAUUSD").upper()
         remaining_orders = []
         for order in self.active_orders:
+            order_sym = str(order.get("symbol") or "XAUUSD").upper()
+            if order_sym != sym_u:
+                remaining_orders.append(order)
+                continue
+
             side = order["side"]
             entry = float(order["entry_mt5"])
             stop = float(order["stop_mt5"])
             tp1 = float(order["tp1_mt5"])
             target = float(order["target_mt5"])
             lot = float(order.get("lot_size") or 0.10)
+            order_contract = float(order.get("contract_size") or contract_size)
             risk_usd = max(1.0, float(order.get("actual_risk_usd") or 50.0))
             rr = float(order.get("reward_risk") or 1.5)
             be_sl = float(order.get("breakeven_sl_mt5") or entry)
             invalidation = float(order.get("scenario_c_invalidation_mt5") or stop)
+            pip_digits = int(order.get("pip_digits") or (5 if ("EUR" in order_sym or "GBP" in order_sym) else 2))
 
             # ---------------- Case 1: PENDING LIMIT ORDER ----------------
             if order["status"] == "PENDING":
                 dist = abs(current_price - entry)
-                order["distance_to_entry_usd"] = r2(dist)
+                order["distance_to_entry_usd"] = round(dist, pip_digits)
 
                 filled = False
                 if side == "BUY" and bar_lo <= entry:
@@ -699,7 +733,7 @@ class OrderLifecycleManager:
             elif order["status"] == "FILLED":
                 filled_p = float(order.get("filled_price") or entry)
                 delta = (current_price - filled_p) if side == "BUY" else (filled_p - current_price)
-                flt_usd = round(delta * lot * contract_size, 2)
+                flt_usd = round(delta * lot * order_contract, 2)
                 flt_r = round(flt_usd / risk_usd, 2)
 
                 order["floating_pnl_usd"] = flt_usd
@@ -723,14 +757,14 @@ class OrderLifecycleManager:
                     order["close_reason"] = "TP2_FULL_TARGET"
                     order["realized_pnl_r"] = rr
                     order["realized_pnl_usd"] = round(risk_usd * rr, 2)
-                    order["management_note_th"] = f"🏆 ชนะแตะเป้า TP2 ({target:.2f}) สมบูรณ์! (+{rr:.2f}R)"
+                    order["management_note_th"] = f"🏆 ชนะแตะเป้า TP2 ({target}) สมบูรณ์! (+{rr:.2f}R)"
                     self.order_history.append(dict(order))
                     last_event = {
                         "type": "TRADE_CLOSED_TP2",
                         "order_id": order["order_id"],
                         "side": side,
                         "pnl_r": rr,
-                        "message": f"🏆 ชนะแตะเป้า TP2 สมบูรณ์! {side} XAUUSD (+{rr:.2f}R)",
+                        "message": f"🏆 ชนะแตะเป้า TP2 สมบูรณ์! {side} {order_sym} (+{rr:.2f}R)",
                     }
                     continue
 
@@ -750,7 +784,7 @@ class OrderLifecycleManager:
                     order["realized_pnl_usd"] = flt_usd
                     order["management_note_th"] = (
                         f"🛡️ AI ปิดตัดขาดทุนเมื่อเสียเปรียบทางโครงสร้างราคา "
-                        f"({invalidation:.2f}) ก่อนชน SL เต็ม ({flt_r:+.2f}R)"
+                        f"({invalidation}) ก่อนชน SL เต็ม ({flt_r:+.2f}R)"
                     )
                     self.order_history.append(dict(order))
                     last_event = {
@@ -759,7 +793,7 @@ class OrderLifecycleManager:
                         "side": side,
                         "pnl_r": flt_r,
                         "pnl_usd": flt_usd,
-                        "message": f"🛡️ ปิดตัดขาดทุนเมื่อเสียเปรียบ: {side} @ {invalidation:.2f} ({flt_r:+.2f}R)",
+                        "message": f"🛡️ ปิดตัดขาดทุนเมื่อเสียเปรียบ: {side} @ {invalidation} ({flt_r:+.2f}R)",
                     }
                     continue
 
@@ -776,7 +810,7 @@ class OrderLifecycleManager:
                         order["status"] = "CLOSED_TRAILING"
                         order["realized_pnl_r"] = locked_r
                         order["realized_pnl_usd"] = round(risk_usd * locked_r, 2)
-                        order["management_note_th"] = f"🔒 ชน Trailing Stop ({active_sl:.2f}) ล็อกกำไร (+{locked_r:.2f}R)"
+                        order["management_note_th"] = f"🔒 ชน Trailing Stop ({active_sl}) ล็อกกำไร (+{locked_r:.2f}R)"
                         last_event = {
                             "type": "TRADE_CLOSED_TRAILING",
                             "order_id": order["order_id"],
@@ -788,7 +822,7 @@ class OrderLifecycleManager:
                         order["status"] = "CLOSED_BREAKEVEN"
                         order["realized_pnl_r"] = 0.50
                         order["realized_pnl_usd"] = round(risk_usd * 0.50, 2)
-                        order["management_note_th"] = f"🟢 ชน SL บังทุน ({active_sl:.2f}) ล็อกกำไรไม้แรก (+0.50R)"
+                        order["management_note_th"] = f"🟢 ชน SL บังทุน ({active_sl}) ล็อกกำไรไม้แรก (+0.50R)"
                         last_event = {
                             "type": "TRADE_CLOSED_BREAKEVEN",
                             "order_id": order["order_id"],
@@ -800,13 +834,13 @@ class OrderLifecycleManager:
                         order["status"] = "CLOSED_SL"
                         order["realized_pnl_r"] = -1.00
                         order["realized_pnl_usd"] = -risk_usd
-                        order["management_note_th"] = f"🔴 ชน Stop Loss ({stop:.2f}) จบแผนตามวินัย (-1.00R)"
+                        order["management_note_th"] = f"🔴 ชน Stop Loss ({stop}) จบแผนตามวินัย (-1.00R)"
                         last_event = {
                             "type": "TRADE_CLOSED_SL",
                             "order_id": order["order_id"],
                             "side": side,
                             "pnl_r": -1.00,
-                            "message": f"🔴 ออเดอร์ชน Stop Loss ที่ {stop:.2f} (-1.00R)",
+                            "message": f"🔴 ออเดอร์ชน Stop Loss ที่ {stop} (-1.00R)",
                         }
                     order["closed_ts"] = now_ts
                     order["close_price"] = active_sl
@@ -828,15 +862,15 @@ class OrderLifecycleManager:
                         order["sl_moved_breakeven"] = True
                         order["stop_mt5"] = be_sl
                         order["management_note_th"] = (
-                            f"🟢 ราคาแตะ TP1 ({tp1:.2f}) แล้ว! แนะนำแบ่งปิด 50% "
-                            f"และเลื่อน Stop Loss มาบังทุนที่ {be_sl:.2f} ทันที"
+                            f"🟢 ราคาแตะ TP1 ({tp1}) แล้ว! แนะนำแบ่งปิด 50% "
+                            f"และเลื่อน Stop Loss มาบังทุนที่ {be_sl} ทันที"
                         )
                         last_event = {
                             "type": "TP1_REACHED",
                             "order_id": order["order_id"],
                             "side": side,
                             "be_sl": be_sl,
-                            "message": f"🟢 แตะเป้า TP1 ({tp1:.2f}) แล้ว! แบ่งปิด 50% และเลื่อน SL บังทุน",
+                            "message": f"🟢 แตะเป้า TP1 ({tp1}) แล้ว! แบ่งปิด 50% และเลื่อน SL บังทุน",
                         }
 
                 # 4. Step Trailing Stop after TP1
@@ -849,15 +883,16 @@ class OrderLifecycleManager:
                     ]
                     cur_step_idx = int(order.get("trailing_step_index") or 0)
                     highest_r = float(order.get("highest_pnl_r", flt_r))
-                    sl_dist = float(order.get("initial_sl_dist") or abs(entry - stop) or (risk_usd / max(0.01, lot * contract_size)))
-                    if sl_dist < 0.10:
-                        sl_dist = max(0.50, risk_usd / max(0.01, lot * contract_size))
+                    sl_dist = float(order.get("initial_sl_dist") or abs(entry - stop) or (risk_usd / max(0.01, lot * order_contract)))
+                    min_dist = 0.0005 if ("EUR" in order_sym or "GBP" in order_sym) else 0.50
+                    if sl_dist < (0.0001 if ("EUR" in order_sym or "GBP" in order_sym) else 0.10):
+                        sl_dist = max(min_dist, risk_usd / max(0.01, lot * order_contract))
 
                     for idx_step, step in enumerate(trail_steps, 1):
                         trig_r = float(step.get("trigger_r", 999.0))
                         lck_r = float(step.get("lock_r", 0.0))
                         if highest_r >= trig_r and idx_step > cur_step_idx:
-                            cand_sl = r2(entry + (lck_r * sl_dist)) if side == "BUY" else r2(entry - (lck_r * sl_dist))
+                            cand_sl = round(entry + (lck_r * sl_dist), pip_digits) if side == "BUY" else round(entry - (lck_r * sl_dist), pip_digits)
                             cur_sl = float(order.get("stop_mt5") or 0.0)
                             improves_sl = (cand_sl > cur_sl) if side == "BUY" else (cur_sl <= 0.0 or cand_sl < cur_sl)
                             if improves_sl:
@@ -866,7 +901,7 @@ class OrderLifecycleManager:
                                 order["locked_r"] = lck_r
                                 order["management_note_th"] = (
                                     f"🔒 Step Trailing #{idx_step}: ล็อกกำไรที่ +{lck_r:.2f}R "
-                                    f"(ขยับ SL เป็น {cand_sl:.2f})"
+                                    f"(ขยับ SL เป็น {cand_sl})"
                                 )
                                 last_event = {
                                     "type": "TRAILING_STOP_UPDATED",
@@ -875,7 +910,7 @@ class OrderLifecycleManager:
                                     "new_sl": cand_sl,
                                     "locked_r": lck_r,
                                     "step_index": idx_step,
-                                    "message": f"🔒 Step Trailing: ล็อกกำไรที่ +{lck_r:.2f}R (SL {cand_sl:.2f})",
+                                    "message": f"🔒 Step Trailing: ล็อกกำไรที่ +{lck_r:.2f}R (SL {cand_sl})",
                                 }
 
                 remaining_orders.append(order)
@@ -1069,13 +1104,19 @@ class OrderLifecycleManager:
         self.save_to_disk()
         return event
 
-    def get_active_order_dict(self, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
-        """Return serialized active order data with individual positions and portfolio aggregates."""
+    def get_active_order_dict(self, current_price: Optional[float] = None, symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return serialized active order data with individual positions and portfolio aggregates.
+        If symbol is provided, filters for that specific symbol."""
         self._sync_primary()
-        if not self.active_orders:
+        target_orders = (
+            [o for o in self.active_orders if o.get("symbol", "XAUUSD").upper() == symbol.upper()]
+            if symbol
+            else self.active_orders
+        )
+        if not target_orders:
             return None
 
-        primary = self.active_orders[0]
+        primary = target_orders[0]
         out = dict(primary)
         cp = current_price if current_price is not None else float(primary.get("entry_mt5") or 0.0)
 
@@ -1085,19 +1126,21 @@ class OrderLifecycleManager:
         total_pnl_r = 0.0
         weighted_entry_sum = 0.0
 
-        for idx, ord_item in enumerate(self.active_orders, 1):
+        for idx, ord_item in enumerate(target_orders, 1):
             o_dict = dict(ord_item)
             o_dict["order_index"] = idx
             lot = float(o_dict.get("lot_size") or 0.10)
             risk_usd = max(1.0, float(o_dict.get("actual_risk_usd") or 50.0))
             entry_p = float(o_dict.get("filled_price") or o_dict.get("entry_mt5") or cp)
             side = o_dict.get("side", "BUY")
+            order_csize = float(o_dict.get("contract_size") or 100.0)
+            order_digits = int(o_dict.get("pip_digits") or 2)
 
             if o_dict.get("status") == "PENDING":
-                o_dict["distance_to_entry_usd"] = r2(abs(cp - entry_p))
+                o_dict["distance_to_entry_usd"] = round(abs(cp - entry_p), order_digits)
             elif o_dict.get("status") == "FILLED":
                 delta = (cp - entry_p) if side == "BUY" else (entry_p - cp)
-                flt_usd = round(delta * lot * 100.0, 2)
+                flt_usd = round(delta * lot * order_csize, 2)
                 flt_r = round(flt_usd / risk_usd, 2)
                 o_dict["floating_pnl_usd"] = flt_usd
                 o_dict["floating_pnl_r"] = flt_r
@@ -1109,7 +1152,8 @@ class OrderLifecycleManager:
 
             orders_data.append(o_dict)
 
-        avg_entry = round(weighted_entry_sum / total_lot, 2) if total_lot > 0 else float(primary.get("entry_mt5") or cp)
+        order_pip_digits = int(primary.get("pip_digits") or 2)
+        avg_entry = round(weighted_entry_sum / total_lot, order_pip_digits) if total_lot > 0 else float(primary.get("entry_mt5") or cp)
 
         out["orders"] = orders_data
         out["total_orders_count"] = len(orders_data)

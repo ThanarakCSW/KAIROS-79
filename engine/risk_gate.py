@@ -50,10 +50,18 @@ def evaluate_risk_and_size(
     news_status: Dict[str, Any],
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Pure function: size XAU/USD position and run deterministic Risk Gate checks."""
+    """Pure function: size position across assets and run deterministic Risk Gate checks."""
+    symbol = str(trade_setup.get("symbol") or config.get("symbol") or "XAUUSD").upper()
+    is_forex = ("EUR" in symbol or "GBP" in symbol or ("USD" in symbol and "XAU" not in symbol))
+    pip_digits = 5 if is_forex else 2
+
+    def r_sym(val: Optional[float]) -> Optional[float]:
+        return round(float(val), pip_digits) if val is not None else None
+
     balance = float(config.get("account_balance") or 5000.0)
     risk_pct = float(config.get("risk_per_trade_pct") or 1.0)
-    contract_size = float(config.get("contract_size") or 100.0)
+    def_contract_size = 100000.0 if is_forex else 100.0
+    contract_size = float(config.get("contract_size") or def_contract_size)
     min_lot = float(config.get("min_lot") or 0.01)
     max_lot = float(config.get("max_lot") or 10.0)
     lot_step = float(config.get("lot_step") or 0.01)
@@ -70,9 +78,9 @@ def evaluate_risk_and_size(
     min_win_prob = float(config.get("min_win_prob_pct") or 0.0)
 
     broker_offset = float(config.get("broker_price_offset") or 0.0)
-    spread_points = float(config.get("broker_spread_points") or 25.0)
-    point_size = float(config.get("point_size") or 0.01)
-    spread_usd = round(spread_points * point_size, 2)
+    spread_points = float(config.get("broker_spread_points") or (15.0 if is_forex else 25.0))
+    point_size = float(config.get("point_size") or (0.00001 if is_forex else 0.01))
+    spread_usd = round(spread_points * point_size, pip_digits)
 
     side = str(trade_setup["side"]).upper()
     entry_raw = float(trade_setup["entry"])
@@ -80,23 +88,24 @@ def evaluate_risk_and_size(
     target_raw = float(trade_setup["target"])
 
     # Apply Broker Offset so levels match the user's MT5 chart directly
-    entry_mt5 = r2(entry_raw + broker_offset)
-    stop_mt5 = r2(stop_raw + broker_offset)
-    target_mt5 = r2(target_raw + broker_offset)
-    scenario_b_mt5 = r2(float(trade_setup.get("scenario_b_sweep_reentry") or stop_raw) + broker_offset)
-    scenario_c_mt5 = r2(float(trade_setup.get("scenario_c_invalidation") or stop_raw) + broker_offset)
+    entry_mt5 = r_sym(entry_raw + broker_offset)
+    stop_mt5 = r_sym(stop_raw + broker_offset)
+    target_mt5 = r_sym(target_raw + broker_offset)
+    scenario_b_mt5 = r_sym(float(trade_setup.get("scenario_b_sweep_reentry") or stop_raw) + broker_offset)
+    scenario_c_mt5 = r_sym(float(trade_setup.get("scenario_c_invalidation") or stop_raw) + broker_offset)
 
-    sl_distance_usd = max(0.01, abs(entry_mt5 - stop_mt5))
-    tp_distance_usd = max(0.01, abs(target_mt5 - entry_mt5))
+    sl_distance_usd = max(point_size, abs(entry_mt5 - stop_mt5))
+    tp_distance_usd = max(point_size, abs(target_mt5 - entry_mt5))
     rr = round(tp_distance_usd / sl_distance_usd, 2)
     sl_atr_ratio = float(trade_setup.get("sl_atr_ratio") or 1.0)
 
     tp1_raw = trade_setup.get("tp1")
     if tp1_raw is not None:
-        tp1_mt5 = r2(float(tp1_raw) + broker_offset)
+        tp1_mt5 = r_sym(float(tp1_raw) + broker_offset)
     else:
-        tp1_mt5 = r2(entry_mt5 + sl_distance_usd if side == "BUY" else entry_mt5 - sl_distance_usd)
-    breakeven_sl_mt5 = r2(entry_mt5 + 0.15 if side == "BUY" else entry_mt5 - 0.15)
+        tp1_mt5 = r_sym(entry_mt5 + sl_distance_usd if side == "BUY" else entry_mt5 - sl_distance_usd)
+    breakeven_offset = 0.00015 if is_forex else 0.15
+    breakeven_sl_mt5 = r_sym(entry_mt5 + breakeven_offset if side == "BUY" else entry_mt5 - breakeven_offset)
 
     risk_budget_usd = round(balance * (risk_pct / 100.0), 2)
     loss_per_1lot = sl_distance_usd * contract_size
@@ -266,6 +275,30 @@ def evaluate_risk_and_size(
                 f"ความเสี่ยงรวมทั้งพอร์ต {total_port_risk_pct:.2f}% (อยู่ในเพดาน <= {max_portfolio_risk_pct:.2f}%)"
             )
 
+    # 12. Cross-Asset Capacity & USD Correlation Alignment Guard
+    cross_asset_cfg = config.get("cross_asset") or {}
+    if cross_asset_cfg.get("enabled", False):
+        max_open_symbols = int(cross_asset_cfg.get("max_open_symbols", 2))
+        active_open_symbols = list(config.get("active_open_symbols") or [])
+        if symbol not in active_open_symbols and len(active_open_symbols) >= max_open_symbols:
+            reject_reasons.append(
+                f"เกินโควต้าจำนวนคู่เงินที่เปิดพร้อมกัน ({len(active_open_symbols)}/{max_open_symbols} คู่: {', '.join(active_open_symbols)})"
+            )
+        else:
+            passed_checks.append(f"โควต้าคู่เงินพร้อมเทรด ({len(active_open_symbols)}/{max_open_symbols} คู่)")
+
+        if cross_asset_cfg.get("usd_correlation_guard", True):
+            usd_pairs = {"XAUUSD", "EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"}
+            if symbol in usd_pairs:
+                active_symbol_directions = dict(config.get("active_symbol_directions") or {})
+                for existing_sym, existing_side in active_symbol_directions.items():
+                    if existing_sym != symbol and existing_sym in usd_pairs:
+                        if str(existing_side).upper() != side:
+                            reject_reasons.append(
+                                f"ขัดแย้งกับทิศทาง USD Portfolio ({existing_sym} {existing_side} vs {symbol} {side}) — USD Correlation Guard ปฏิเสธเพื่อป้องกันความเสี่ยงขัดแย้ง"
+                            )
+                            break
+
     if reject_reasons:
         verdict = "REJECT"
         if not win_prob_passed:
@@ -282,13 +315,16 @@ def evaluate_risk_and_size(
     recommended_action = side if (win_prob_passed and not reject_reasons) else "WAIT"
 
     ticket = {
-        "symbol": "XAUUSD",
+        "symbol": symbol,
+        "pip_digits": pip_digits,
+        "contract_size": contract_size,
+        "point_size": point_size,
         "trading_style": trading_style,
         "side": side,
         "execution_type": "MARKET" if is_market_entry else "LIMIT",
         "order_type": trade_setup.get("order_type", f"{side} NOW (Market)" if is_market_entry else f"{side} LIMIT"),
         "is_advance_entry": bool(trade_setup.get("is_advance_entry", True)),
-        "distance_to_entry_usd": r2(float(trade_setup.get("distance_to_entry_usd") or 0.0)),
+        "distance_to_entry_usd": r_sym(float(trade_setup.get("distance_to_entry_usd") or 0.0)),
         "recommended_action": recommended_action,
         "win_prob_passed": win_prob_passed,
         "min_win_prob_pct": r2(min_win_prob),
@@ -305,8 +341,8 @@ def evaluate_risk_and_size(
         "target_mt5": target_mt5,
         "scenario_b_reentry_mt5": scenario_b_mt5,
         "scenario_c_invalidation_mt5": scenario_c_mt5,
-        "sl_distance_usd": r2(sl_distance_usd),
-        "tp_distance_usd": r2(tp_distance_usd),
+        "sl_distance_usd": r_sym(sl_distance_usd),
+        "tp_distance_usd": r_sym(tp_distance_usd),
         "sl_points": int(round(sl_distance_usd / point_size)),
         "tp_points": int(round(tp_distance_usd / point_size)),
         "reward_risk": rr,
@@ -321,7 +357,7 @@ def evaluate_risk_and_size(
         "risk_budget_usd": risk_budget_usd,
         "actual_risk_usd": actual_risk_usd,
         "potential_profit_usd": potential_profit_usd,
-        "broker_offset_usd": r2(broker_offset),
+        "broker_offset_usd": r_sym(broker_offset),
         "broker_spread_points": int(spread_points),
         "broker_spread_usd": spread_usd,
         "spread_cost_usd": spread_cost_usd,

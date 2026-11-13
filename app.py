@@ -33,6 +33,7 @@ from engine.data_feed import (
     MarketDataHub,
     fetch_live_spot_xauusd,
     fetch_mt5_live_tick,
+    resample_bars,
     stream_binance_gold_ws,
     stream_tradingview_gold_ws,
 )
@@ -580,6 +581,161 @@ class TradingAssistantCore:
             macro=macro,
         )
 
+        # --- Cross-Asset Breadth Multi-Symbol Scan (EURUSD, GBPUSD) ---
+        cross_asset_cfg = self.config.get("cross_asset") or {}
+        cross_asset_state: Dict[str, Any] = {}
+        if cross_asset_cfg.get("enabled", False):
+            symbols_to_scan = [s for s in cross_asset_cfg.get("symbols", ["XAUUSD", "EURUSD", "GBPUSD"]) if s != "XAUUSD"]
+            active_open_symbols = [
+                str(o.get("symbol", "XAUUSD")).upper()
+                for o in self.order_manager.active_orders
+                if o.get("status") in ("PENDING", "FILLED")
+            ]
+            active_symbol_directions = {
+                str(o.get("symbol", "XAUUSD")).upper(): str(o.get("side")).upper()
+                for o in self.order_manager.active_orders
+                if o.get("status") in ("PENDING", "FILLED")
+            }
+            if risk_ticket.get("verdict") in ("PASS", "CAUTION", "ACTIVE_ORDER", "PENDING_ORDER"):
+                active_symbol_directions["XAUUSD"] = str(risk_ticket["side"]).upper()
+
+            for sym in symbols_to_scan:
+                sym_feed = self.hub.get_bars("M5", symbol=sym)
+                sym_bars = sym_feed.get("bars") or []
+                if len(sym_bars) < 30:
+                    continue
+
+                is_forex = ("EUR" in sym or "GBP" in sym or ("USD" in sym and "XAU" not in sym))
+                sym_digits = 5 if is_forex else 2
+                sym_point = 0.00001 if is_forex else 0.01
+                sym_cfg_entry = (cross_asset_cfg.get("symbols_config") or {}).get(sym, {})
+                sym_contract = float(sym_cfg_entry.get("contract_size") or (100000.0 if is_forex else 100.0))
+                sym_spread_pts = float(sym_cfg_entry.get("max_spread_pts") or (18.0 if is_forex else 25.0))
+                sym_spread_usd = round(sym_spread_pts * sym_point, sym_digits)
+
+                sym_struct = analyze_structure(sym_bars, timeframe="M5")
+                sym_mtf_bars = {
+                    "H1": resample_bars(sym_bars, "H1"),
+                    "M15": resample_bars(sym_bars, "M15"),
+                }
+                sym_mtf = analyze_multi_timeframe(sym_mtf_bars, primary_tf="M5", current_price=sym_struct["current_price"])
+                sym_macro = self.hub.get_macro_correlation(sym_bars, timeframe="M5")
+                sym_smc = analyze_smc(
+                    sym_bars,
+                    timeframe="M5",
+                    spread_usd=sym_spread_usd,
+                    structure_res=sym_struct,
+                    mtf_res=sym_mtf,
+                    macro_res=sym_macro,
+                    trading_style=self.trading_style,
+                )
+                sym_setup = sym_smc.get("trade_setup") or {}
+
+                sym_opt_setup, sym_sim = optimize_setup_for_win_prob(
+                    bars=sym_bars,
+                    trade_setup=sym_setup,
+                    structure_res=sym_struct,
+                    replays=1000,
+                    bars_ahead=18,
+                    seed=sim_seed,
+                    min_win_prob_pct=min_win_prob,
+                )
+                sym_smc["trade_setup"] = sym_opt_setup
+
+                sym_risk_cfg = dict(
+                    self.config,
+                    symbol=sym,
+                    contract_size=sym_contract,
+                    point_size=sym_point,
+                    broker_price_offset=0.0,
+                    broker_spread_points=sym_spread_pts,
+                    active_open_symbols=active_open_symbols,
+                    active_symbol_directions=active_symbol_directions,
+                )
+                sym_ticket = evaluate_risk_and_size(
+                    trade_setup=sym_opt_setup,
+                    simulation=sym_sim,
+                    news_status=news,
+                    config=sym_risk_cfg,
+                )
+
+                sym_cur_p = float(sym_struct["current_price"])
+                sym_last_b = sym_bars[-1]
+                sym_hi = float(sym_last_b.get("h", sym_cur_p))
+                sym_lo = float(sym_last_b.get("l", sym_cur_p))
+                sym_ts = int(sym_last_b.get("t", time.time()))
+
+                sym_order_event = self.order_manager.update_price_tick(
+                    current_price=sym_cur_p,
+                    high=sym_hi,
+                    low=sym_lo,
+                    ts=sym_ts,
+                    contract_size=sym_contract,
+                    config=self.config,
+                    symbol=sym,
+                )
+
+                sym_active_ord = self.order_manager.get_active_order_dict(sym_cur_p, symbol=sym)
+                if not sym_active_ord:
+                    if (
+                        sym_ticket.get("win_prob_passed", False)
+                        and sym_ticket.get("verdict") in ("PASS", "CAUTION")
+                        and sym_smc["trade_setup"].get("confluence_score", 0) >= min_conf
+                    ):
+                        self.order_manager.register_trade_setup(
+                            risk_ticket=sym_ticket,
+                            smc_setup=sym_smc["trade_setup"],
+                            current_price=sym_cur_p,
+                            timeframe="M5",
+                            trading_style=self.trading_style,
+                            symbol=sym,
+                        )
+                        sym_active_ord = self.order_manager.get_active_order_dict(sym_cur_p, symbol=sym)
+
+                if self.ea_bridge.auto_trading_enabled and sym_active_ord:
+                    sym_ord_id = sym_active_ord.get("order_id")
+                    if (
+                        sym_ord_id
+                        and sym_ord_id not in self.ea_bridge.executed_signal_ids
+                        and not sym_active_ord.get("broker_ticket")
+                        and not sym_active_ord.get("ea_dispatch_status")
+                        and not any(a.get("signal_id") == sym_ord_id for a in self.ea_bridge.action_queue)
+                    ):
+                        sym_active_ord["ea_dispatch_status"] = "DISPATCHED"
+                        self.ea_bridge.enqueue_action(
+                            action_type="OPEN_ORDER",
+                            payload={
+                                "side": sym_active_ord["side"],
+                                "order_type": sym_active_ord.get("execution_type", "LIMIT"),
+                                "symbol": sym,
+                                "lot": float(sym_active_ord.get("lot_size") or 0.10),
+                                "price": float(sym_active_ord.get("entry_mt5") or sym_cur_p),
+                                "sl": float(sym_active_ord.get("stop_mt5") or 0.0),
+                                "tp": float(sym_active_ord.get("target_mt5") or 0.0),
+                                "tp1": float(sym_active_ord.get("tp1_mt5") or 0.0),
+                                "magic": 797979,
+                                "comment": f"K79-{sym}-{sym_active_ord['side']}",
+                            },
+                            signal_id=sym_ord_id,
+                        )
+
+                cross_asset_state[sym] = {
+                    "symbol": sym,
+                    "current_price": sym_cur_p,
+                    "structure": {
+                        "trend": sym_struct.get("trend"),
+                        "atr14": sym_struct.get("atr14"),
+                        "swing_points": sym_struct.get("swing_points", [])[-4:],
+                    },
+                    "smc": {
+                        "trade_setup": sym_opt_setup,
+                        "order_blocks": sym_smc.get("order_blocks", [])[:3],
+                    },
+                    "risk_ticket": sym_ticket,
+                    "active_order": sym_active_ord,
+                    "order_event": sym_order_event,
+                }
+
         fp = risk_ticket["fingerprint"]
         is_new_signal_alert = False
         min_conf = int((self.config.get("ai") or {}).get("auto_trigger_min_confluence") or 55)
@@ -632,6 +788,10 @@ class TradingAssistantCore:
             },
             "risk_ticket": risk_ticket,
             "ea_bridge": self.ea_bridge.get_status_dict(),
+            "cross_asset": {
+                "enabled": bool(cross_asset_cfg.get("enabled", False)),
+                "symbols": cross_asset_state,
+            },
             "news": news,
             "ai_advisory": ai_advisory,
             "config": {
@@ -641,6 +801,7 @@ class TradingAssistantCore:
                 "min_reward_risk": self.config.get("min_reward_risk", 1.5),
                 "broker_price_offset": offset,
                 "broker_spread_points": int(spread_pts),
+                "cross_asset_enabled": bool(cross_asset_cfg.get("enabled", False)),
                 "has_gemini_key": bool(
                     (self.config.get("ai") or {}).get("api_key")
                     or os.environ.get("GEMINI_API_KEY")
@@ -666,12 +827,17 @@ class TradingAssistantCore:
         )
         if "multi_order" in payload and isinstance(payload["multi_order"], dict):
             self.config.setdefault("multi_order", {}).update(payload["multi_order"])
+        if "cross_asset" in payload and isinstance(payload["cross_asset"], dict):
+            self.config.setdefault("cross_asset", {}).update(payload["cross_asset"])
         if "gemini_api_key" in payload:
             raw_key = str(payload["gemini_api_key"]).strip()
             if " " not in raw_key and not raw_key.startswith("[MT5"):
                 self.config.setdefault("ai", {})["api_key"] = raw_key
         save_config(self.config)
         return self.compute_full_state(force_ai=True)
+
+    def save_config(self) -> None:
+        save_config(self.config)
 
 
 # ---------------------------------------------------------------------------
@@ -1310,6 +1476,14 @@ class AssistantServer:
             self.core.order_manager.cancel_active_order(reason="SCAN_NEW_SETUP")
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, True)
             await self.broadcast(state)
+        elif action == "toggle_cross_asset":
+            ca_cfg = self.core.config.setdefault("cross_asset", {})
+            req_enable = cmd.get("enabled")
+            new_val = not bool(ca_cfg.get("enabled", False)) if req_enable is None else bool(req_enable)
+            ca_cfg["enabled"] = new_val
+            self.core.save_config()
+            state = await asyncio.to_thread(self.core.compute_full_state)
+            await self.broadcast(state)
         elif action == "add_sub_order":
             cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
             purpose = str(cmd.get("purpose") or "AUTO")
@@ -1562,6 +1736,29 @@ class AssistantServer:
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
             await self.broadcast(state)
             await self.send_http_json(writer, 200, res)
+            return
+
+        if path == "/api/cross_asset/toggle" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            ca_cfg = self.core.config.setdefault("cross_asset", {})
+            req_enable = payload.get("enabled")
+            if req_enable is None:
+                new_val = not bool(ca_cfg.get("enabled", False))
+            else:
+                new_val = bool(req_enable)
+            ca_cfg["enabled"] = new_val
+            self.core.save_config()
+            state = await asyncio.to_thread(self.core.compute_full_state)
+            await self.broadcast(state)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "cross_asset_enabled": new_val,
+                    "cross_asset": ca_cfg,
+                },
+            )
             return
 
         if path == "/api/ea/status" and method == "GET":

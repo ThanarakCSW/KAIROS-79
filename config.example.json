@@ -73,6 +73,42 @@
     "pending_expiry_minutes": 180,
     "max_adverse_distance_atr": 2.5
   },
+  "cross_asset": {
+    "enabled": false,
+    "symbols": ["XAUUSD", "EURUSD", "GBPUSD"],
+    "max_open_symbols": 2,
+    "max_total_risk_pct": 5.0,
+    "usd_correlation_guard": true,
+    "symbols_config": {
+      "XAUUSD": {
+        "contract_size": 100,
+        "point_size": 0.01,
+        "min_lot": 0.01,
+        "max_lot": 10.0,
+        "max_spread_pts": 35.0,
+        "pip_digits": 2,
+        "asset_type": "COMMODITY"
+      },
+      "EURUSD": {
+        "contract_size": 100000,
+        "point_size": 0.00001,
+        "min_lot": 0.01,
+        "max_lot": 10.0,
+        "max_spread_pts": 18.0,
+        "pip_digits": 5,
+        "asset_type": "FOREX"
+      },
+      "GBPUSD": {
+        "contract_size": 100000,
+        "point_size": 0.00001,
+        "min_lot": 0.01,
+        "max_lot": 10.0,
+        "max_spread_pts": 22.0,
+        "pip_digits": 5,
+        "asset_type": "FOREX"
+      }
+    }
+  },
   "data_feed": {
     "mode": "live_or_replay",
     "yahoo_symbol": "GC=F",
