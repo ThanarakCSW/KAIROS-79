@@ -413,6 +413,28 @@ body {
   box-shadow: 0 0 8px var(--bull);
 }
 
+.broker-feed-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #60a5fa;
+  white-space: nowrap;
+}
+
+.broker-feed-indicator .broker-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 6px #34d399;
+}
+
 @media (max-width: 1120px) {
   .topbar-primary,
   .topbar-toolbar {

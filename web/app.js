@@ -17,21 +17,6 @@
 
   const el = (id) => document.getElementById(id);
 
-  function renderTradingViewWidget(tf) {
-    const tvBox = el("tvWidgetContainer");
-    if (!tvBox) return;
-    const tfMap = { M1: "1", M5: "5", M15: "15", H1: "60", H4: "240" };
-    const interval = tfMap[tf] || "5";
-    if (lastTvTf === interval && tvBox.innerHTML.trim() !== "") return;
-    lastTvTf = interval;
-    const src =
-      `https://s.tradingview.com/widgetembed/?frameElementId=tv_xauusd_frame` +
-      `&symbol=OANDA%3AXAUUSD&interval=${interval}&hidesidetoolbar=0&symboledit=1` +
-      `&saveimage=0&toolbarbg=0c111d&studies=%5B%5D&theme=dark&style=1` +
-      `&timezone=Asia%2FBangkok&withdateranges=1&showpopupbutton=1&locale=th_TH`;
-    tvBox.innerHTML = `<iframe src="${src}" style="width:100%;height:100%;border:0;" allowtransparency="true" allowfullscreen></iframe>`;
-  }
-
   function showToast(msg) {
     const t = el("toast");
     if (!t) return;
@@ -594,7 +579,13 @@
       el("bidAskPill").textContent = `Bid ${Number(quote.bid).toFixed(2)} • Ask ${Number(quote.ask).toFixed(2)}`;
     }
     el("sessionBadge").textContent = `${session.session || "MARKET"} • ${session.bkk_time || ""}`;
-    el("feedSourceLabel").textContent = `Feed: ${state.data_source || "-"}`;
+    el("feedSourceLabel").textContent = `Feed: ${state.data_source || "โบรกเกอร์ MT5"}`;
+    if (el("brokerFeedText")) {
+      const bSym = (state.data_source && state.data_source.includes("("))
+        ? state.data_source
+        : (ea.symbol ? `โบรกเกอร์ MT5 (${ea.symbol})` : "โบรกเกอร์ MT5 (XAUUSD)");
+      el("brokerFeedText").textContent = `🏛️ ${bSym}`;
+    }
 
     // MT5 EA Bridge Status & Auto-Trading Master Switch
     const ea = state.ea_bridge || {};
@@ -1414,29 +1405,6 @@
           renderTradingViewWidget(btn.dataset.tf);
         }
         sendWs({ action: "change_tf", timeframe: btn.dataset.tf });
-      });
-    });
-
-    // Chart Mode (AI SMC Canvas vs Official TradingView XAUUSD)
-    document.querySelectorAll(".chart-mode-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        document.querySelectorAll(".chart-mode-btn").forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        activeChartMode = btn.dataset.chartMode;
-        const aiBox = el("chartContainer");
-        const tvBox = el("tvWidgetContainer");
-        const hud = document.querySelector(".chart-hud");
-        if (activeChartMode === "tv") {
-          aiBox.style.display = "none";
-          tvBox.style.display = "block";
-          if (hud) hud.style.display = "none";
-          renderTradingViewWidget(currentState ? currentState.timeframe : "M5");
-        } else {
-          tvBox.style.display = "none";
-          aiBox.style.display = "block";
-          if (hud) hud.style.display = "flex";
-          if (currentState) renderChart(currentState);
-        }
       });
     });
 

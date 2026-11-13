@@ -127,6 +127,10 @@ class EABridgeManager:
         pos_list = data.get("open_positions") or []
         tot_pnl = sum(float(p.get("profit", 0.0)) for p in pos_list)
 
+        bid = float(data["bid"]) if data.get("bid") is not None else None
+        ask = float(data["ask"]) if data.get("ask") is not None else None
+        price = float(data["price"]) if data.get("price") is not None else (bid or None)
+
         self.account_info = {
             "account_id": data.get("account_id"),
             "broker": str(data.get("broker") or "MetaTrader 5"),
@@ -139,6 +143,9 @@ class EABridgeManager:
             "margin_level_pct": round(float(data.get("margin_level_pct") or 0.0), 2),
             "spread_points": round(float(data.get("spread_points") or 0.0), 1),
             "symbol": str(data.get("symbol") or "XAUUSD"),
+            "bid": bid,
+            "ask": ask,
+            "price": price,
             "open_positions": pos_list,
             "open_positions_count": len(pos_list),
             "total_floating_pnl": round(tot_pnl, 2),

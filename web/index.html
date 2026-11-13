@@ -75,9 +75,8 @@
 
         <span class="topbar-divider" aria-hidden="true"></span>
 
-        <div class="segmented-control" id="chartModeSelector" title="สลับดูกราฟโซน AI SMC หรือกราฟ TradingView XAUUSD แท้">
-          <button class="seg-btn seg-btn-text chart-mode-btn active" data-chart-mode="ai">📊 กราฟโซน AI</button>
-          <button class="seg-btn seg-btn-text chart-mode-btn" data-chart-mode="tv">📺 TradingView แท้</button>
+        <div class="broker-feed-indicator" title="กราฟราคาอ้างอิงตรงจากโปรแกรม MT5 ของโบรกเกอร์ที่เดียว ไม่ใช้กราฟภายนอก">
+          <span class="broker-dot"></span> <span id="brokerFeedText">🏛️ โบรกเกอร์ MT5 (XAUUSD)</span>
         </div>
       </div>
 
@@ -113,7 +112,6 @@
         <div id="chartContainer" class="chart-canvas-host">
           <canvas id="fallbackCanvas" class="fallback-canvas"></canvas>
         </div>
-        <div id="tvWidgetContainer" class="chart-canvas-host" style="display:none;"></div>
       </div>
 
       <!-- Focused 3-Tab Bottom Dock (Priority-First Organization) -->

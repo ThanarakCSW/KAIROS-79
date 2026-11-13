@@ -802,7 +802,7 @@ class MarketDataHub:
             cached = self.cached_bars_by_tf.get(tf)
             tf_last_ts = self.last_fetch_ts_by_tf.get(tf, 0.0)
             if force_refresh or not cached or (now - tf_last_ts > ttl_seconds):
-                # Tier 0 (Native Broker Feed): Direct MetaTrader 5 Terminal Ingestion (Windows)
+                # Sole Authority: Direct MetaTrader 5 Terminal Ingestion (Windows Broker)
                 mt5_res = fetch_mt5_broker_bars(tf, preferred_symbol=self.preferred_symbol, limit=DEFAULT_BARS_LIMIT)
                 if mt5_res and mt5_res.get("bars"):
                     live_bars = mt5_res["bars"]
@@ -820,49 +820,11 @@ class MarketDataHub:
                         "symbol": mt5_res.get("symbol"),
                     }
 
-                # Tier 1 (Primary Fallback): Direct TradingView WebSocket (`OANDA:XAUUSD` / `FOREXCOM:XAUUSD`)
-                tv_res = fetch_tradingview_gold_bars(tf, symbol=TV_DEFAULT_SYMBOL, limit=DEFAULT_BARS_LIMIT)
-                if not tv_res:
-                    tv_res = fetch_tradingview_gold_bars(tf, symbol="FOREXCOM:XAUUSD", limit=DEFAULT_BARS_LIMIT)
-                if tv_res and tv_res.get("bars"):
-                    live_bars = tv_res["bars"]
-                    self.latest_spot_quote = tv_res.get("quote") or self.latest_spot_quote
-                    self.basis_shift = 0.0
-                    self.source = tv_res["source"]
-                    self.last_fetch_ts = now
-                    self.last_fetch_ts_by_tf[tf] = now
-                    self.cached_bars_by_tf[tf] = live_bars
+                # When MT5 is not yet running or disconnected, preserve cached broker bars
+                if cached:
                     return {
-                        "bars": [dict(b) for b in live_bars],
-                        "source": self.source,
-                        "timeframe": tf,
-                        "live_quote": self.latest_spot_quote,
-                    }
-
-                # Tier 2 & 3 (Automatic Fallback): Swissquote Spot XAU/USD + Yahoo GC=F / Binance PAXGUSDT
-                spot = fetch_live_spot_xauusd() if (now - self.last_fetch_ts > 8.0 or not self.latest_spot_quote) else self.latest_spot_quote
-                if spot:
-                    self.latest_spot_quote = spot
-
-                live_bars = fetch_yahoo_gold_bars(tf)
-                feed_name = "yahoo_gcf_fallback"
-                if not live_bars:
-                    live_bars = fetch_binance_gold_bars(tf, limit=DEFAULT_BARS_LIMIT)
-                    feed_name = "binance_paxgusdt_fallback"
-
-                if live_bars:
-                    if self.latest_spot_quote:
-                        raw_last = float(live_bars[-1]["c"])
-                        self.basis_shift = round(float(self.latest_spot_quote["price"]) - raw_last, 2)
-                        live_bars = _align_bars_to_spot(live_bars, self.latest_spot_quote)
-                        feed_name = f"live_xauusd ({self.latest_spot_quote['source']} + {feed_name.split('_')[0]})"
-                    self.source = feed_name
-                    self.last_fetch_ts = now
-                    self.last_fetch_ts_by_tf[tf] = now
-                    self.cached_bars_by_tf[tf] = live_bars
-                    return {
-                        "bars": [dict(b) for b in live_bars],
-                        "source": self.source,
+                        "bars": [dict(b) for b in cached],
+                        "source": self.source or "mt5_broker",
                         "timeframe": tf,
                         "live_quote": self.latest_spot_quote,
                     }
@@ -875,8 +837,8 @@ class MarketDataHub:
                     "live_quote": self.latest_spot_quote,
                 }
 
-        # Fallback (only when offline or when user clicks Replay controls)
-        self.source = "offline_replay" if self.replay_mode else "offline_fallback (no internet)"
+        # Offline Fallback when MT5 terminal is not yet initialized
+        self.source = "mt5_broker_offline"
         end_idx = max(60, min(len(self.fixture_bars), self.replay_cursor))
         sliced_m5 = [dict(b) for b in self.fixture_bars[:end_idx]]
         bars = resample_bars(sliced_m5, tf)

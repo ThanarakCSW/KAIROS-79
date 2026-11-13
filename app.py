@@ -762,10 +762,20 @@ class AssistantServer:
                 continue
 
             spot = None
-            if str(self.core.hub.source).startswith("mt5_broker"):
+            if HAS_MT5_LIB and _mt5_initialized:
                 spot = await asyncio.to_thread(fetch_mt5_live_tick, self.core.hub.preferred_symbol)
-            if not spot:
-                spot = await asyncio.to_thread(fetch_live_spot_xauusd)
+            if not spot and self.core.ea_bridge.account_info.get("price"):
+                acc = self.core.ea_bridge.account_info
+                spot = {
+                    "price": float(acc["price"]),
+                    "bid": float(acc.get("bid") or acc["price"]),
+                    "ask": float(acc.get("ask") or acc["price"]),
+                    "spread_points": float(acc.get("spread_points") or 0.0),
+                    "source": f"mt5_broker ({acc.get('symbol', 'XAUUSD')})",
+                    "ts": int(time.time()),
+                }
+            elif not spot and str(self.core.hub.source).startswith("mt5_broker"):
+                spot = await asyncio.to_thread(fetch_mt5_live_tick, self.core.hub.preferred_symbol)
 
             if spot:
                 self.core.hub.latest_spot_quote = spot
@@ -1315,6 +1325,20 @@ class AssistantServer:
                 self.core.config["account_balance"] = float(info["equity"])
             if info.get("symbol"):
                 self.core.hub.preferred_symbol = str(info["symbol"]).strip()
+            # Ingest live broker price / tick directly from MT5 EA heartbeat
+            if info.get("price") and float(info["price"]) > 0:
+                cur_p = float(info["price"])
+                bid_p = float(info.get("bid") or cur_p)
+                ask_p = float(info.get("ask") or cur_p)
+                self.core.hub.latest_spot = {
+                    "price": cur_p,
+                    "bid": bid_p,
+                    "ask": ask_p,
+                    "spread_points": float(info.get("spread_points") or 0.0),
+                    "source": f"mt5_broker ({info.get('symbol', 'XAUUSD')})",
+                    "time": int(time.time()),
+                    "ts": int(time.time()),
+                }
             # Broadcast state so web UI sees live MT5 status immediately
             state = self.core.last_state or {}
             if state:
@@ -1418,7 +1442,7 @@ class AssistantServer:
     async def send_http_json(
         self, writer: asyncio.StreamWriter, status: int, doc: Dict[str, Any]
     ) -> None:
-        raw = json.dumps(doc, ensure_ascii=False).encode("utf-8")
+        raw = json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         status_text = "OK" if status == 200 else "Not Found" if status == 404 else "Error"
         resp = (
             f"HTTP/1.1 {status} {status_text}\r\n"

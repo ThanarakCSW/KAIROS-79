@@ -69,42 +69,53 @@ string SanitizeServerUrl(const string raw_url)
 }
 
 //+------------------------------------------------------------------+
-//| Helper: Extract string value from simple JSON                    |
+//| Helper: Extract string value from JSON (Whitespace & Format Robust)
 //+------------------------------------------------------------------+
 string JsonExtractString(const string json, const string key)
 {
-   string search = "\"" + key + "\":\"";
-   int pos = StringFind(json, search);
-   if(pos >= 0)
+   string key_search = "\"" + key + "\"";
+   int kpos = StringFind(json, key_search);
+   if(kpos < 0) return "";
+
+   int cpos = StringFind(json, ":", kpos + StringLen(key_search));
+   if(cpos < 0) return "";
+
+   int vpos = cpos + 1;
+   int len = StringLen(json);
+   // Skip any whitespace after colon
+   while(vpos < len)
    {
-      pos += StringLen(search);
-      int end_pos = StringFind(json, "\"", pos);
-      if(end_pos > pos)
-         return StringSubstr(json, pos, end_pos - pos);
+      ushort ch = StringGetCharacter(json, vpos);
+      if(ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n')
+         vpos++;
+      else
+         break;
    }
-   // Try unquoted (numbers or bools or null)
-   search = "\"" + key + "\":";
-   pos = StringFind(json, search);
-   if(pos >= 0)
+   if(vpos >= len) return "";
+
+   // Check if quoted string value
+   if(StringGetCharacter(json, vpos) == '\"')
    {
-      pos += StringLen(search);
-      // skip whitespace
-      while(pos < StringLen(json) && (StringGetCharacter(json, pos) == ' ' || StringGetCharacter(json, pos) == '\t'))
-         pos++;
-      int end_pos = pos;
-      while(end_pos < StringLen(json))
-      {
-         ushort ch = StringGetCharacter(json, end_pos);
-         if(ch == ',' || ch == '}' || ch == ']' || ch == '\r' || ch == '\n')
-            break;
-         end_pos++;
-      }
-      string val = StringSubstr(json, pos, end_pos - pos);
-      StringTrimLeft(val);
-      StringTrimRight(val);
-      return val;
+      vpos++; // skip opening quote
+      int end_pos = StringFind(json, "\"", vpos);
+      if(end_pos >= vpos)
+         return StringSubstr(json, vpos, end_pos - vpos);
+      return "";
    }
-   return "";
+
+   // Unquoted value (number, bool, null)
+   int end_pos = vpos;
+   while(end_pos < len)
+   {
+      ushort ch = StringGetCharacter(json, end_pos);
+      if(ch == ',' || ch == '}' || ch == ']' || ch == '\r' || ch == '\n' || ch == ' ')
+         break;
+      end_pos++;
+   }
+   string val = StringSubstr(json, vpos, end_pos - vpos);
+   StringTrimLeft(val);
+   StringTrimRight(val);
+   return val;
 }
 
 double JsonExtractDouble(const string json, const string key, double default_val = 0.0)
@@ -297,9 +308,13 @@ void SendHeartbeat()
 
    string pos_json = BuildOpenPositionsJson();
 
+   double cur_price = 0.0;
+   if(tick.last > 0.0) cur_price = tick.last;
+   else if(tick.bid > 0.0) cur_price = tick.bid;
+
    string payload = StringFormat(
-      "{\"account_id\":%I64d,\"broker\":\"%s\",\"server\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"free_margin\":%.2f,\"margin_level_pct\":%.2f,\"spread_points\":%.1f,\"symbol\":\"%s\",\"open_positions\":%s}",
-      acc_id, broker, server, currency, balance, equity, margin, free_mgn, mgn_level, spread_pts, g_symbol, pos_json
+      "{\"account_id\":%I64d,\"broker\":\"%s\",\"server\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"free_margin\":%.2f,\"margin_level_pct\":%.2f,\"spread_points\":%.1f,\"symbol\":\"%s\",\"bid\":%.2f,\"ask\":%.2f,\"price\":%.2f,\"open_positions\":%s}",
+      acc_id, broker, server, currency, balance, equity, margin, free_mgn, mgn_level, spread_pts, g_symbol, tick.bid, tick.ask, cur_price, pos_json
    );
 
    string resp = "";
@@ -370,6 +385,9 @@ void ExecuteOpenOrder(const string action_json)
    double tp          = JsonExtractDouble(action_json, "tp", 0.0);
    string comment     = JsonExtractString(action_json, "comment");
    if(comment == "") comment = "KAIROS-79";
+
+   PrintFormat("🚀 KAIROS-79 Processing OPEN_ORDER: Side=%s, Type=%s, Lot=%.2f, Price=%.2f, SL=%.2f, TP=%.2f (ActionID=%s)",
+      side, order_type, lot, price, sl, tp, action_id);
 
    // 0. Safety Check: Algo Trading must be enabled in MT5
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
@@ -695,17 +713,28 @@ void PollServerActions()
    // Update auto trading flag
    g_auto_trading_enabled = JsonExtractBool(resp, "auto_trading_enabled", g_auto_trading_enabled);
 
-   // Check if actions exist
-   int act_pos = StringFind(resp, "\"actions\":[");
-   if(act_pos < 0) return;
+   // Find "actions" array robustly, handling any whitespace around ':' and '['
+   int key_pos = StringFind(resp, "\"actions\"");
+   if(key_pos < 0) return;
 
-   // Find individual action objects with proper brace depth tracking
-   int search_pos = act_pos + 10;
+   int colon_pos = StringFind(resp, ":", key_pos + 9);
+   if(colon_pos < 0) return;
+
+   int start_arr = StringFind(resp, "[", colon_pos);
+   if(start_arr < 0) return;
+
    int resp_len = StringLen(resp);
+   int search_pos = start_arr + 1;
+
    while(search_pos < resp_len)
    {
       int start_obj = StringFind(resp, "{", search_pos);
       if(start_obj < 0) break;
+
+      // Ensure { is within the actions array [ ... ]
+      int end_arr = StringFind(resp, "]", search_pos);
+      if(end_arr >= 0 && start_obj > end_arr)
+         break;
 
       int depth = 0;
       int end_obj = -1;
@@ -727,8 +756,9 @@ void PollServerActions()
 
       string action_json = StringSubstr(resp, start_obj, end_obj - start_obj + 1);
       string act_type = JsonExtractString(action_json, "type");
+      string action_id = JsonExtractString(action_json, "action_id");
 
-      PrintFormat("📥 KAIROS-79 Action Received: %s (Auto: %s)", act_type, (g_auto_trading_enabled ? "ON" : "OFF"));
+      PrintFormat("📥 KAIROS-79 Action Received: %s (Auto: %s, ActionID: %s)", act_type, (g_auto_trading_enabled ? "ON" : "OFF"), action_id);
 
       if(act_type == "OPEN_ORDER")
       {
