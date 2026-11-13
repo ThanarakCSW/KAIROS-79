@@ -18,7 +18,7 @@
   "default_timeframe": "M5",
   "trading_style": "intraday",
   "min_win_prob_pct": 50.0,
-  "simulation_replays": 15000,
+  "simulation_replays": 35000,
   "simulation_bars_ahead": 36,
   "simulation_seed": 19,
   "news_blackout_minutes": 30,

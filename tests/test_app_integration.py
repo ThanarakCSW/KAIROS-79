@@ -69,7 +69,7 @@ class TestAppIntegration(unittest.TestCase):
 
         self.assertEqual(state["type"], "full_state")
         self.assertEqual(state["symbol"], "XAUUSD")
-        self.assertEqual(state["simulation"]["replays"], 15000)
+        self.assertEqual(state["simulation"]["replays"], 35000)
         self.assertGreater(len(state["bars"]), 50)
         self.assertIn("structure", state)
         self.assertIn("market_flow", state)

@@ -130,7 +130,7 @@ class TradingAssistantCore:
             macro_res=macro,
             trading_style=self.trading_style,
         )
-        replays_cnt = max(15000, int(self.config.get("simulation_replays") or 15000))
+        replays_cnt = max(35000, int(self.config.get("simulation_replays") or 35000))
         self.config["simulation_replays"] = replays_cnt
         bars_ahead_cnt = 18 if self.trading_style == "scalping" else int(self.config.get("simulation_bars_ahead") or 36)
         sim_seed = int(self.config.get("simulation_seed") or 19)
@@ -219,7 +219,10 @@ class TradingAssistantCore:
             if act and act.get("status") == "PENDING" and act.get("trading_style") != self.trading_style:
                 self.order_manager.cancel_active_order(reason="STYLE_CHANGED")
 
-        if self.order_manager.has_active_order():
+        active_ord = self.order_manager.get_active_order_dict(cur_p) if self.order_manager.has_active_order() else None
+        is_same_style_order = bool(active_ord and active_ord.get("trading_style") == self.trading_style)
+
+        if is_same_style_order:
             # Autonomously scan and execute recovery (แก้ไม้) or scale-in (ทำกำไรเพิ่ม)
             auto_event = self.order_manager.check_and_apply_auto_multi_order(
                 current_price=cur_p,
@@ -235,7 +238,6 @@ class TradingAssistantCore:
             if auto_event and not order_event:
                 order_event = auto_event
 
-            active_ord = self.order_manager.get_active_order_dict(cur_p)
             if active_ord:
                 cur_lev = max(1.0, float(self.config.get("leverage") or 100.0))
                 act_lot = float(active_ord.get("total_lot_size", active_ord["lot_size"]))
@@ -284,17 +286,18 @@ class TradingAssistantCore:
                 and risk_ticket.get("verdict") in ("PASS", "CAUTION")
                 and smc["trade_setup"].get("confluence_score", 0) >= min_conf
             ):
-                self.order_manager.register_trade_setup(
-                    risk_ticket=risk_ticket,
-                    smc_setup=smc["trade_setup"],
-                    current_price=cur_p,
-                    timeframe=tf,
-                    trading_style=self.trading_style,
-                )
+                if not self.order_manager.has_active_order():
+                    self.order_manager.register_trade_setup(
+                        risk_ticket=risk_ticket,
+                        smc_setup=smc["trade_setup"],
+                        current_price=cur_p,
+                        timeframe=tf,
+                        trading_style=self.trading_style,
+                    )
                 risk_ticket["active_order"] = self.order_manager.get_active_order_dict(cur_p)
                 order_event = self.order_manager.last_event
             else:
-                risk_ticket["active_order"] = None
+                risk_ticket["active_order"] = active_ord
 
         # Auto-Trading Dispatch to MT5 EA Bridge when Auto-Trading is ON
         if self.ea_bridge.auto_trading_enabled:
@@ -390,6 +393,28 @@ class TradingAssistantCore:
                             },
                             signal_id=sub_id,
                         )
+
+            # Case 3: Autonomous Close / Invalidation when disadvantaged or exited
+            if order_event and order_event.get("type") in (
+                "ORDER_CLOSED_DISADVANTAGE",
+                "TRADE_CLOSED_SL",
+                "TRADE_CLOSED_TP2",
+                "TRADE_CLOSED_BREAKEVEN",
+                "ORDER_CANCELLED",
+            ):
+                ord_obj = order_event.get("order") or {}
+                tickets_to_close = []
+                if ord_obj.get("broker_ticket"):
+                    tickets_to_close.append(ord_obj.get("broker_ticket"))
+                for sub_o in ord_obj.get("orders") or []:
+                    bt = sub_o.get("broker_ticket")
+                    if bt and bt not in tickets_to_close:
+                        tickets_to_close.append(bt)
+                for t in tickets_to_close:
+                    self.ea_bridge.enqueue_action(
+                        action_type="CLOSE_ORDER",
+                        payload={"ticket": int(t), "symbol": "XAUUSD"},
+                    )
 
         signal_tracker = evaluate_signal_performance(
             bars=chart_bars,
@@ -493,7 +518,7 @@ class TradingAssistantCore:
             if key in payload and payload[key] is not None:
                 self.config[key] = float(payload[key])
         self.config["simulation_replays"] = max(
-            15000, int(self.config.get("simulation_replays") or 15000)
+            35000, int(self.config.get("simulation_replays") or 35000)
         )
         if "multi_order" in payload and isinstance(payload["multi_order"], dict):
             self.config.setdefault("multi_order", {}).update(payload["multi_order"])

@@ -359,6 +359,56 @@ class TestOrderLifecycle(unittest.TestCase):
         # Avg entry = (2650 + 2645 + 2657) / 3 = 2650.666...
         self.assertAlmostEqual(stats["avg_entry_price"], 2650.67, places=2)
 
+    def test_early_cut_disadvantage_invalidation(self):
+        """Verify early cut on structural disadvantage/invalidation before hitting full Stop Loss."""
+        risk_ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2640.00,
+            "tp1_mt5": 2660.00,
+            "target_mt5": 2670.00,
+            "lot_size": 0.10,
+            "actual_risk_usd": 100.0,
+            "potential_profit_usd": 200.0,
+            "reward_risk": 2.0,
+            "order_type": "BUY NOW (Market)",
+            "execution_type": "MARKET",
+        }
+        smc_setup = {
+            "side": "BUY",
+            "execution_type": "MARKET",
+            "confluence_score": 80,
+            "confluence_factors": ["Bullish OB"],
+        }
+        cfg = {
+            "multi_order": {
+                "auto_mode_enabled": True,
+            }
+        }
+        # 1. Register and fill
+        order = self.manager.register_trade_setup(risk_ticket, smc_setup, current_price=2650.00)
+        self.assertEqual(order["status"], "FILLED")
+
+        # 2. Price moves against position to 2645 (-0.5R) with bearish CHoCH structure break
+        self.manager.update_price_tick(current_price=2645.00, high=2650.00, low=2644.50)
+        st_bear = {
+            "breaks": [{"type": "CHOCH", "direction": "BEARISH", "level": 2646.0}],
+            "trend": {"bias": "BEARISH"},
+        }
+        ev_cut = self.manager.check_and_apply_auto_multi_order(
+            current_price=2645.00,
+            high=2646.00,
+            low=2644.50,
+            atr=3.50,
+            structure=st_bear,
+            config=cfg,
+            ts=1700000200,
+        )
+        self.assertIsNotNone(ev_cut)
+        self.assertEqual(ev_cut["type"], "ORDER_CLOSED_DISADVANTAGE")
+        self.assertIn("ตัดขาดทุนก่อนชน SL เต็ม", ev_cut["reason_th"])
+        self.assertFalse(self.manager.has_active_order())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -354,6 +354,27 @@ class OrderLifecycleManager:
         bar_hi = high if high is not None else current_price
         bar_lo = low if low is not None else current_price
 
+        # ---------------- 0. Structural Disadvantage Invalidation (ตัดขาดทุนเมื่อเสียเปรียบ) ----------------
+        breaks = st.get("breaks") or []
+        for brk in breaks:
+            if brk.get("type") == "CHOCH" and (
+                (side == "BUY" and brk.get("direction") == "BEARISH")
+                or (side == "SELL" and brk.get("direction") == "BULLISH")
+            ):
+                flt_r = float(primary.get("floating_pnl_r") or 0.0)
+                if flt_r <= -0.25:  # in disadvantage drawdown
+                    ev = self.close_active_order(
+                        reason="STRUCTURAL_DISADVANTAGE",
+                        current_price=current_price,
+                    )
+                    if ev:
+                        ev["type"] = "ORDER_CLOSED_DISADVANTAGE"
+                        ev["reason_th"] = (
+                            f"🛡️ AI ปิดตัดขาดทุนก่อนชน SL เต็ม เนื่องจากโครงสร้างเปลี่ยนทาง "
+                            f"({brk.get('type')} {brk.get('direction')})"
+                        )
+                    return ev
+
         # ---------------- 1. Recovery Opportunity (แก้ไม้ DCA) ----------------
         if cfg.get("recovery_enabled", True):
             in_drawdown = False
@@ -462,6 +483,17 @@ class OrderLifecycleManager:
                         trigger_reason = "เทรนด์แข็งแกร่ง อยู่ใต้ EMA20 พร้อมขยายกำไร"
                     else:
                         trigger_reason = "กำไรทะลุ +0.6R และโมเมนตัมขยายตัวตามแนวโน้ม"
+
+                if not trigger_reason:
+                    hist_sr = (st.get("historical_sr") or {}).get("levels") or []
+                    for sr in hist_sr:
+                        sr_p = float(sr.get("price") or 0.0)
+                        if side == "BUY" and current_price >= sr_p and primary_entry < sr_p:
+                            trigger_reason = f"ราคาทะลุแนวต้านประวัติศาสตร์ 15,000 แท่ง ({sr_p:.2f}) เพิ่มความได้เปรียบ"
+                            break
+                        elif side == "SELL" and current_price <= sr_p and primary_entry > sr_p:
+                            trigger_reason = f"ราคาทะลุแนวรับประวัติศาสตร์ 15,000 แท่ง ({sr_p:.2f}) เพิ่มความได้เปรียบ"
+                            break
 
                 if trigger_reason:
                     lot = float(primary.get("lot_size") or 0.10)
@@ -612,6 +644,35 @@ class OrderLifecycleManager:
                         "side": side,
                         "pnl_r": rr,
                         "message": f"🏆 ชนะแตะเป้า TP2 สมบูรณ์! {side} XAUUSD (+{rr:.2f}R)",
+                    }
+                    continue
+
+                # 1.5 Early Exit on Structural Disadvantage / Invalidation (ปิดเมื่อเสียเปรียบ)
+                hit_disadvantage = False
+                if side == "BUY" and bar_lo <= invalidation and invalidation > stop:
+                    hit_disadvantage = True
+                elif side == "SELL" and bar_hi >= invalidation and invalidation < stop:
+                    hit_disadvantage = True
+
+                if hit_disadvantage:
+                    order["status"] = "CLOSED_DISADVANTAGE"
+                    order["closed_ts"] = now_ts
+                    order["close_price"] = invalidation
+                    order["close_reason"] = "STRUCTURAL_DISADVANTAGE"
+                    order["realized_pnl_r"] = flt_r
+                    order["realized_pnl_usd"] = flt_usd
+                    order["management_note_th"] = (
+                        f"🛡️ AI ปิดตัดขาดทุนเมื่อเสียเปรียบทางโครงสร้างราคา "
+                        f"({invalidation:.2f}) ก่อนชน SL เต็ม ({flt_r:+.2f}R)"
+                    )
+                    self.order_history.append(dict(order))
+                    last_event = {
+                        "type": "ORDER_CLOSED_DISADVANTAGE",
+                        "order_id": order["order_id"],
+                        "side": side,
+                        "pnl_r": flt_r,
+                        "pnl_usd": flt_usd,
+                        "message": f"🛡️ ปิดตัดขาดทุนเมื่อเสียเปรียบ: {side} @ {invalidation:.2f} ({flt_r:+.2f}R)",
                     }
                     continue
 

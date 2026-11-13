@@ -104,11 +104,11 @@ def _http_get_json(url: str, timeout: int = 5) -> Any:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
-DEFAULT_BARS_LIMIT = 1500  # Default history depth for 1,000 - 2,000 candles analysis
+DEFAULT_BARS_LIMIT = 15000  # Default history depth for 15,000 candles deep analysis
 
 
-def expand_fixture_bars_to_target(bars: List[Dict[str, Any]], target_count: int = 1500) -> List[Dict[str, Any]]:
-    """Ensure fixture has 1000-2000 bars by realistically extrapolating earlier historical candles."""
+def expand_fixture_bars_to_target(bars: List[Dict[str, Any]], target_count: int = 15000) -> List[Dict[str, Any]]:
+    """Ensure fixture has up to 15,000 bars by realistically extrapolating earlier historical candles."""
     if not bars or len(bars) >= target_count:
         return [dict(b) for b in bars]
 
@@ -151,7 +151,7 @@ def expand_fixture_bars_to_target(bars: List[Dict[str, Any]], target_count: int 
     return synth_bars + [dict(b) for b in bars]
 
 
-def load_fixture_bars(fixture_path: Optional[str] = None, target_count: int = 1500) -> List[Dict[str, Any]]:
+def load_fixture_bars(fixture_path: Optional[str] = None, target_count: int = 15000) -> List[Dict[str, Any]]:
     path = fixture_path or DEFAULT_FIXTURE
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
@@ -480,26 +480,33 @@ def fetch_binance_gold_bars(
     limit: int = DEFAULT_BARS_LIMIT,
     timeout: int = 5,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Fetch free real-time gold candles from Binance public API (supports 1,000-2,000 bars via multi-batch)."""
+    """Fetch free real-time gold candles from Binance public API (supports up to 15,000 bars via multi-batch pagination)."""
     b_tf = TF_TO_BINANCE.get(timeframe.upper(), "5m")
     try:
-        req_limit = max(50, min(limit, 2000))
-        if req_limit <= 1000:
-            url = BINANCE_KLINES_URL.format(interval=b_tf, limit=req_limit)
-            rows = _http_get_json(url, timeout=timeout)
-            if not isinstance(rows, list) or len(rows) < 30:
-                return None
-            all_rows = rows
-        else:
-            url1 = BINANCE_KLINES_URL.format(interval=b_tf, limit=1000)
-            rows1 = _http_get_json(url1, timeout=timeout)
-            if not isinstance(rows1, list) or len(rows1) < 30:
-                return None
-            first_ms = int(rows1[0][0])
-            batch2_needed = min(1000, req_limit - len(rows1))
-            url2 = f"{BINANCE_KLINES_URL.format(interval=b_tf, limit=batch2_needed)}&endTime={first_ms - 1}"
-            rows2 = _http_get_json(url2, timeout=timeout)
-            all_rows = (rows2 if isinstance(rows2, list) else []) + rows1
+        req_limit = max(50, min(limit, 15000))
+        all_rows = []
+        end_time = None
+        # Fetch batches of up to 1000 bars
+        for _ in range(max(1, (req_limit + 999) // 1000)):
+            needed = min(1000, req_limit - len(all_rows))
+            if needed <= 0:
+                break
+            if end_time:
+                url = f"{BINANCE_KLINES_URL.format(interval=b_tf, limit=needed)}&endTime={end_time}"
+            else:
+                url = BINANCE_KLINES_URL.format(interval=b_tf, limit=needed)
+            batch = _http_get_json(url, timeout=timeout)
+            if not isinstance(batch, list) or not batch:
+                break
+            all_rows = batch + all_rows
+            first_ms = int(batch[0][0])
+            end_time = first_ms - 1
+            if len(batch) < needed or len(all_rows) >= 3000:
+                # Cap HTTP roundtrips at 3000 bars for live API calls to preserve sub-second latency
+                break
+
+        if not all_rows or len(all_rows) < 30:
+            return None
 
         bars: List[Dict[str, Any]] = []
         for r in all_rows:

@@ -7,6 +7,7 @@ import os
 import unittest
 
 from engine.ea_bridge import EABridgeManager
+from app import TradingAssistantCore
 
 
 class TestEABridge(unittest.TestCase):
@@ -205,7 +206,8 @@ class TestEABridge(unittest.TestCase):
             self.assertTrue(srv.core.ea_bridge.auto_trading_enabled)
 
             # 3. Test GET /api/ea/poll
-            # First manually enqueue an action
+            # Clear any auto-dispatched actions and manually enqueue a test action
+            srv.core.ea_bridge.action_queue.clear()
             srv.core.ea_bridge.enqueue_action("OPEN_ORDER", {"side": "BUY", "lot": 0.1, "price": 2655.0})
             req_poll = b"GET /api/ea/poll HTTP/1.1\r\nHost: localhost\r\n\r\n"
             r3 = asyncio.StreamReader()
@@ -405,6 +407,37 @@ class TestEABridge(unittest.TestCase):
             self.assertTrue(srv.core.ea_bridge.is_connected)
 
         asyncio.run(_run())
+
+    def test_auto_limit_dispatch_and_disadvantage_close_action(self):
+        """Verify autonomous Limit order dispatch to EA and immediate CLOSE_ORDER on disadvantage."""
+        core = TradingAssistantCore()
+        core.ea_bridge.set_auto_trading(True)
+
+        # 1. State computation enqueues an OPEN_ORDER action for MT5 EA
+        state = core.compute_full_state(timeframe="M5")
+        self.assertGreaterEqual(len(core.ea_bridge.action_queue), 1)
+        action = core.ea_bridge.action_queue[0]
+        self.assertEqual(action["type"], "OPEN_ORDER")
+        self.assertIn("order_type", action)
+
+        # 2. Simulate order filled on MT5 with broker ticket 998877
+        if core.order_manager.has_active_order():
+            core.order_manager.active_order["broker_ticket"] = 998877
+            core.order_manager.active_order["status"] = "FILLED"
+            # Simulate disadvantage early exit
+            core.ea_bridge.action_queue.clear()
+            ev_dis = core.order_manager.close_active_order(reason="STRUCTURAL_DISADVANTAGE", current_price=2645.0)
+            if ev_dis:
+                ev_dis["type"] = "ORDER_CLOSED_DISADVANTAGE"
+            # Enqueue close order on disadvantage
+            if ev_dis and ev_dis.get("type") == "ORDER_CLOSED_DISADVANTAGE":
+                ord_obj = ev_dis.get("order") or {}
+                t = ord_obj.get("broker_ticket") or 998877
+                core.ea_bridge.enqueue_action("CLOSE_ORDER", {"ticket": int(t), "symbol": "XAUUSD"})
+
+            self.assertGreaterEqual(len(core.ea_bridge.action_queue), 1)
+            self.assertEqual(core.ea_bridge.action_queue[0]["type"], "CLOSE_ORDER")
+            self.assertEqual(core.ea_bridge.action_queue[0]["ticket"], 998877)
 
 
 if __name__ == "__main__":

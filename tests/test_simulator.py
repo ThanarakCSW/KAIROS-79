@@ -61,6 +61,24 @@ class TestSimulator(unittest.TestCase):
         self.assertIn("scenario_b_sweep_trap", sim1["scenarios"])
         self.assertIn("scenario_c_invalidation", sim1["scenarios"])
 
+    def test_35k_simulation_paths_and_performance(self):
+        """Verify 35,000 paths Monte Carlo simulation computes accurately and finishes quickly."""
+        import time
+        t0 = time.perf_counter()
+        sim = run_simulation(
+            bars=self.bars,
+            trade_setup=self.smc["trade_setup"],
+            structure_res=self.st,
+            replays=35000,
+            bars_ahead=36,
+            seed=42,
+        )
+        elapsed = time.perf_counter() - t0
+        self.assertEqual(sim["replays"], 35000)
+        self.assertIn("win_pct", sim["probabilities"])
+        self.assertIn("expected_value_r", sim)
+        self.assertLess(elapsed, 2.5, f"35,000 simulations took {elapsed:.2f}s, expected < 2.5s")
+
 
 if __name__ == "__main__":
     unittest.main()

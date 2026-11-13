@@ -265,6 +265,23 @@ def detect_historical_sr_levels(
                 }
             )
 
+    # 1.1 Detect Deep Macro Fractals across multi-thousand bars history
+    if n >= 200:
+        left_macro = min(35, max(12, n // 20))
+        sw_macro = detect_swings(
+            primary_bars, left=left_macro, right=left_macro, eq_tolerance=max(0.45, atr_val * 0.28)
+        )
+        for p in sw_macro.get("all", []):
+            raw_points.append(
+                {
+                    "price": float(p["price"]),
+                    "t": int(p["t"]),
+                    "kind": p["kind"],
+                    "tf": "MACRO_15K",
+                    "weight": 3.0,
+                }
+            )
+
     # 2. Detect swings on Higher Timeframes (M15, H1, H4) if available
     tf_weights = {"M5": 1.0, "M15": 2.0, "H1": 3.0, "H4": 4.5}
     if mtf_bars_by_tf:
@@ -1852,7 +1869,7 @@ def analyze_structure(
         swings=swings,
         atr_val=atr_val,
         current_price=current_price,
-        max_lookback=2000,
+        max_lookback=15000,
     )
     trend = evaluate_trend_regime(
         current_price=current_price,

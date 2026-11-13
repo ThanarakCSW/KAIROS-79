@@ -65,11 +65,11 @@ def run_simulation(
     bars: List[Dict[str, Any]],
     trade_setup: Dict[str, Any],
     structure_res: Dict[str, Any],
-    replays: int = 15000,
+    replays: int = 35000,
     bars_ahead: int = 36,
     seed: int = 19,
 ) -> Dict[str, Any]:
-    """Pure function: run N Monte Carlo paths (default 15,000) for a proposed XAU/USD trade setup."""
+    """Pure function: run N Monte Carlo paths (default 35,000) for a proposed XAU/USD trade setup."""
     if not bars:
         raise ValueError("Cannot run simulation on empty bars")
 

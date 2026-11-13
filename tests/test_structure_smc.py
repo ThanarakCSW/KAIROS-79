@@ -207,6 +207,32 @@ class TestStructureAndSMC(unittest.TestCase):
         self.assertIn("chart_patterns", smc_res)
         self.assertIsNotNone(smc_res["chart_patterns"])
 
+    def test_deep_15000_bars_history_and_sr_clustering(self):
+        """Verify engine processes 15,000 bars buffer and clusters multi-touch S&R levels across deep history."""
+        from engine.data_feed import load_fixture_bars
+        bars_15k = load_fixture_bars(target_count=15000)
+        self.assertEqual(len(bars_15k), 15000)
+
+        st = analyze_structure(bars_15k, timeframe="M5")
+        self.assertEqual(st["bars_count"], 15000)
+        self.assertIn("historical_sr", st)
+        sr_list = st["historical_sr"]
+        self.assertGreater(len(sr_list), 0)
+
+        # Check that touches are clustered from deep history
+        top_lvl = sr_list[0]
+        self.assertGreaterEqual(top_lvl["touches_count"], 1)
+        self.assertIn("strength", top_lvl)
+        self.assertIn("effective_role", top_lvl)
+
+        # SMC trade setup factors in historical S&R
+        smc_res = analyze_smc(bars_15k, timeframe="M5", structure_res=st)
+        setup = smc_res["trade_setup"]
+        self.assertIn("confluence_factors", setup)
+        # S&R tag or barrier reflected in confluence
+        has_sr_factor = any("15,000 แท่ง" in f or "SR_FLIP" in f or "S&R" in f for f in setup["confluence_factors"])
+        self.assertTrue(has_sr_factor, "Expected 15,000 bars historical S&R in confluence factors")
+
 
 if __name__ == "__main__":
     unittest.main()

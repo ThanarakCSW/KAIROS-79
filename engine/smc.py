@@ -648,19 +648,25 @@ def build_trade_setup(
             tfs_str = "+".join(best_hz.get("confluent_timeframes") or [best_hz["timeframe"]])
             confluence_factors.append(f"HTF {tfs_str} {expected_role.upper()} Zone ({best_hz['mid']:.2f})")
 
-    # Historical Multi-Touch Support / Resistance Confluence
+    # Deep Historical Multi-Touch Support / Resistance Confluence across 15,000 bars
     hist_sr = list(structure_res.get("historical_sr") or [])
     expected_eff_role = "support" if side == "BUY" else "resistance"
     near_hist = [
         hz
         for hz in hist_sr
         if hz.get("effective_role") == expected_eff_role
-        and abs(entry - float(hz["mid"])) <= atr_val * 0.75
+        and abs(entry - float(hz["mid"])) <= atr_val * 0.90
     ]
     if near_hist:
         best_hist = near_hist[0]
-        confluence_score = min(100, confluence_score + 8)
-        confluence_factors.append(f"แนวรับต้านเดิมย้อนหลัง ({best_hist['touches_count']}x @ {best_hist['mid']:.2f})")
+        # Align Limit entry directly with high-confluence historical shelf if very close
+        if abs(entry - float(best_hist["mid"])) <= atr_val * 0.35:
+            entry = r2(best_hist["mid"])
+        confluence_score = min(100, confluence_score + 10)
+        touches = best_hist.get("touches_count") or len(best_hist.get("tfs") or [])
+        confluence_factors.append(
+            f"แนวรับต้านประวัติศาสตร์ 15,000 แท่ง ({touches}x @ {best_hist['mid']:.2f}, {best_hist.get('role', 'SR')})"
+        )
 
     # Chart Pattern Confluence (Double Top/Bottom, H&S, Triangles, Flags)
     chart_patterns = structure_res.get("chart_patterns") or {}

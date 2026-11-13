@@ -652,7 +652,7 @@
     }
 
     // Compact Single-Row Floating Chart HUD
-    const barCount = (state.bars && state.bars.length) || st.bars_count || 1500;
+    const barCount = (state.bars && state.bars.length) || st.bars_count || 15000;
     if (el("barsCountBadge")) {
       el("barsCountBadge").textContent = `📊 ${Number(barCount).toLocaleString()} แท่ง`;
     }
@@ -1182,7 +1182,7 @@
     const totalDetected = cp.total_detected || recentPatterns.length || 0;
     const completedCount = cp.completed_count || 0;
     const winRate = cp.success_rate_pct !== undefined ? cp.success_rate_pct : 0;
-    const barsCount = (state.bars && state.bars.length) || st.bars_count || 1500;
+    const barsCount = (state.bars && state.bars.length) || st.bars_count || 15000;
 
     // Header badge
     if (el("patternsHeaderBadge")) {
@@ -1531,7 +1531,7 @@
     // AI action (Replay mode removed per user request)
     el("btnAnalyzeNow").addEventListener("click", () => {
       sendWs({ action: "analyze_now" });
-      showToast("กำลังส่งกราฟและผลจำลอง 15,000 เส้นทางให้ Gemini วิเคราะห์...");
+      showToast("กำลังส่งกราฟและผลจำลอง 35,000 เส้นทางให้ Gemini วิเคราะห์...");
     });
 
     // Order Action Buttons (Send to MT5, Fill Now, Breakeven, Close, Cancel, Scan New)
@@ -1623,7 +1623,7 @@
         `Entry: ${Number(tk.entry_mt5).toFixed(2)}`,
         `Stop Loss: ${Number(tk.stop_mt5).toFixed(2)}`,
         `Take Profit: ${Number(tk.target_mt5).toFixed(2)} (R:R 1:${tk.reward_risk})`,
-        `Monte Carlo (${sim.replays || 15000} paths) EV: ${sim.expected_value_r}R | Win: ${(sim.probabilities || {}).win_pct}% | Sweep Risk: ${(sim.probabilities || {}).sweep_risk_pct}%`,
+        `Monte Carlo (${sim.replays || 35000} paths) EV: ${sim.expected_value_r}R | Win: ${(sim.probabilities || {}).win_pct}% | Sweep Risk: ${(sim.probabilities || {}).sweep_risk_pct}%`,
         `Scenario B Re-entry: ${Number(tk.scenario_b_reentry_mt5).toFixed(2)} | Scenario C Invalidation: ${Number(tk.scenario_c_invalidation_mt5).toFixed(2)}`,
       ].join("\n");
       navigator.clipboard.writeText(text);
