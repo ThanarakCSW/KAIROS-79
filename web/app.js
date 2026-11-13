@@ -413,6 +413,7 @@
     const multiList = el("multiOrdersList");
     const multiCount = el("multiOrdersCount");
     const multiAvg = el("multiOrdersAvgEntry");
+    const ticketBadge = el("orderTicketBadge");
 
     if (!card || !statusPill) return;
 
@@ -420,6 +421,7 @@
       card.className = "order-lifecycle-bar status-idle";
       statusPill.className = "order-status-pill pill-idle";
       statusPill.textContent = "🔍 SCANNING";
+      if (ticketBadge) ticketBadge.style.display = "none";
       if (execPill) {
         execPill.className = "order-exec-pill exec-waiting";
         execPill.textContent = "รอเงื่อนไข >50%";
@@ -440,6 +442,15 @@
     const status = ord.status;
     const isMarket = ord.execution_type === "MARKET";
     const entry = Number(ord.entry_mt5 || 0);
+
+    if (ticketBadge) {
+      if (ord.broker_ticket) {
+        ticketBadge.textContent = `Ticket #${ord.broker_ticket}`;
+        ticketBadge.style.display = "inline-flex";
+      } else {
+        ticketBadge.style.display = "none";
+      }
+    }
 
     // Multi-Order Rendering
     const hasMulti = ord.orders && ord.orders.length > 1;
@@ -579,6 +590,38 @@
     }
     el("sessionBadge").textContent = `${session.session || "MARKET"} • ${session.bkk_time || ""}`;
     el("feedSourceLabel").textContent = `Feed: ${state.data_source || "-"}`;
+
+    // MT5 EA Bridge Status & Auto-Trading Master Switch
+    const ea = state.ea_bridge || {};
+    const mt5Pill = el("mt5StatusPill");
+    const mt5Text = el("mt5StatusText");
+    if (mt5Pill && mt5Text) {
+      if (ea.is_connected) {
+        mt5Pill.className = "meta-pill pill-mt5-online";
+        const eqStr = ea.equity ? `$${Number(ea.equity).toLocaleString()}` : "";
+        mt5Text.textContent = `MT5: #${ea.account_id || ""} (${ea.broker || "Live"}) ${eqStr ? `• Eq ${eqStr}` : ""}`;
+        mt5Pill.title = `MetaTrader 5 เชื่อมต่อแล้ว (Balance: $${ea.balance}, Margin: $${ea.margin}, Spread: ${ea.spread_points} pts)`;
+      } else {
+        mt5Pill.className = "meta-pill pill-mt5-offline";
+        mt5Text.textContent = "MT5: Offline";
+        mt5Pill.title = "MetaTrader 5 EA ยังไม่ได้เชื่อมต่อ (เปิด MT5 บน Windows/VPS แล้วรัน KAIROS79_Bridge.mq5)";
+      }
+    }
+
+    const autoBtn = el("btnToggleAutoTrading");
+    const autoText = el("autoTradingText");
+    if (autoBtn && autoText) {
+      const isAuto = ea.auto_trading_enabled === true;
+      autoBtn.className = "btn-auto-trading " + (isAuto ? "auto-on" : "auto-off");
+      autoText.textContent = isAuto ? "⚡ AUTO: ON" : "⏸️ AUTO: OFF";
+      autoBtn.title = isAuto
+        ? "ระบบกำลังส่งออเดอร์อัตโนมัติไปยัง MT5 เมื่อสัญญาณผ่านเกณฑ์ (คลิกเพื่อปิด)"
+        : "ระบบหยุดส่งคำสั่งอัตโนมัติชั่วคราว (คลิกเพื่อเปิดใช้งาน Auto-Trading)";
+    }
+
+    if (el("cfgAutoTrading")) {
+      el("cfgAutoTrading").checked = ea.auto_trading_enabled === true;
+    }
 
     const tBadge = el("trendBadge");
     tBadge.textContent = `${trend.regime || "-"} (${trend.bias || "-"})`;
@@ -1394,6 +1437,58 @@
     modal.addEventListener("click", (e) => {
       if (e.target === modal) modal.classList.add("hidden");
     });
+
+    // Auto-Trading Master Switch Listeners (MT5 EA Bridge)
+    const btnAuto = el("btnToggleAutoTrading");
+    if (btnAuto) {
+      btnAuto.addEventListener("click", async () => {
+        try {
+          const resp = await fetch("/api/ea/toggle_auto", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          const doc = await resp.json();
+          const isNowOn = doc.auto_trading_enabled;
+          showToast(
+            isNowOn
+              ? "⚡ เปิดใช้งาน Auto-Trading (MT5 EA) แล้ว"
+              : "⏸️ ปิดการส่งออเดอร์ Auto-Trading แล้ว"
+          );
+          if (currentState) {
+            currentState.ea_bridge = doc.ea_bridge || currentState.ea_bridge || {};
+            currentState.ea_bridge.auto_trading_enabled = isNowOn;
+            renderDashboard(currentState);
+          }
+        } catch (e) {
+          showToast("❌ ไม่สามารถเปลี่ยนสถานะ Auto-Trading ได้");
+        }
+      });
+    }
+
+    const cfgAuto = el("cfgAutoTrading");
+    if (cfgAuto) {
+      cfgAuto.addEventListener("change", async () => {
+        try {
+          const resp = await fetch("/api/ea/toggle_auto", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: cfgAuto.checked }),
+          });
+          const doc = await resp.json();
+          showToast(
+            cfgAuto.checked
+              ? "⚡ เปิดใช้งาน Auto-Trading แล้ว"
+              : "⏸️ ปิด Auto-Trading แล้ว"
+          );
+          if (currentState) {
+            currentState.ea_bridge = doc.ea_bridge || currentState.ea_bridge || {};
+            currentState.ea_bridge.auto_trading_enabled = cfgAuto.checked;
+            renderDashboard(currentState);
+          }
+        } catch (e) {}
+      });
+    }
 
     // AI action (Replay mode removed per user request)
     el("btnAnalyzeNow").addEventListener("click", () => {

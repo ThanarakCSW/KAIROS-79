@@ -37,6 +37,10 @@
       </div>
 
       <div class="topbar-right">
+        <span id="mt5StatusPill" class="meta-pill pill-mt5-offline" title="สถานะการเชื่อมต่อ MetaTrader 5 EA">
+          <i class="conn-dot"></i> <span id="mt5StatusText">MT5: Offline</span>
+        </span>
+
         <span id="wsStatus" class="conn-indicator">
           <i class="conn-dot"></i> <span id="wsStatusText">Connecting</span>
         </span>
@@ -78,6 +82,9 @@
       </div>
 
       <div class="toolbar-actions">
+        <button id="btnToggleAutoTrading" class="btn-auto-trading auto-off" title="คลิกเพื่อเปิด/ปิด การส่งคำสั่งอัตโนมัติไปยัง MetaTrader 5 EA">
+          <span class="auto-indicator">⚡</span> <span id="autoTradingText">AUTO: OFF</span>
+        </button>
         <button id="btnAnalyzeNow" class="btn-ai-glow">
           <span class="sparkle">✦</span> ให้ Gemini วิเคราะห์กราฟตอนนี้
         </button>
@@ -153,6 +160,7 @@
             </div>
 
             <div class="lifecycle-badge-cluster">
+              <span id="orderTicketBadge" class="order-ticket-pill" style="display:none;" title="หมายเลขคำสั่งจริงใน MetaTrader 5">Ticket #—</span>
               <span id="autoMultiOrderPill" class="auto-multi-pill" title="ระบบสแกนหาโอกาสแก้ไม้และทำกำไรเพิ่มให้อัตโนมัติโดยไม่ต้องปิดไม้เก่า">🤖 AUTO MULTI</span>
               <span id="verdictBadge" class="verdict-pill pass">PASS</span>
               <div class="confluence-mini-pill" title="คะแนนความแม่นยำจากจุดร่วม SMC + EMA">
@@ -422,6 +430,17 @@
               <input type="checkbox" id="cfgAutoMultiOrder" checked style="width: 18px; height: 18px; accent-color: var(--gold); cursor: pointer;" />
               <span style="font-size: 11.5px; color: var(--text-secondary);">เปิดไม้แก้ (DCA) / สเกลกำไรอัตโนมัติ</span>
             </div>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label style="display: flex; flex-direction: column; justify-content: center; grid-column: 1 / -1; background: rgba(56, 189, 248, 0.05); padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.2);">
+            <span style="margin-bottom: 4px; color: var(--text-primary); font-weight: 700;">⚡ ระบบส่งคำสั่งอัตโนมัติไปยัง MetaTrader 5 (Auto-Trading EA Bridge)</span>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="cfgAutoTrading" style="width: 18px; height: 18px; accent-color: #38bdf8; cursor: pointer;" />
+              <span style="font-size: 12px; color: var(--text-primary);">เปิดใช้งาน Auto-Trading (เมื่อเปิด สัญญาณจะส่งเข้าพอร์ต MT5 ทันที)</span>
+            </div>
+            <small style="color: var(--text-muted); margin-top: 4px;">รองรับ MT5 บน Windows PC / VPS ผ่าน WebRequest URL: <code>http://127.0.0.1:8000</code> (Magic: 797979)</small>
           </label>
         </div>
 

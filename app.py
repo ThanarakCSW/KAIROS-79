@@ -36,6 +36,7 @@ from engine.data_feed import (
     stream_tradingview_gold_ws,
 )
 from engine.news_feed import evaluate_news_window
+from engine.ea_bridge import EABridgeManager
 from engine.order_lifecycle import OrderLifecycleManager
 from engine.risk_gate import evaluate_risk_and_size
 from engine.signal_tracker import evaluate_signal_performance
@@ -75,6 +76,7 @@ class TradingAssistantCore:
         self.config = load_config()
         self.hub = MarketDataHub()
         self.order_manager = OrderLifecycleManager()
+        self.ea_bridge = EABridgeManager(CONFIG_PATH)
         self.timeframe = str(self.config.get("default_timeframe") or "M5").upper()
         self.trading_style = str(self.config.get("trading_style") or "intraday").lower()
         if self.trading_style not in ("intraday", "scalping"):
@@ -279,6 +281,53 @@ class TradingAssistantCore:
             else:
                 risk_ticket["active_order"] = None
 
+        # Auto-Trading Dispatch to MT5 EA Bridge when Auto-Trading is ON
+        if (
+            self.ea_bridge.auto_trading_enabled
+            and order_event
+            and order_event.get("type") == "NEW_ORDER_REGISTERED"
+            and risk_ticket.get("win_prob_passed", False)
+            and risk_ticket.get("verdict") in ("PASS", "CAUTION")
+        ):
+            sig_id = risk_ticket.get("fingerprint") or f"sig_{int(time.time())}"
+            self.ea_bridge.enqueue_action(
+                action_type="OPEN_ORDER",
+                payload={
+                    "side": risk_ticket["side"],
+                    "order_type": risk_ticket.get("execution_type", "LIMIT"),
+                    "symbol": "XAUUSD",
+                    "lot": float(risk_ticket.get("lot_size") or 0.10),
+                    "price": float(risk_ticket.get("entry_mt5") or cur_p),
+                    "sl": float(risk_ticket.get("stop_mt5") or 0.0),
+                    "tp": float(risk_ticket.get("target_mt5") or 0.0),
+                    "tp1": float(risk_ticket.get("tp1_mt5") or 0.0),
+                    "magic": 797979,
+                    "comment": f"K79-{risk_ticket['side']}",
+                },
+                signal_id=sig_id,
+            )
+        elif (
+            self.ea_bridge.auto_trading_enabled
+            and order_event
+            and order_event.get("type") == "MULTI_ORDER_ADDED"
+        ):
+            sub_o = order_event.get("order") or {}
+            self.ea_bridge.enqueue_action(
+                action_type="OPEN_ORDER",
+                payload={
+                    "side": sub_o.get("side", risk_ticket["side"]),
+                    "order_type": sub_o.get("execution_type", "MARKET"),
+                    "symbol": "XAUUSD",
+                    "lot": float(sub_o.get("lot_size") or 0.10),
+                    "price": float(sub_o.get("entry_mt5") or cur_p),
+                    "sl": float(sub_o.get("stop_mt5") or 0.0),
+                    "tp": float(sub_o.get("target_mt5") or 0.0),
+                    "magic": 797979,
+                    "comment": f"K79-{sub_o.get('purpose', 'MULTI')}",
+                },
+                signal_id=sub_o.get("order_id"),
+            )
+
         signal_tracker = evaluate_signal_performance(
             bars=chart_bars,
             timeframe=tf,
@@ -350,6 +399,7 @@ class TradingAssistantCore:
                 k: v for k, v in sim.items() if k != "sample_paths"
             },
             "risk_ticket": risk_ticket,
+            "ea_bridge": self.ea_bridge.get_status_dict(),
             "news": news,
             "ai_advisory": ai_advisory,
             "config": {
@@ -871,14 +921,118 @@ class AssistantServer:
                 )
             elif action == "close_by_id":
                 oid = str(payload.get("order_id") or "")
+                # Find matching sub order broker_ticket if any
+                for o in self.core.order_manager.active_orders:
+                    if o.get("order_id") == oid and o.get("broker_ticket"):
+                        self.core.ea_bridge.enqueue_action(
+                            "CLOSE_ORDER", {"ticket": o["broker_ticket"]}
+                        )
                 self.core.order_manager.close_order_by_id(order_id=oid, current_price=cp)
             elif action == "close_all":
+                self.core.ea_bridge.enqueue_action(
+                    "CLOSE_ALL", {"symbol": "XAUUSD", "magic": 797979}
+                )
                 self.core.order_manager.close_all_orders(current_price=cp)
+
+            if action in ("close", "cancel"):
+                self.core.ea_bridge.enqueue_action(
+                    "CLOSE_ALL", {"symbol": "XAUUSD", "magic": 797979}
+                )
+            elif action == "set_breakeven":
+                act_ord = self.core.order_manager.active_order
+                if act_ord and act_ord.get("broker_ticket"):
+                    self.core.ea_bridge.enqueue_action(
+                        "MODIFY_ORDER",
+                        {
+                            "ticket": act_ord["broker_ticket"],
+                            "new_sl": act_ord.get("breakeven_sl_mt5", act_ord["entry_mt5"]),
+                            "new_tp": act_ord.get("target_mt5", 0.0),
+                        },
+                    )
+
             state = await asyncio.to_thread(
                 self.core.compute_full_state, None, True, action == "scan_new_setup"
             )
             await self.broadcast(state)
             await self.send_http_json(writer, 200, state)
+            return
+
+        # --- MT5 EA Bridge HTTP Endpoints ---
+        if path == "/api/ea/poll" and method in ("GET", "POST"):
+            actions = self.core.ea_bridge.poll_actions()
+            resp_doc = {
+                "status": "ok",
+                "auto_trading_enabled": self.core.ea_bridge.auto_trading_enabled,
+                "has_actions": len(actions) > 0,
+                "actions": actions,
+                "server_time": int(time.time()),
+            }
+            await self.send_http_json(writer, 200, resp_doc)
+            return
+
+        if path == "/api/ea/heartbeat" and method == "POST":
+            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            info = self.core.ea_bridge.record_heartbeat(payload)
+            # Sync balance / equity to core config if non-zero
+            if info.get("equity") and float(info["equity"]) > 0:
+                self.core.config["account_balance"] = float(info["equity"])
+            # Broadcast state so web UI sees live MT5 status immediately
+            state = self.core.last_state or {}
+            if state:
+                state["ea_bridge"] = self.core.ea_bridge.get_status_dict()
+                await self.broadcast(state)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "auto_trading_enabled": self.core.ea_bridge.auto_trading_enabled,
+                    "server_time": int(time.time()),
+                },
+            )
+            return
+
+        if path == "/api/ea/execution" and method == "POST":
+            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            rec = self.core.ea_bridge.record_execution(payload)
+            # If an order was opened, map ticket to active order
+            if rec.get("status") in ("FILLED", "OPENED") and rec.get("ticket"):
+                t = rec["ticket"]
+                if self.core.order_manager.active_order:
+                    self.core.order_manager.active_order["broker_ticket"] = t
+                    if rec.get("fill_price") and float(rec["fill_price"]) > 0:
+                        self.core.order_manager.active_order["entry_mt5"] = float(
+                            rec["fill_price"]
+                        )
+                    self.core.order_manager.active_order["status"] = "FILLED"
+                    self.core.order_manager.save_to_disk()
+            state = await asyncio.to_thread(self.core.compute_full_state)
+            await self.broadcast(state)
+            await self.send_http_json(writer, 200, {"status": "ok", "execution": rec})
+            return
+
+        if path == "/api/ea/toggle_auto" and method == "POST":
+            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            req_enable = payload.get("enabled")
+            if req_enable is None:
+                new_val = self.core.ea_bridge.toggle_auto_trading()
+            else:
+                new_val = self.core.ea_bridge.set_auto_trading(bool(req_enable))
+            state = await asyncio.to_thread(self.core.compute_full_state)
+            await self.broadcast(state)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "auto_trading_enabled": new_val,
+                    "ea_bridge": self.core.ea_bridge.get_status_dict(),
+                },
+            )
+            return
+
+        if path == "/api/ea/status" and method == "GET":
+            await self.send_http_json(writer, 200, self.core.ea_bridge.get_status_dict())
             return
 
         rel_path = "index.html" if path in ("/", "") else path.lstrip("/")
