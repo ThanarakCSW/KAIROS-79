@@ -36,6 +36,7 @@ from engine.data_feed import (
     stream_tradingview_gold_ws,
 )
 from engine.news_feed import evaluate_news_window
+from engine.order_lifecycle import OrderLifecycleManager
 from engine.risk_gate import evaluate_risk_and_size
 from engine.signal_tracker import evaluate_signal_performance
 from engine.simulate import optimize_setup_for_win_prob, run_simulation
@@ -73,6 +74,7 @@ class TradingAssistantCore:
     def __init__(self) -> None:
         self.config = load_config()
         self.hub = MarketDataHub()
+        self.order_manager = OrderLifecycleManager()
         self.timeframe = str(self.config.get("default_timeframe") or "M5").upper()
         self.trading_style = str(self.config.get("trading_style") or "intraday").lower()
         if self.trading_style not in ("intraday", "scalping"):
@@ -195,6 +197,65 @@ class TradingAssistantCore:
         )
         risk_ticket["broker_offset_usd"] = round(offset, 2)
 
+        cur_p = float(structure["current_price"])
+        last_b = chart_bars[-1] if chart_bars else {}
+        cur_hi = float(last_b.get("h", cur_p))
+        cur_lo = float(last_b.get("l", cur_p))
+        cur_ts = int(last_b.get("t", time.time()))
+
+        order_event = self.order_manager.update_price_tick(
+            current_price=cur_p,
+            high=cur_hi,
+            low=cur_lo,
+            ts=cur_ts,
+        )
+
+        min_conf = int((self.config.get("ai") or {}).get("auto_trigger_min_confluence") or 55)
+        if self.order_manager.has_active_order():
+            active_ord = self.order_manager.get_active_order_dict(cur_p)
+            if active_ord:
+                risk_ticket["side"] = active_ord["side"]
+                risk_ticket["execution_type"] = active_ord.get("execution_type", "LIMIT")
+                risk_ticket["order_type"] = active_ord.get("order_type", f"{active_ord['side']} LIMIT")
+                risk_ticket["entry_mt5"] = active_ord["entry_mt5"]
+                risk_ticket["stop_mt5"] = active_ord["stop_mt5"]
+                risk_ticket["tp1_mt5"] = active_ord["tp1_mt5"]
+                risk_ticket["target_mt5"] = active_ord["target_mt5"]
+                risk_ticket["breakeven_sl_mt5"] = active_ord.get("breakeven_sl_mt5", active_ord["entry_mt5"])
+                risk_ticket["lot_size"] = active_ord["lot_size"]
+                risk_ticket["actual_risk_usd"] = active_ord["actual_risk_usd"]
+                risk_ticket["potential_profit_usd"] = active_ord["potential_profit_usd"]
+                risk_ticket["reward_risk"] = active_ord["reward_risk"]
+                risk_ticket["status"] = active_ord["status"]
+                risk_ticket["win_prob_passed"] = True
+                risk_ticket["floating_pnl_usd"] = active_ord.get("floating_pnl_usd", 0.0)
+                risk_ticket["floating_pnl_r"] = active_ord.get("floating_pnl_r", 0.0)
+                risk_ticket["management_note_th"] = active_ord.get("management_note_th", "")
+                risk_ticket["active_order"] = active_ord
+                risk_ticket["verdict"] = "ACTIVE_ORDER" if active_ord["status"] == "FILLED" else "PENDING_ORDER"
+                risk_ticket["badge_th"] = (
+                    f"🚀 ถือครองออเดอร์ใน MT5 ({active_ord['side']} @ {active_ord['entry_mt5']:.2f})"
+                    if active_ord["status"] == "FILLED"
+                    else f"⏳ รอเกี่ยวคำสั่ง {active_ord['order_type']} @ {active_ord['entry_mt5']:.2f}"
+                )
+        else:
+            if (
+                risk_ticket.get("win_prob_passed", False)
+                and risk_ticket.get("verdict") in ("PASS", "CAUTION")
+                and smc["trade_setup"].get("confluence_score", 0) >= min_conf
+            ):
+                self.order_manager.register_trade_setup(
+                    risk_ticket=risk_ticket,
+                    smc_setup=smc["trade_setup"],
+                    current_price=cur_p,
+                    timeframe=tf,
+                    trading_style=self.trading_style,
+                )
+                risk_ticket["active_order"] = self.order_manager.get_active_order_dict(cur_p)
+                order_event = self.order_manager.last_event
+            else:
+                risk_ticket["active_order"] = None
+
         signal_tracker = evaluate_signal_performance(
             bars=chart_bars,
             timeframe=tf,
@@ -217,14 +278,23 @@ class TradingAssistantCore:
 
         fp = risk_ticket["fingerprint"]
         is_new_signal_alert = False
-        min_conf = int((self.config.get("ai") or {}).get("auto_trigger_min_confluence") or 65)
-        if (
+        min_conf = int((self.config.get("ai") or {}).get("auto_trigger_min_confluence") or 55)
+        if order_event and order_event.get("type") in (
+            "NEW_ORDER_REGISTERED",
+            "ORDER_FILLED",
+            "TP1_REACHED",
+            "TRADE_CLOSED_TP2",
+            "TRADE_CLOSED_BREAKEVEN",
+            "TRADE_CLOSED_SL",
+        ):
+            is_new_signal_alert = True
+        elif (
             force_ai
             or (
                 fp != self.last_alert_fingerprint
                 and smc["trade_setup"]["confluence_score"] >= min_conf
                 and risk_ticket.get("win_prob_passed", False)
-                and risk_ticket["verdict"] in ("PASS", "CAUTION")
+                and risk_ticket["verdict"] in ("PASS", "CAUTION", "PENDING_ORDER", "ACTIVE_ORDER")
             )
         ):
             self.last_alert_fingerprint = fp
@@ -242,6 +312,9 @@ class TradingAssistantCore:
             "replay_cursor": self.hub.replay_cursor,
             "replay_total": len(self.hub.fixture_bars),
             "is_new_signal_alert": is_new_signal_alert,
+            "active_order": self.order_manager.get_active_order_dict(cur_p),
+            "order_event": order_event,
+            "order_history": self.order_manager.order_history[-10:],
             "bars": chart_bars,
             "structure": structure,
             "market_flow": market_flow,
@@ -391,7 +464,14 @@ class AssistantServer:
             )
             if not ingested:
                 return
-            if ingested["new_bar_closed"]:
+            b = ingested["bar"]
+            ev = self.core.order_manager.update_price_tick(
+                current_price=float(b["c"]),
+                high=float(b["h"]),
+                low=float(b["l"]),
+                ts=int(b["t"]),
+            )
+            if ingested["new_bar_closed"] or ev:
                 state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
                 await self.broadcast(state)
             else:
@@ -403,6 +483,7 @@ class AssistantServer:
                         "bid": ingested["bid"],
                         "ask": ingested["ask"],
                         "spread_points": ingested["spread_points"],
+                        "active_order": self.core.order_manager.get_active_order_dict(float(b["c"])),
                         "source": "tradingview_ws (OANDA:XAUUSD)",
                     }
                 )
@@ -433,7 +514,14 @@ class AssistantServer:
             )
             if not ingested:
                 return
-            if ingested["new_bar_closed"]:
+            b = ingested["bar"]
+            ev = self.core.order_manager.update_price_tick(
+                current_price=float(b["c"]),
+                high=float(b["h"]),
+                low=float(b["l"]),
+                ts=int(b["t"]),
+            )
+            if ingested["new_bar_closed"] or ev:
                 state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
                 await self.broadcast(state)
             else:
@@ -442,6 +530,7 @@ class AssistantServer:
                         "type": "tick",
                         "timeframe": self.core.timeframe,
                         "bar": ingested["bar"],
+                        "active_order": self.core.order_manager.get_active_order_dict(float(b["c"])),
                         "source": ingested["source"],
                     }
                 )
@@ -499,8 +588,15 @@ class AssistantServer:
                     offset_usd=offset,
                 )
                 if ingested:
-                    if ingested["new_bar_closed"] or loop_counter % 10 == 0:
-                        # Recompute full SMC + Monte Carlo state when candle closes or every 20s
+                    b = ingested["bar"]
+                    ev = self.core.order_manager.update_price_tick(
+                        current_price=float(b["c"]),
+                        high=float(b["h"]),
+                        low=float(b["l"]),
+                        ts=int(b["t"]),
+                    )
+                    if ingested["new_bar_closed"] or ev or loop_counter % 10 == 0:
+                        # Recompute full SMC + Monte Carlo state when candle closes, order event occurs, or every 20s
                         state = await asyncio.to_thread(
                             self.core.compute_full_state, None, ingested["new_bar_closed"], False
                         )
@@ -514,6 +610,7 @@ class AssistantServer:
                                 "bid": ingested["bid"],
                                 "ask": ingested["ask"],
                                 "spread_points": ingested["spread_points"],
+                                "active_order": self.core.order_manager.get_active_order_dict(float(b["c"])),
                                 "source": spot["source"],
                             }
                         )
@@ -624,6 +721,29 @@ class AssistantServer:
         elif action == "analyze_now":
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, True)
             await self.broadcast(state)
+        elif action == "cancel_active_order":
+            reason = str(cmd.get("reason") or "MANUAL_CANCEL")
+            self.core.order_manager.cancel_active_order(reason=reason)
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+        elif action == "close_active_order":
+            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            self.core.order_manager.close_active_order(reason="MANUAL_CLOSE", current_price=cp)
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+        elif action == "fill_active_order_now":
+            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            self.core.order_manager.fill_now(current_price=cp)
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+        elif action == "set_breakeven":
+            self.core.order_manager.set_breakeven()
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+        elif action == "scan_new_setup":
+            self.core.order_manager.cancel_active_order(reason="SCAN_NEW_SETUP")
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, True)
+            await self.broadcast(state)
 
     async def handle_http_request(
         self,
@@ -665,6 +785,27 @@ class AssistantServer:
 
         if path == "/api/analyze" and method == "POST":
             state = self.core.compute_full_state(force_ai=True)
+            await self.broadcast(state)
+            await self.send_http_json(writer, 200, state)
+            return
+
+        if path == "/api/order/action" and method == "POST":
+            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            action = str(payload.get("action") or "")
+            cp = float(payload.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            if action == "cancel":
+                self.core.order_manager.cancel_active_order(reason="MANUAL_CANCEL")
+            elif action == "close":
+                self.core.order_manager.close_active_order(reason="MANUAL_CLOSE", current_price=cp)
+            elif action == "fill_now":
+                self.core.order_manager.fill_now(current_price=cp)
+            elif action == "set_breakeven":
+                self.core.order_manager.set_breakeven()
+            elif action == "scan_new_setup":
+                self.core.order_manager.cancel_active_order(reason="SCAN_NEW_SETUP")
+            state = await asyncio.to_thread(
+                self.core.compute_full_state, None, True, action == "scan_new_setup"
+            )
             await self.broadcast(state)
             await self.send_http_json(writer, 200, state)
             return

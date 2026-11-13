@@ -197,6 +197,63 @@ class TestAppIntegration(unittest.TestCase):
             self.assertEqual(ws_json["type"], "full_state")
             self.assertEqual(ws_json["symbol"], "XAUUSD")
 
+            # 3. Test POST /api/order/action
+            # Register a dummy active order first
+            srv.core.order_manager.register_trade_setup(
+                risk_ticket={
+                    "side": "BUY",
+                    "entry_mt5": 2650.00,
+                    "stop_mt5": 2645.00,
+                    "tp1_mt5": 2655.00,
+                    "target_mt5": 2660.00,
+                    "lot_size": 0.10,
+                    "actual_risk_usd": 50.0,
+                    "potential_profit_usd": 100.0,
+                    "reward_risk": 2.0,
+                    "order_type": "BUY LIMIT",
+                    "execution_type": "LIMIT",
+                },
+                smc_setup={"side": "BUY", "execution_type": "LIMIT", "confluence_score": 75},
+                current_price=2655.00,
+                force_replace=True,
+            )
+            self.assertTrue(srv.core.order_manager.has_active_order())
+
+            reader3 = asyncio.StreamReader()
+            order_body = json.dumps({"action": "fill_now", "current_price": 2651.00}).encode("utf-8")
+            order_req = (
+                f"POST /api/order/action HTTP/1.1\r\n"
+                f"Host: localhost\r\n"
+                f"Content-Length: {len(order_body)}\r\n"
+                f"Content-Type: application/json\r\n\r\n"
+            ).encode("utf-8") + order_body
+            reader3.feed_data(order_req)
+            reader3.feed_eof()
+            writer3 = _MemoryWriter()
+            await srv.handle_client(reader3, writer3)
+
+            resp_body = bytes(writer3.buffer).split(b"\r\n\r\n", 1)[1]
+            resp_doc = json.loads(resp_body.decode("utf-8"))
+            self.assertIn("active_order", resp_doc)
+            self.assertEqual(resp_doc["active_order"]["status"], "FILLED")
+            self.assertEqual(resp_doc["active_order"]["filled_price"], 2651.00)
+
+            # Close active order
+            reader4 = asyncio.StreamReader()
+            close_body = json.dumps({"action": "close", "current_price": 2658.00}).encode("utf-8")
+            close_req = (
+                f"POST /api/order/action HTTP/1.1\r\n"
+                f"Host: localhost\r\n"
+                f"Content-Length: {len(close_body)}\r\n"
+                f"Content-Type: application/json\r\n\r\n"
+            ).encode("utf-8") + close_body
+            reader4.feed_data(close_req)
+            reader4.feed_eof()
+            writer4 = _MemoryWriter()
+            await srv.handle_client(reader4, writer4)
+
+            self.assertFalse(srv.core.order_manager.has_active_order())
+
         asyncio.run(_run())
 
 

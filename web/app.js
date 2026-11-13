@@ -379,6 +379,101 @@
     });
   }
 
+  function updateActiveOrderDisplay(ord, curPrice) {
+    const card = el("orderLifecycleCard");
+    const statusPill = el("orderStatusPill");
+    const execPill = el("orderExecTypePill");
+    const pnlBadge = el("orderPnlBadge");
+    const msg = el("orderStatusMsg");
+    const btnFill = el("btnOrderFillNow");
+    const btnBE = el("btnOrderBreakeven");
+    const btnClose = el("btnOrderCloseManual");
+    const btnCancel = el("btnOrderCancel");
+    const btnScan = el("btnScanNewSetup");
+
+    if (!card || !statusPill) return;
+
+    if (!ord || (ord.status !== "PENDING" && ord.status !== "FILLED")) {
+      card.className = "order-lifecycle-bar status-idle";
+      statusPill.className = "order-status-pill pill-idle";
+      statusPill.textContent = "🔍 สแกนหาจังหวะ (SCANNING)";
+      if (execPill) execPill.textContent = "รอเข้าเกณฑ์ >50%";
+      if (pnlBadge) pnlBadge.style.display = "none";
+      if (msg) msg.textContent = "กำลังติดตามโครงสร้างตลาดและ SMC เมื่อ Confluence และโอกาสถึง TP > 50% ระบบจะล็อคแผนเข้าทันที";
+      if (btnFill) btnFill.style.display = "none";
+      if (btnBE) btnBE.style.display = "none";
+      if (btnClose) btnClose.style.display = "none";
+      if (btnCancel) btnCancel.style.display = "none";
+      if (btnScan) btnScan.style.display = "inline-flex";
+      return;
+    }
+
+    const side = ord.side || "BUY";
+    const status = ord.status;
+    const isMarket = ord.execution_type === "MARKET";
+    const entry = Number(ord.entry_mt5 || 0);
+
+    if (status === "FILLED") {
+      card.className = "order-lifecycle-bar status-filled";
+      statusPill.className = "order-status-pill pill-filled";
+      statusPill.textContent = `🚀 ถือครองใน MT5 (${side})`;
+      if (execPill) execPill.textContent = isMarket ? "⚡ ตลาด (Market)" : "🎯 เกี่ยวลิมิตแล้ว";
+
+      const filledP = Number(ord.filled_price || entry);
+      const lot = Number(ord.lot_size || 0.10);
+      const riskUsd = Math.max(1, Number(ord.actual_risk_usd || 50));
+      const delta = side === "BUY" ? (curPrice - filledP) : (filledP - curPrice);
+      const fltUsd = ord.floating_pnl_usd !== undefined ? Number(ord.floating_pnl_usd) : Number((delta * lot * 100).toFixed(2));
+      const fltR = ord.floating_pnl_r !== undefined ? Number(ord.floating_pnl_r) : Number((fltUsd / riskUsd).toFixed(2));
+
+      if (pnlBadge) {
+        pnlBadge.style.display = "inline-block";
+        pnlBadge.className = "order-pnl-badge " + (fltUsd >= 0 ? "pnl-pos" : "pnl-neg");
+        pnlBadge.textContent = `PnL: ${fltUsd >= 0 ? "+" : ""}$${fltUsd.toFixed(2)} (${fltR >= 0 ? "+" : ""}${fltR.toFixed(2)}R)`;
+      }
+
+      if (msg) {
+        msg.textContent = ord.management_note_th || `ถือครอง ${side} @ ${entry.toFixed(2)} — แตะ TP1 แบ่งปิด 50% และเลื่อน SL บังทุน`;
+      }
+
+      if (btnFill) btnFill.style.display = "none";
+      if (btnBE) {
+        btnBE.style.display = "inline-flex";
+        if (ord.sl_moved_breakeven) {
+          btnBE.textContent = "✓ เลื่อนบังทุนแล้ว";
+          btnBE.disabled = true;
+          btnBE.style.opacity = "0.7";
+        } else {
+          btnBE.textContent = "🛡️ บังทุนแล้ว";
+          btnBE.disabled = false;
+          btnBE.style.opacity = "1";
+        }
+      }
+      if (btnClose) btnClose.style.display = "inline-flex";
+      if (btnCancel) btnCancel.style.display = "none";
+      if (btnScan) btnScan.style.display = "inline-flex";
+
+    } else if (status === "PENDING") {
+      card.className = "order-lifecycle-bar status-pending";
+      statusPill.className = "order-status-pill pill-pending";
+      statusPill.textContent = `⏳ รอราคาเกี่ยวคำสั่ง (${side} LIMIT)`;
+      if (execPill) execPill.textContent = isMarket ? "⚡ สัญญาณเข้าทันที" : "ดักเข้าล่วงหน้า";
+      if (pnlBadge) pnlBadge.style.display = "none";
+
+      const dist = Math.abs(curPrice - entry);
+      const dir = side === "SELL" ? "รอราคาขึ้นอีก" : "รอราคาย่ออีก";
+      if (msg) {
+        msg.textContent = ord.management_note_th || `ตั้งคำสั่งใน MT5 แล้ว ${dir} $${dist.toFixed(2)} (จุดเข้าล็อคคงที่ ไม่หายแม้กราฟขยับ)`;
+      }
+
+      if (btnFill) btnFill.style.display = "inline-flex";
+      if (btnBE) btnBE.style.display = "none";
+      if (btnClose) btnClose.style.display = "none";
+      if (btnCancel) btnCancel.style.display = "inline-flex";
+      if (btnScan) btnScan.style.display = "inline-flex";
+    }
+  }
+
   function renderDashboard(state) {
     currentState = state;
     renderChart(state);
@@ -629,16 +724,36 @@
       el("statsNewsList").innerHTML = sCards.join("");
     }
 
+    // Active Order Lifecycle Integration
+    const activeOrd = state.active_order || tk.active_order;
+    updateActiveOrderDisplay(activeOrd, Number(st.current_price || 0));
+
     // Right Sidebar: Hero MT5 Ticket (with > 50% TP Win Probability Continuous Scanner)
     const winProbPassed = tk.win_prob_passed !== false;
     const ticketCard = el("ticketCard");
     if (ticketCard) {
-      ticketCard.className =
-        "ticket-hero " +
-        (!winProbPassed ? "is-wait" : tk.side === "SELL" ? "is-ready-bear" : "is-ready-bull");
+      if (activeOrd && activeOrd.status === "FILLED") {
+        ticketCard.className = "ticket-hero " + (activeOrd.side === "SELL" ? "is-ready-bear" : "is-ready-bull");
+      } else {
+        ticketCard.className =
+          "ticket-hero " +
+          (!winProbPassed ? "is-wait" : tk.side === "SELL" ? "is-ready-bear" : "is-ready-bull");
+      }
     }
     const styleTag = state.trading_style === "scalping" ? "⚡ SCALP" : "🎯 INTRADAY";
-    if (!winProbPassed) {
+
+    if (activeOrd && activeOrd.status === "FILLED") {
+      el("ticketSideTitle").textContent = `${activeOrd.side} XAUUSD (FILLED)`;
+      el("ticketSideTitle").style.color = activeOrd.side === "SELL" ? "var(--bear)" : "var(--bull)";
+      el("statusSub").textContent = `🚀 ถือครองออเดอร์ใน MT5 @ ${Number(activeOrd.entry_mt5).toFixed(2)} (จุดเข้าล็อคถาวร)`;
+    } else if (activeOrd && activeOrd.status === "PENDING") {
+      const isMarket = activeOrd.execution_type === "MARKET";
+      el("ticketSideTitle").textContent = isMarket ? `${activeOrd.side} NOW (Market)` : `${activeOrd.side} LIMIT`;
+      el("ticketSideTitle").style.color = activeOrd.side === "SELL" ? "var(--bear)" : "var(--bull)";
+      el("statusSub").textContent = isMarket
+        ? `⚡ สัญญาณเข้าทันทีที่ราคาปัจจุบัน @ ${Number(activeOrd.entry_mt5).toFixed(2)}`
+        : `⏳ ตั้งดักใน MT5 @ ${Number(activeOrd.entry_mt5).toFixed(2)} (จุดเข้าล็อคถาวร ไม่หาย)`;
+    } else if (!winProbPassed) {
       el("ticketSideTitle").textContent = `⏳ รอจังหวะ (WAIT)`;
       el("ticketSideTitle").style.color = "var(--warn)";
       const wz = tk.next_watch_zone;
@@ -646,31 +761,42 @@
       const watchPrice = rawWatchPrice ? Number(rawWatchPrice).toFixed(2) : Number(tk.entry_mt5 || 0).toFixed(2);
       el("statusSub").textContent = `🔍 [${styleTag}] โอกาสถึง TP ${probs.win_pct || 0}% (< 50%) • กำลังเฝ้าดักโซน ${tk.side} @ ${watchPrice}`;
     } else {
-      el("ticketSideTitle").textContent = `${tk.side || "BUY"} XAUUSD`;
+      const isMarket = tk.execution_type === "MARKET";
+      el("ticketSideTitle").textContent = isMarket ? `${tk.side || "BUY"} NOW (Market)` : `${tk.side || "BUY"} XAUUSD`;
       el("ticketSideTitle").style.color = tk.side === "SELL" ? "var(--bear)" : "var(--bull)";
       el("statusSub").textContent =
-        tk.status === "ACTIVE_IN_ZONE"
-          ? `🟢 [${styleTag}] โอกาสถึง TP ${probs.win_pct || 0}% (> 50%) • พร้อมเข้าเทรด`
+        tk.status === "ACTIVE_IN_ZONE" || isMarket
+          ? `🟢 [${styleTag}] โอกาสถึง TP ${probs.win_pct || 0}% (> 50%) • พร้อมเข้าเทรดทันที`
           : `⏳ [${styleTag}] โอกาสถึง TP ${probs.win_pct || 0}% (> 50%) • รอราคาย่อแตะจุดเข้า`;
     }
 
     const vBadge = el("verdictBadge");
-    vBadge.textContent = !winProbPassed ? "SCANNING <50%" : tk.verdict || "PASS";
+    vBadge.textContent = (activeOrd && activeOrd.status === "FILLED")
+      ? "FILLED"
+      : !winProbPassed
+      ? "SCANNING <50%"
+      : tk.verdict || "PASS";
     vBadge.className =
       "verdict-pill " +
-      (!winProbPassed ? "caution" : tk.verdict === "PASS" ? "pass" : tk.verdict === "CAUTION" ? "caution" : "reject");
+      (!winProbPassed ? "caution" : (tk.verdict === "PASS" || (activeOrd && activeOrd.status === "FILLED")) ? "pass" : tk.verdict === "CAUTION" ? "caution" : "reject");
 
     el("confluenceBadge").textContent = `${setup.confluence_score || 0}%`;
     el("valLot").textContent = Number(tk.lot_size || 0).toFixed(2);
     el("riskUsdSub").textContent = `ความเสี่ยง $${Number(tk.actual_risk_usd || 0).toFixed(2)} (${tk.risk_pct_configured || 1}%)`;
     el("valEntry").textContent = Number(tk.entry_mt5 || 0).toFixed(2);
     if (el("entryHeadLabel")) {
-      el("entryHeadLabel").textContent = `ดัก ${tk.order_type || (tk.side || "BUY") + " LIMIT"} ล่วงหน้า`;
+      const isMarket = (activeOrd && activeOrd.execution_type === "MARKET") || tk.execution_type === "MARKET";
+      el("entryHeadLabel").textContent = isMarket ? "ENTRY (กดราคาตลาด Market)" : `ดัก ${tk.order_type || (tk.side || "BUY") + " LIMIT"} ล่วงหน้า`;
     }
     if (el("entryDistSub")) {
-      const dist = Number(tk.distance_to_entry_usd || Math.abs((st.current_price || 0) - (tk.entry_mt5 || 0)));
-      const dirWord = tk.side === "SELL" ? "รอราคาเด้งขึ้นไปอีก" : "รอราคาย่อลงมาอีก";
-      el("entryDistSub").textContent = dist > 0.05 ? `${dirWord} $${dist.toFixed(2)} (ยังไม่ผ่านจุดเข้า)` : `ราคาแตะโซนดักเข้าใหม่พอดี`;
+      const isMarket = (activeOrd && activeOrd.execution_type === "MARKET") || tk.execution_type === "MARKET";
+      if (isMarket) {
+        el("entryDistSub").textContent = "⚡ สัญญาณเข้าที่ราคาปัจจุบัน (Market Execution)";
+      } else {
+        const dist = Number(tk.distance_to_entry_usd || Math.abs((st.current_price || 0) - (tk.entry_mt5 || 0)));
+        const dirWord = tk.side === "SELL" ? "รอราคาเด้งขึ้นไปอีก" : "รอราคาย่อลงมาอีก";
+        el("entryDistSub").textContent = dist > 0.05 ? `${dirWord} $${dist.toFixed(2)} (ยังไม่ผ่านจุดเข้า)` : `ราคาแตะโซนดักเข้าใหม่พอดี`;
+      }
     }
     el("valSL").textContent = Number(tk.stop_mt5 || 0).toFixed(2);
     el("slDistSub").textContent = `ห่าง $${Number(tk.sl_distance_usd || 0).toFixed(2)} (${tk.sl_points || 0} pts)`;
@@ -737,9 +863,15 @@
   function handleLiveTick(msg) {
     if (!msg.bar) return;
     const b = msg.bar;
-    el("livePrice").textContent = Number(b.c).toFixed(2);
+    const curP = Number(b.c);
+    el("livePrice").textContent = curP.toFixed(2);
     if (msg.bid && msg.ask) {
       el("bidAskPill").textContent = `Bid ${Number(msg.bid).toFixed(2)} • Ask ${Number(msg.ask).toFixed(2)}`;
+    }
+    if (msg.active_order) {
+      updateActiveOrderDisplay(msg.active_order, curP);
+    } else if (currentState && currentState.active_order) {
+      updateActiveOrderDisplay(currentState.active_order, curP);
     }
     if (candleSeries) {
       candleSeries.update({
@@ -886,6 +1018,53 @@
       sendWs({ action: "analyze_now" });
       showToast("กำลังส่งกราฟและผลจำลอง 15,000 เส้นทางให้ Gemini วิเคราะห์...");
     });
+
+    // Order Action Buttons (Fill Now, Breakeven, Close, Cancel, Scan New)
+    const getCurPrice = () => {
+      if (currentState && currentState.structure && currentState.structure.current_price) {
+        return Number(currentState.structure.current_price);
+      }
+      return parseFloat(el("livePrice").textContent) || 0;
+    };
+
+    if (el("btnOrderFillNow")) {
+      el("btnOrderFillNow").addEventListener("click", () => {
+        sendWs({ action: "fill_active_order_now", current_price: getCurPrice() });
+        showToast("⚡ บันทึกสถานะ: เปิดออเดอร์ใน MT5 แล้ว!");
+      });
+    }
+
+    if (el("btnOrderBreakeven")) {
+      el("btnOrderBreakeven").addEventListener("click", () => {
+        sendWs({ action: "set_breakeven" });
+        showToast("🛡️ บันทึกสถานะ: เลื่อน Stop Loss บังทุนเรียบร้อย!");
+      });
+    }
+
+    if (el("btnOrderCloseManual")) {
+      el("btnOrderCloseManual").addEventListener("click", () => {
+        if (confirm("ยืนยันว่าได้ปิดออเดอร์ใน MT5 แล้ว?")) {
+          sendWs({ action: "close_active_order", current_price: getCurPrice() });
+          showToast("✓ บันทึกการปิดออเดอร์เรียบร้อย — เริ่มสแกนรอบใหม่");
+        }
+      });
+    }
+
+    if (el("btnOrderCancel")) {
+      el("btnOrderCancel").addEventListener("click", () => {
+        if (confirm("ยืนยันยกเลิกคำสั่งดักเข้าใน MT5 นี้?")) {
+          sendWs({ action: "cancel_active_order", reason: "MANUAL_CANCEL" });
+          showToast("✕ ยกเลิกคำสั่งเรียบร้อย — ระบบจะเริ่มสแกนหาจังหวะใหม่");
+        }
+      });
+    }
+
+    if (el("btnScanNewSetup")) {
+      el("btnScanNewSetup").addEventListener("click", () => {
+        sendWs({ action: "scan_new_setup" });
+        showToast("🔄 กำลังรีเซ็ตและสั่ง AI สแกนวิเคราะห์หาแผนใหม่...");
+      });
+    }
 
     // Click-to-copy MT5 tiles
     document.querySelectorAll(".copy-trigger").forEach((tile) => {

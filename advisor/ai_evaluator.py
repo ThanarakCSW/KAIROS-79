@@ -59,17 +59,23 @@ def _validate_gemini_trade_decision(
         target = float(decision.get("target") or fallback_setup["target"])
         current_price = float(fallback_setup.get("current_price") or entry)
 
+        is_market = abs(entry - current_price) <= max(0.40, atr_val * 0.20) or "NOW" in str(decision.get("order_type") or "")
+        exec_type = "MARKET" if is_market else "LIMIT"
+        order_type = f"{side} NOW (Market)" if is_market else f"{side} LIMIT"
+        if is_market:
+            entry = current_price
+
         if side == "BUY":
             if not (stop < entry < target):
                 return None
-            # Reject if entry is above current price (must be a forward-looking BUY LIMIT at or below current price)
-            if current_price > 0 and entry > current_price + (atr_val * 0.10):
+            # Allow market execution at current price or forward-looking BUY LIMIT at or below current price
+            if not is_market and current_price > 0 and entry > current_price + (atr_val * 0.15):
                 return None
         else:
             if not (target < entry < stop):
                 return None
-            # Reject if entry is below current price (must be a forward-looking SELL LIMIT at or above current price)
-            if current_price > 0 and entry < current_price - (atr_val * 0.10):
+            # Allow market execution at current price or forward-looking SELL LIMIT at or above current price
+            if not is_market and current_price > 0 and entry < current_price - (atr_val * 0.15):
                 return None
 
         risk = abs(entry - stop)
@@ -104,12 +110,13 @@ def _validate_gemini_trade_decision(
         return {
             "symbol": "XAUUSD",
             "side": side,
-            "order_type": f"{side} LIMIT",
+            "execution_type": exec_type,
+            "order_type": order_type,
             "is_advance_entry": True,
-            "distance_to_entry_usd": r2(abs(current_price - entry)),
+            "distance_to_entry_usd": 0.0 if is_market else r2(abs(current_price - entry)),
             "current_price": r2(current_price),
             "bias": "BULLISH" if side == "BUY" else "BEARISH",
-            "status": status,
+            "status": "ACTIVE_IN_ZONE" if is_market else status,
             "entry": r2(entry),
             "stop": r2(stop),
             "tp1": r2(entry + risk * 1.0) if side == "BUY" else r2(entry - risk * 1.0),

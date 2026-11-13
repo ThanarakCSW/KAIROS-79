@@ -546,6 +546,30 @@ def build_trade_setup(
         confluence_score = 48
         confluence_factors = [f"{trend['regime']} ({bias})", f"EMA Alignment: {trend['ema_alignment']}"]
 
+    # Determine execution type: MARKET (เข้าทันทีที่ราคาปัจจุบัน) vs LIMIT (ดักเข้าล่วงหน้า)
+    # If price is inside the fresh zone or scalping momentum/sweep confirmation is active, enter immediately at market!
+    is_in_zone = (zone_low - atr_val * 0.15) <= current_price <= (zone_high + atr_val * 0.15)
+    has_recent_sweep = (
+        bool(sweeps)
+        and sweeps[-1]["implication"].startswith(bias)
+        and (len(structure_res.get("swings", {}).get("all", [])) > 0)
+    )
+    has_scalp_trigger = is_scalp and int(scalp_info.get("scalp_score") or 0) >= 55
+
+    should_market_enter = is_in_zone or has_recent_sweep or has_scalp_trigger
+    if should_market_enter:
+        execution_type = "MARKET"
+        order_type = f"{side} NOW (Market)"
+        entry = r2(current_price)
+        dist_to_entry = 0.0
+        status = "ACTIVE_IN_ZONE"
+        confluence_factors.append("สัญญาณยืนยันเข้าทันทีที่ราคาปัจจุบัน (Market Execution)")
+    else:
+        execution_type = "LIMIT"
+        order_type = f"{side} LIMIT"
+        dist_to_entry = abs(current_price - entry)
+        status = "WAITING_PULLBACK"
+
     # Bonus confluence if a recent Liquidity Sweep or CHoCH/BOS aligns with the setup
     recent_break = breaks[-1] if breaks else None
     if recent_break and recent_break["direction"] == bias:
@@ -694,16 +718,14 @@ def build_trade_setup(
     reward = abs(target - entry)
     rr = round(reward / max(0.01, risk), 2)
     dist_to_entry = abs(current_price - entry)
-    is_in_fresh_zone = zone_low <= current_price <= zone_high
-    status = "ACTIVE_IN_ZONE" if is_in_fresh_zone else "WAITING_PULLBACK"
-    order_type = f"{side} LIMIT"
-    is_advance_entry = (entry <= current_price) if side == "BUY" else (entry >= current_price)
+    is_advance_entry = True if execution_type == "MARKET" else ((entry <= current_price) if side == "BUY" else (entry >= current_price))
 
     return {
         "symbol": "XAUUSD",
         "trading_style": "scalping" if is_scalp else "intraday",
         "style_label_th": "⚡ โหมดเทรดสั้น (Gold Scalping)" if is_scalp else "🎯 โหมดเทรดรอบปกติ (Intraday SMC)",
         "side": side,
+        "execution_type": execution_type,
         "order_type": order_type,
         "is_advance_entry": is_advance_entry,
         "distance_to_entry_usd": r2(dist_to_entry),

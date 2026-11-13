@@ -156,6 +156,25 @@
           </div>
         </div>
 
+        <!-- Order Lifecycle Status & Live PnL Bar -->
+        <div id="orderLifecycleCard" class="order-lifecycle-bar status-pending">
+          <div class="lifecycle-main">
+            <div class="lifecycle-badge-row">
+              <span id="orderStatusPill" class="order-status-pill pill-pending">⏳ PENDING LIMIT</span>
+              <span id="orderExecTypePill" class="order-exec-pill">ดักเข้าล่วงหน้า</span>
+              <span id="orderPnlBadge" class="order-pnl-badge" style="display:none;">PnL: $0.00 (+0.00R)</span>
+            </div>
+            <div id="orderStatusMsg" class="lifecycle-msg">ตั้งคำสั่งรอราคาลงมาเกี่ยวที่โซนเข้า (จุดเข้าล็อคคงที่ ไม่หาย)</div>
+          </div>
+          <div class="lifecycle-actions" id="orderActionButtons">
+            <button id="btnOrderFillNow" class="btn-order-action btn-fill" title="กดเมื่อราคาใน MT5 เกี่ยวเปิดออเดอร์แล้ว">⚡ เปิดออเดอร์แล้ว</button>
+            <button id="btnOrderBreakeven" class="btn-order-action btn-be" style="display:none;" title="กดเมื่อเลื่อน SL มาบังทุนแล้ว">🛡️ บังทุนแล้ว</button>
+            <button id="btnOrderCloseManual" class="btn-order-action btn-close" style="display:none;" title="กดเมื่อปิดออเดอร์ใน MT5 แล้ว">✓ ปิดใน MT5 แล้ว</button>
+            <button id="btnOrderCancel" class="btn-order-action btn-cancel" title="ยกเลิกคำสั่งนี้และสแกนหาจังหวะใหม่">✕ ยกเลิกคำสั่ง</button>
+            <button id="btnScanNewSetup" class="btn-order-action btn-scan" title="รีเซ็ตและสั่ง AI สแกนแผนใหม่">🔄 สแกนใหม่</button>
+          </div>
+        </div>
+
         <!-- 2x2 Click-to-Copy Tiles for MT5 -->
         <div class="mt5-tiles">
           <button class="mt5-tile tile-lot copy-trigger" data-copy-target="valLot" title="คลิกเพื่อคัดลอก Lot Size">

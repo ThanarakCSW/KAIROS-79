@@ -1,6 +1,8 @@
 # Local config containing API keys and personal account settings
 config.json
 config.json.tmp
+active_order.json
+active_order.json.tmp
 *.local.json
 
 # Environment variables & secrets

@@ -131,7 +131,15 @@ def evaluate_risk_and_size(
                 f"โอกาสถึง TP จากสถิติจริง {win_pct:.1f}% (ผ่านเกณฑ์ > {min_win_prob:.0f}%)"
             )
 
-    if trade_setup.get("is_advance_entry") is False:
+    is_market_entry = (
+        trade_setup.get("execution_type") == "MARKET"
+        or "NOW" in str(trade_setup.get("order_type") or "")
+    )
+    if is_market_entry:
+        passed_checks.append(
+            f"สัญญาณเข้าทันทีที่ราคาปัจจุบัน ({side} NOW @ {entry_mt5:.2f}) ตามเงื่อนไขยืนยันในโซน"
+        )
+    elif trade_setup.get("is_advance_entry") is False:
         win_prob_passed = False
         reject_reasons.append(
             "ราคาวิ่งผ่านจุดเข้าไปแล้ว — ระบบจะแจ้งเฉพาะจุดดักเข้าล่วงหน้า (Pending Limit) เท่านั้น"
@@ -221,7 +229,8 @@ def evaluate_risk_and_size(
         "symbol": "XAUUSD",
         "trading_style": trading_style,
         "side": side,
-        "order_type": trade_setup.get("order_type", f"{side} LIMIT"),
+        "execution_type": "MARKET" if is_market_entry else "LIMIT",
+        "order_type": trade_setup.get("order_type", f"{side} NOW (Market)" if is_market_entry else f"{side} LIMIT"),
         "is_advance_entry": bool(trade_setup.get("is_advance_entry", True)),
         "distance_to_entry_usd": r2(float(trade_setup.get("distance_to_entry_usd") or 0.0)),
         "recommended_action": recommended_action,
