@@ -712,40 +712,69 @@ body {
   border-color: rgba(244, 63, 94, 0.45);
 }
 
-.ticket-top {
+/* Unified Order Lifecycle Bar & Header */
+.order-lifecycle-bar {
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  transition: all 0.2s ease;
+}
+
+.order-lifecycle-bar.status-filled {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.08);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.12);
+}
+
+.order-lifecycle-bar.status-pending {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.order-lifecycle-bar.status-idle {
+  border-color: var(--border-subtle);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.lifecycle-top-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.kicker {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  display: block;
-  margin-bottom: 2px;
-}
-
-.signal-main {
+.lifecycle-title-group {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.signal-main h2 {
+.lifecycle-title-group h2 {
   font-family: var(--font-mono);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 800;
   letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.lifecycle-badge-cluster {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .verdict-pill {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
-  padding: 3px 8px;
-  border-radius: 6px;
+  padding: 2px 7px;
+  border-radius: 5px;
 }
 
 .verdict-pill.pass {
@@ -766,67 +795,52 @@ body {
   border: 1px solid rgba(244, 63, 94, 0.4);
 }
 
-.confluence-meter {
-  text-align: right;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border-subtle);
-  padding: 5px 10px;
-  border-radius: 8px;
+.confluence-mini-pill {
+  background: rgba(245, 184, 65, 0.1);
+  border: 1px solid rgba(245, 184, 65, 0.3);
+  padding: 2px 7px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
-.conf-label {
-  display: block;
-  font-size: 10px;
+.confluence-mini-pill .conf-lbl {
+  font-size: 9.5px;
+  font-weight: 700;
   color: var(--text-muted);
   text-transform: uppercase;
 }
 
-.confluence-meter strong {
+.confluence-mini-pill strong {
   font-family: var(--font-mono);
-  font-size: 16px;
+  font-size: 12px;
   color: var(--gold);
 }
 
-/* Order Lifecycle Bar & Trade Management */
-.order-lifecycle-bar {
-  background: rgba(15, 23, 42, 0.7);
-  border: 1px solid var(--border-subtle);
-  border-radius: 10px;
-  padding: 10px 12px;
-  margin-bottom: 12px;
+.lifecycle-note-row {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  transition: all 0.2s ease;
-}
-
-.order-lifecycle-bar.status-filled {
-  border-color: rgba(16, 185, 129, 0.45);
-  background: rgba(16, 185, 129, 0.06);
-  box-shadow: 0 0 16px rgba(16, 185, 129, 0.12);
-}
-
-.order-lifecycle-bar.status-pending {
-  border-color: rgba(245, 158, 11, 0.4);
-  background: rgba(245, 158, 11, 0.05);
-}
-
-.order-lifecycle-bar.status-idle {
-  border-color: var(--border-subtle);
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.lifecycle-main {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.lifecycle-badge-row {
-  display: flex;
+  justify-content: space-between;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
+}
+
+.lifecycle-msg {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+  flex: 1;
+}
+
+.lifecycle-sub-note {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-family: var(--font-sans);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
 }
 
 .order-status-pill {
@@ -1052,8 +1066,15 @@ body {
   margin-bottom: 6px;
 }
 
+.mc-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ev-tag {
   font-family: var(--font-mono);
+  font-weight: 700;
   color: var(--gold);
 }
 
@@ -1083,23 +1104,24 @@ body {
 }
 
 .btn-copy-ticket {
-  width: 100%;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
-  border: 1px solid var(--border-subtle);
-  padding: 8px;
-  border-radius: 8px;
+  background: rgba(245, 184, 65, 0.12);
+  color: var(--gold);
+  border: 1px solid rgba(245, 184, 65, 0.35);
+  padding: 3px 9px;
+  border-radius: 6px;
   font-family: var(--font-sans);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
   cursor: pointer;
   transition: all 0.15s ease;
+  white-space: nowrap;
 }
 
 .btn-copy-ticket:hover {
-  background: rgba(245, 184, 65, 0.12);
-  border-color: var(--gold);
-  color: var(--gold);
+  background: var(--gold);
+  color: #080c14;
+  box-shadow: 0 0 10px rgba(245, 184, 65, 0.4);
+  transform: translateY(-1px);
 }
 
 /* ---------------- Tabbed AI & Risk Panel ---------------- */
@@ -1116,7 +1138,7 @@ body {
 
 .advisor-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr;
   background: #080c14;
   border-bottom: 1px solid var(--border-subtle);
   padding: 4px;
@@ -1192,8 +1214,8 @@ body {
   border: 1px solid var(--border-subtle);
   border-left: 3px solid var(--border-hover);
   border-radius: 8px;
-  padding: 9px 11px;
-  font-size: 12px;
+  padding: 8px 10px;
+  font-size: 11.5px;
 }
 
 .sc-primary { border-left-color: var(--bull); }
@@ -1205,14 +1227,14 @@ body {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 4px;
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .sc-badge {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
-  padding: 1px 7px;
+  padding: 1px 6px;
   border-radius: 99px;
   background: rgba(255, 255, 255, 0.06);
   color: var(--text-primary);
@@ -1220,7 +1242,21 @@ body {
 
 .sc-card p {
   color: var(--text-secondary);
-  line-height: 1.48;
+  line-height: 1.4;
+  margin: 0;
+  font-size: 11px;
+}
+
+.sc-grid-secondary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .sc-grid-secondary {
+    grid-template-columns: 1fr;
+  }
 }
 
 .pane-section h4 {

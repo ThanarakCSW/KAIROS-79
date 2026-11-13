@@ -141,36 +141,37 @@
     <aside class="command-sidebar">
       <!-- 1. Hero MT5 Execution Ticket -->
       <div class="ticket-hero" id="ticketCard">
-        <div class="ticket-top">
-          <div class="signal-title-block">
-            <span class="kicker" id="statusSub">🟢 พร้อมเข้าในโซน</span>
-            <div class="signal-main">
-              <h2 id="ticketSideTitle">BUY XAUUSD</h2>
-              <span id="verdictBadge" class="verdict-pill pass">PASS</span>
-            </div>
-          </div>
-
-          <div class="confluence-meter" title="คะแนนความแม่นยำจากจุดร่วม SMC + EMA">
-            <span class="conf-label">Confluence</span>
-            <strong id="confluenceBadge">85%</strong>
-          </div>
-        </div>
-
-        <!-- Order Lifecycle Status & Live PnL Bar -->
+        <!-- Integrated Order Lifecycle Header -->
         <div id="orderLifecycleCard" class="order-lifecycle-bar status-pending">
-          <div class="lifecycle-main">
-            <div class="lifecycle-badge-row">
-              <span id="orderStatusPill" class="order-status-pill pill-pending">⏳ PENDING LIMIT</span>
-              <span id="orderExecTypePill" class="order-exec-pill">ดักเข้าล่วงหน้า</span>
+          <div class="lifecycle-top-row">
+            <div class="lifecycle-title-group">
+              <h2 id="ticketSideTitle">BUY XAUUSD</h2>
+              <span id="orderStatusPill" class="order-status-pill pill-pending">⏳ PENDING</span>
               <span id="orderPnlBadge" class="order-pnl-badge" style="display:none;">PnL: $0.00 (+0.00R)</span>
             </div>
-            <div id="orderStatusMsg" class="lifecycle-msg">ตั้งคำสั่งรอราคาลงมาเกี่ยวที่โซนเข้า (จุดเข้าล็อคคงที่ ไม่หาย)</div>
+
+            <div class="lifecycle-badge-cluster">
+              <span id="verdictBadge" class="verdict-pill pass">PASS</span>
+              <div class="confluence-mini-pill" title="คะแนนความแม่นยำจากจุดร่วม SMC + EMA">
+                <span class="conf-lbl">CONF</span>
+                <strong id="confluenceBadge">85%</strong>
+              </div>
+              <span id="orderExecTypePill" class="order-exec-pill">ดัก LIMIT</span>
+            </div>
           </div>
+
+          <!-- Concise Status & Context Row -->
+          <div class="lifecycle-note-row">
+            <div id="orderStatusMsg" class="lifecycle-msg">ตั้งคำสั่งรอราคาลงมาเกี่ยวที่โซนเข้า (จุดเข้าล็อคคงที่)</div>
+            <span id="statusSub" class="lifecycle-sub-note">🟢 พร้อมเข้าในโซน</span>
+          </div>
+
+          <!-- Action Buttons -->
           <div class="lifecycle-actions" id="orderActionButtons">
             <button id="btnOrderFillNow" class="btn-order-action btn-fill" title="กดเมื่อราคาใน MT5 เกี่ยวเปิดออเดอร์แล้ว">⚡ เปิดออเดอร์แล้ว</button>
             <button id="btnOrderBreakeven" class="btn-order-action btn-be" style="display:none;" title="กดเมื่อเลื่อน SL มาบังทุนแล้ว">🛡️ บังทุนแล้ว</button>
             <button id="btnOrderCloseManual" class="btn-order-action btn-close" style="display:none;" title="กดเมื่อปิดออเดอร์ใน MT5 แล้ว">✓ ปิดใน MT5 แล้ว</button>
-            <button id="btnOrderCancel" class="btn-order-action btn-cancel" title="ยกเลิกคำสั่งนี้และสแกนหาจังหวะใหม่">✕ ยกเลิกคำสั่ง</button>
+            <button id="btnOrderCancel" class="btn-order-action btn-cancel" title="ยกเลิกคำสั่งนี้และสแกนหาจังหวะใหม่">✕ ยกเลิก</button>
             <button id="btnScanNewSetup" class="btn-order-action btn-scan" title="รีเซ็ตและสั่ง AI สแกนแผนใหม่">🔄 สแกนใหม่</button>
           </div>
         </div>
@@ -186,13 +187,13 @@
             <div class="tile-sub" id="riskUsdSub">ความเสี่ยง $50.00 (1%)</div>
           </button>
 
-          <button class="mt5-tile tile-entry copy-trigger" data-copy-target="valEntry" title="คลิกเพื่อคัดลอกราคา Entry ล่วงหน้า">
+          <button class="mt5-tile tile-entry copy-trigger" data-copy-target="valEntry" title="คลิกเพื่อคัดลอกราคา Entry">
             <div class="tile-head">
-              <span id="entryHeadLabel">ENTRY (LIMIT ล่วงหน้า)</span>
+              <span id="entryHeadLabel">ENTRY (LIMIT)</span>
               <span class="copy-hint">คัดลอก</span>
             </div>
             <div class="tile-val"><strong id="valEntry">2657.75</strong></div>
-            <div class="tile-sub" id="entryDistSub">จุดดักเข้าล่วงหน้า (ยังไม่ผ่าน)</div>
+            <div class="tile-sub" id="entryDistSub">จุดดักเข้าล่วงหน้า</div>
           </button>
 
           <button class="mt5-tile tile-sl copy-trigger" data-copy-target="valSL" title="คลิกเพื่อคัดลอกราคา Stop Loss">
@@ -201,7 +202,7 @@
               <span class="copy-hint">คัดลอก</span>
             </div>
             <div class="tile-val"><strong id="valSL">2654.20</strong></div>
-            <div class="tile-sub" id="slDistSub">ห่าง $3.55 (รวม Spread)</div>
+            <div class="tile-sub" id="slDistSub">ห่าง $3.55 (35 pts)</div>
           </button>
 
           <button class="mt5-tile tile-tp copy-trigger" data-copy-target="valTP" title="คลิกเพื่อคัดลอกราคา Take Profit">
@@ -214,11 +215,16 @@
           </button>
         </div>
 
-        <!-- Sleek 15,000-Path Monte Carlo Summary Strip -->
+        <!-- Compact Monte Carlo Strip & Copy Action -->
         <div class="mc-strip">
           <div class="mc-strip-head">
-            <span id="simTitleText">🎲 ผลจำลอง 15,000 ความเป็นไปได้</span>
-            <strong id="valEV" class="ev-tag">EV +0.72R</strong>
+            <div class="mc-title-group">
+              <span id="simTitleText">🎲 จำลอง 15,000 ครั้ง</span>
+              <strong id="valEV" class="ev-tag">EV +0.72R</strong>
+            </div>
+            <button id="btnCopyAllTicket" class="btn-copy-ticket" title="คัดลอกรายละเอียดคำสั่ง MT5 ทั้งชุดลง Clipboard">
+              📋 คัดลอกโพย MT5
+            </button>
           </div>
 
           <div class="mc-multi-bar">
@@ -229,22 +235,17 @@
 
           <div class="mc-legend-row">
             <span>🟢 ชนะแตะ TP: <strong id="valWinPct">54%</strong></span>
-            <span>🟡 เสี่ยงโดนกวาดหาง: <strong id="valSweepPct">10%</strong></span>
+            <span>🟡 กวาดหาง: <strong id="valSweepPct">10%</strong></span>
             <span>🔴 ชน SL: <strong id="valStopPct">36%</strong></span>
           </div>
         </div>
-
-        <button id="btnCopyAllTicket" class="btn-copy-ticket">
-          📋 คัดลอกโพยคำสั่ง MT5 ทั้งชุด
-        </button>
       </div>
 
       <!-- 2. Focused Tabbed AI Advisor -->
       <div class="advisor-panel">
         <div class="advisor-tabs">
-          <button class="adv-tab active" data-tab="scenarios">🎯 สรุปแผนหลัก</button>
-          <button class="adv-tab" data-tab="risks">🛡️ ความเสี่ยง &amp; จุดบอด</button>
-          <button class="adv-tab" data-tab="deep">🔍 เจาะลึกเชิงสถิติ</button>
+          <button class="adv-tab active" data-tab="scenarios">🎯 แผนกลยุทธ์ (Scenarios)</button>
+          <button class="adv-tab" data-tab="risks">🛡️ ตรวจความเสี่ยง &amp; บทวิเคราะห์</button>
         </div>
 
         <!-- Tab 1: 3 Scenarios (Default View) -->
@@ -256,6 +257,7 @@
           <div id="aiHeadline" class="ai-callout">—</div>
 
           <div class="scenario-cards">
+            <!-- Scenario A: Primary plan full width -->
             <div class="sc-card sc-primary">
               <div class="sc-header">
                 <strong id="scenATitle">🟢 Scenario A (แผนหลัก)</strong>
@@ -264,25 +266,28 @@
               <p id="scenADetail">—</p>
             </div>
 
-            <div class="sc-card sc-sweep">
-              <div class="sc-header">
-                <strong id="scenBTitle">🟡 Scenario B (ดัก Liquidity Sweep)</strong>
-                <span id="scenBProb" class="sc-badge">10%</span>
+            <!-- Scenarios B & C in compact side-by-side grid -->
+            <div class="sc-grid-secondary">
+              <div class="sc-card sc-sweep">
+                <div class="sc-header">
+                  <strong id="scenBTitle">🟡 Scenario B (ดัก Sweep)</strong>
+                  <span id="scenBProb" class="sc-badge">10%</span>
+                </div>
+                <p id="scenBDetail">—</p>
               </div>
-              <p id="scenBDetail">—</p>
-            </div>
 
-            <div class="sc-card sc-invalid">
-              <div class="sc-header">
-                <strong id="scenCTitle">🔴 Scenario C (จุดยกเลิกแผน)</strong>
-                <span id="scenCProb" class="sc-badge">15%</span>
+              <div class="sc-card sc-invalid">
+                <div class="sc-header">
+                  <strong id="scenCTitle">🔴 Scenario C (จุดยกเลิก)</strong>
+                  <span id="scenCProb" class="sc-badge">15%</span>
+                </div>
+                <p id="scenCDetail">—</p>
               </div>
-              <p id="scenCDetail">—</p>
             </div>
           </div>
         </div>
 
-        <!-- Tab 2: Blind Spots & Risk Gate Checklist -->
+        <!-- Tab 2: Blind Spots, Risk Gate & Confluence Deep Analysis -->
         <div id="tab-risks" class="adv-pane">
           <div class="pane-section">
             <h4>⚠️ จุดบอดที่ต้องระวังก่อนกดออเดอร์</h4>
@@ -292,16 +297,12 @@
             <h4>✅ ผลตรวจด่านความเสี่ยง (Deterministic Risk Gate)</h4>
             <div id="gateChecklist" class="gate-stack"></div>
           </div>
-        </div>
-
-        <!-- Tab 3: Full Confluence Summary & Verdict -->
-        <div id="tab-deep" class="adv-pane">
           <div class="pane-section">
-            <h4>🔍 สรุปโครงสร้างกราฟและจุดร่วม (Confluence Analysis)</h4>
+            <h4>🔍 บทวิเคราะห์จุดร่วมและโครงสร้าง SMC</h4>
             <p id="aiSummary" class="deep-prose">—</p>
           </div>
           <div class="pane-section">
-            <h4>📈 ข้อสรุปทางสถิติจาก 15,000 เส้นทาง</h4>
+            <h4>📈 ข้อสรุปทางสถิติ (Monte Carlo Verdict)</h4>
             <p id="simVerdictText" class="sim-verdict-box">—</p>
           </div>
         </div>
