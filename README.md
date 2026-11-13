@@ -80,6 +80,50 @@ python3 app.py
 
 ---
 
+## คู่มือติดตั้งและเชื่อมต่อ MT5 EA บน Windows PC / VPS (แก้ปัญหา DISCONNECTED)
+
+หากรันทั้งเซิร์ฟเวอร์ Python และ MetaTrader 5 บนเครื่อง Windows เดียวกัน แล้วบนกราฟ MT5 แสดงข้อความ `🔴 DISCONNECTED` ให้ปฏิบัติตามขั้นตอนต่อไปนี้:
+
+### 1. เปิดสิทธิ์ WebRequest ใน MetaTrader 5 (สาเหตุหลักที่พบบ่อยที่สุด)
+MT5 จะบล็อกการเชื่อมต่อ HTTP ออกจากโปรแกรมทั้งหมดเป็นค่าเริ่มต้น (Error 4014) จนกว่าจะเพิ่ม URL ในรายการที่อนุญาต:
+1. ใน MT5 ไปที่แถบเมนูด้านบน: **Tools (เครื่องมือ)** &rarr; **Options (ตัวเลือก)** หรือกดคีย์ลัด `Ctrl + O`
+2. คลิกเลือกแท็บ **Expert Advisors**
+3. ติ๊กถูกที่ช่อง **`[✓] Allow WebRequest for listed URL:`**
+4. ดับเบิลคลิกที่บรรทัดว่าง (เครื่องหมายบวกสีเขียว) แล้วพิมพ์เพิ่ม 2 รายการ:
+   - `http://127.0.0.1:8000`
+   - `http://localhost:8000`
+5. ติ๊กถูกที่ **`[✓] Allow Algo Trading`** แล้วคลิกปุ่ม **OK**
+
+### 2. ตรวจสอบการตั้งค่า EA บนกราฟ (กดคีย์ลัด F7)
+*หมายเหตุ:* ใน MT5 เมื่อ Recompile โค้ดแล้ว MT5 จะ**ไม่**รีเซ็ตค่า Inputs ของ EA ที่เปิดคาอยู่บนกราฟเดิม:
+1. คลิกขวาบนกราฟ XAUUSD ที่ใส่ EA ไว้ &rarr; **Expert List** &rarr; **Properties** (หรือกดปุ่ม **`F7`**)
+2. ไปที่แท็บ **Inputs**:
+   - `InpServerUrl`: ต้องเป็น `http://127.0.0.1:8000` (หากยังเป็น `8080` ให้เปลี่ยนเป็น `8000` ทันที)
+   - `InpMagicNumber`: `797979`
+3. ไปที่แท็บ **Common**: ติ๊กถูก **`[✓] Allow Algo Trading`**
+4. คลิก **OK**
+
+### 3. รันเซิร์ฟเวอร์ KAIROS-79 บน Windows Terminal
+เปิด PowerShell หรือ Command Prompt บน Windows แล้วสั่งรัน:
+```cmd
+python app.py
+```
+ตรวจสอบข้อความบนหน้าจอ Terminal ว่าขึ้น:
+```
+🌐 Web Dashboard (Local): http://localhost:8000
+🤖 MT5 EA Bridge URL:     http://127.0.0.1:8000
+```
+เปิดเบราว์เซอร์ Chrome/Edge บนเครื่อง Windows แล้วเข้าไปที่ `http://127.0.0.1:8000` เพื่อยืนยันว่าหน้าเว็บโหลดขึ้นปกติ
+
+### 4. รหัสข้อผิดพลาดบนหน้าจอกราฟ MT5 (HUD Diagnostic)
+- `🟢 CONNECTED (Online)`: เชื่อมต่อสมบูรณ์ ซิงก์ข้อมูลแบบ Real-time
+- `🔴 DISCONNECTED: Blocked by MT5 (Error 4014)`: MT5 บล็อก WebRequest ให้ทำตามขั้นตอนที่ 1
+- `🔴 DISCONNECTED: Connection Refused (Error 5203)`: ยังไม่ได้รัน `python app.py` หรือรันคนละพอร์ต
+- `🔴 DISCONNECTED: Port 8080 Refused`: กราฟยังค้างพอร์ต 8080 เก่า ให้กด `F7` แล้วแก้เป็น `:8000`
+- ตรวจสอบให้ปุ่ม **Algo Trading** แถบเครื่องมือด้านบน MT5 แสดงสถานะเป็น **สีเขียว (Play)**
+
+---
+
 ## การทดสอบ (Unit & Integration Tests)
 
 ```bash

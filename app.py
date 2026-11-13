@@ -769,8 +769,10 @@ class AssistantServer:
                 writer.close()
                 return
             method, full_path = parts[0].upper(), parts[1]
-            parsed_url = urllib.parse.urlparse(full_path)
-            path = parsed_url.path
+            norm_full_path = "/" + full_path.lstrip("/")
+            parsed_url = urllib.parse.urlparse(norm_full_path)
+            raw_path = parsed_url.path
+            path = "/" + "/".join([seg for seg in raw_path.split("/") if seg])
             query = urllib.parse.parse_qs(parsed_url.query)
 
             headers: Dict[str, str] = {}
@@ -1198,27 +1200,49 @@ class AssistantServer:
 
     async def serve_forever(self) -> None:
         self.core.compute_full_state(force_refresh=True)
+        listen_host = None if self.host in ("0.0.0.0", "", None) else self.host
         try:
             server = await asyncio.start_server(
-                self.handle_client, self.host, self.port, reuse_address=True
+                self.handle_client, listen_host, self.port, reuse_address=True
             )
         except OSError:
             # Automatically terminate any old server instance still holding the port
+            if os.name != "nt":
+                try:
+                    out = subprocess.check_output(
+                        ["lsof", "-ti", f"tcp:{self.port}"], text=True
+                    ).strip()
+                    my_pid = os.getpid()
+                    for line in out.splitlines():
+                        pid = int(line.strip())
+                        if pid != my_pid:
+                            os.kill(pid, signal.SIGTERM)
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+            else:
+                try:
+                    out = subprocess.check_output(
+                        f"netstat -ano | findstr :{self.port}", shell=True, text=True
+                    )
+                    my_pid = os.getpid()
+                    for line in out.splitlines():
+                        parts = line.strip().split()
+                        if len(parts) >= 5 and "LISTENING" in line.upper():
+                            pid = int(parts[-1])
+                            if pid != my_pid and pid > 0:
+                                subprocess.run(f"taskkill /F /PID {pid}", shell=True, capture_output=True)
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass
             try:
-                out = subprocess.check_output(
-                    ["lsof", "-ti", f"tcp:{self.port}"], text=True
-                ).strip()
-                my_pid = os.getpid()
-                for line in out.splitlines():
-                    pid = int(line.strip())
-                    if pid != my_pid:
-                        os.kill(pid, signal.SIGTERM)
-                await asyncio.sleep(0.5)
-            except Exception:
-                pass
-            server = await asyncio.start_server(
-                self.handle_client, self.host, self.port, reuse_address=True
-            )
+                server = await asyncio.start_server(
+                    self.handle_client, listen_host, self.port, reuse_address=True
+                )
+            except OSError as exc:
+                print(f"❌ Failed to bind to port {self.port}: {exc}")
+                print(f"👉 Please close the process using port {self.port} or run with: python app.py --port 8001")
+                raise
         tick_task = asyncio.create_task(self.tick_loop())
         tv_task = asyncio.create_task(self.tv_ws_loop())
         ws_task = asyncio.create_task(self.binance_ws_loop())

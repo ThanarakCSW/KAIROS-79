@@ -442,6 +442,16 @@
               <span style="font-size: 12px; color: var(--text-primary);">เปิดใช้งาน Auto-Trading (เมื่อเปิด สัญญาณจะส่งเข้าพอร์ต MT5 ทันที)</span>
             </div>
             <small style="color: var(--text-muted); margin-top: 4px;">รองรับ MT5 บน Windows PC / VPS ผ่าน WebRequest URL: <code id="eaWebRequestUrl">http://127.0.0.1:8000</code> (Magic: 797979)</small>
+            <div class="mt5-setup-guide" style="margin-top: 8px; padding: 8px 10px; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; font-size: 11px; line-height: 1.5; color: var(--text-secondary);">
+              <div style="font-weight: 700; color: #60a5fa; margin-bottom: 4px;">💡 วิธีแก้สถานะ DISCONNECTED ใน MT5 บน Windows:</div>
+              <ol style="margin: 0 0 0 16px; padding: 0;">
+                <li>ใน MT5 ไปที่ <strong>Tools</strong> &rarr; <strong>Options (Ctrl+O)</strong> &rarr; แท็บ <strong>Expert Advisors</strong></li>
+                <li>ติ๊กถูก <strong style="color: #34d399;">[✓] Allow WebRequest for listed URL:</strong></li>
+                <li>เพิ่ม 2 URL: <code>http://127.0.0.1:8000</code> และ <code>http://localhost:8000</code></li>
+                <li>บนกราฟ MT5 กด <strong>F7</strong> ตรวจสอบว่าช่อง <code>InpServerUrl</code> เป็น <code>http://127.0.0.1:8000</code></li>
+                <li>กดปุ่ม <strong style="color: #34d399;">Algo Trading</strong> ด้านบนของ MT5 ให้เป็นสีเขียว</li>
+              </ol>
+            </div>
           </label>
         </div>
 

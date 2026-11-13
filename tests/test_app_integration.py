@@ -333,6 +333,46 @@ class TestAppIntegration(unittest.TestCase):
             if core.order_manager.has_active_order():
                 self.assertEqual(core.order_manager.active_order["trading_style"], "scalping")
 
+    def test_double_slash_url_resilience_and_ea_endpoints(self):
+        """Verify server normalizes leading/double slashes (//api/ea/...) from EA without 404."""
+        async def _run():
+            srv = AssistantServer(host="127.0.0.1", port=8080)
+            srv.core.compute_full_state()
+
+            # 1. Test POST //api/ea/heartbeat (simulating EA with trailing slash InpServerUrl + /api/ea/heartbeat)
+            reader = asyncio.StreamReader()
+            body_bytes = json.dumps({"account_id": 999111, "broker": "TestBroker", "equity": 5000.0}).encode("utf-8")
+            hb_req = (
+                f"POST //api/ea/heartbeat HTTP/1.1\r\n"
+                f"Host: localhost\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(body_bytes)}\r\n\r\n"
+            ).encode("utf-8") + body_bytes
+            reader.feed_data(hb_req)
+            reader.feed_eof()
+            writer = _MemoryWriter()
+            await srv.handle_client(reader, writer)
+
+            raw = bytes(writer.buffer)
+            self.assertIn(b"200 OK", raw)
+            resp_doc = json.loads(raw.split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertEqual(resp_doc.get("status"), "ok")
+
+            # 2. Test GET //api/ea/poll
+            reader2 = asyncio.StreamReader()
+            reader2.feed_data(b"GET //api/ea/poll HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            reader2.feed_eof()
+            writer2 = _MemoryWriter()
+            await srv.handle_client(reader2, writer2)
+
+            raw2 = bytes(writer2.buffer)
+            self.assertIn(b"200 OK", raw2)
+            resp_doc2 = json.loads(raw2.split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertEqual(resp_doc2.get("status"), "ok")
+            self.assertIn("actions", resp_doc2)
+
+        asyncio.run(_run())
+
 
 if __name__ == "__main__":
     unittest.main()

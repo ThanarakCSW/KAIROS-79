@@ -34,10 +34,39 @@ CPositionInfo  m_position;
 COrderInfo     m_order;
 
 string         g_symbol;
+string         g_server_url = "http://127.0.0.1:8000";
 ulong          g_last_heartbeat_ms = 0;
 bool           g_server_online = false;
 bool           g_auto_trading_enabled = false;
 int            g_consecutive_errors = 0;
+int            g_last_error_code = 0;
+int            g_last_http_code = 0;
+string         g_last_error_desc = "Initializing connection...";
+ulong          g_last_success_ms = 0;
+
+//+------------------------------------------------------------------+
+//| Sanitize and Normalize Server URL                                |
+//+------------------------------------------------------------------+
+string SanitizeServerUrl(const string raw_url)
+{
+   string url = raw_url;
+   StringTrimLeft(url);
+   StringTrimRight(url);
+
+   // Prepend http:// if missing protocol
+   if(StringFind(url, "http://") != 0 && StringFind(url, "https://") != 0)
+   {
+      url = "http://" + url;
+   }
+
+   // Strip trailing slashes
+   while(StringLen(url) > 0 && StringSubstr(url, StringLen(url) - 1, 1) == "/")
+   {
+      url = StringSubstr(url, 0, StringLen(url) - 1);
+   }
+
+   return url;
+}
 
 //+------------------------------------------------------------------+
 //| Helper: Extract string value from simple JSON                    |
@@ -119,7 +148,7 @@ void SetupFillingMode(const string symbol)
 //+------------------------------------------------------------------+
 bool SendHttpRequest(const string method, const string endpoint, const string post_data, string &response_text)
 {
-   string url = InpServerUrl + endpoint;
+   string url = g_server_url + endpoint;
    char post_bytes[];
    char result_bytes[];
    string result_headers;
@@ -136,15 +165,45 @@ bool SendHttpRequest(const string method, const string endpoint, const string po
    {
       int err = GetLastError();
       g_consecutive_errors++;
+      g_server_online = false;
+      g_last_error_code = err;
+      g_last_http_code = 0;
+
       if(err == 4014) // ERR_FUNCTION_NOT_ALLOWED
       {
-         Print("❌ WebRequest Error (4014): Please add '", InpServerUrl, "' in MT5 Menu -> Tools -> Options -> Expert Advisors -> Allow WebRequest for listed URL");
+         g_last_error_desc = "Blocked by MT5 (Error 4014)";
+         if(g_consecutive_errors <= 3 || (g_consecutive_errors % 20 == 0))
+         {
+            Print("❌ WebRequest Error (4014): Blocked by MT5 WebRequest Whitelist!");
+            Print("   👉 Step 1: MT5 Menu -> Tools (เครื่องมือ) -> Options (ตัวเลือก)");
+            Print("   👉 Step 2: Tab 'Expert Advisors'");
+            Print("   👉 Step 3: Check [✓] 'Allow WebRequest for listed URL'");
+            PrintFormat("   👉 Step 4: Add URL: %s", g_server_url);
+            Print("   👉 Step 5: Add URL: http://localhost:8000");
+         }
+      }
+      else if(err == 5203) // ERR_NETSOCKET_FAILED / Connection refused
+      {
+         if(StringFind(g_server_url, ":8080") >= 0)
+            g_last_error_desc = "Port 8080 Refused (Press F7 -> change to :8000)";
+         else
+            g_last_error_desc = "Connection Refused (Error 5203)";
+
+         if(g_consecutive_errors <= 3 || (g_consecutive_errors % 20 == 0))
+         {
+            PrintFormat("⚠️ WebRequest to %s failed (Error 5203: Connection Refused).", url);
+            Print("   👉 Make sure Python server is running on Windows (run 'python app.py')");
+            Print("   👉 Check that server port matches EA: " + g_server_url);
+         }
       }
       else
       {
-         PrintFormat("⚠️ WebRequest to %s failed (Error %d)", url, err);
+         g_last_error_desc = StringFormat("Network Error %d", err);
+         if(g_consecutive_errors <= 3 || (g_consecutive_errors % 20 == 0))
+         {
+            PrintFormat("⚠️ WebRequest to %s failed (Error %d)", url, err);
+         }
       }
-      g_server_online = false;
       return false;
    }
 
@@ -152,12 +211,23 @@ bool SendHttpRequest(const string method, const string endpoint, const string po
    {
       g_consecutive_errors++;
       g_server_online = false;
-      PrintFormat("⚠️ WebRequest to %s returned HTTP %d", url, res);
+      g_last_error_code = 0;
+      g_last_http_code = res;
+      g_last_error_desc = StringFormat("HTTP %d Error (%s)", res, endpoint);
+      if(g_consecutive_errors <= 3 || (g_consecutive_errors % 20 == 0))
+      {
+         PrintFormat("⚠️ WebRequest to %s returned HTTP %d", url, res);
+      }
       return false;
    }
 
+   // Request Succeeded
    g_consecutive_errors = 0;
    g_server_online = true;
+   g_last_error_code = 0;
+   g_last_http_code = res;
+   g_last_error_desc = "Online (Synchronized)";
+   g_last_success_ms = GetTickCount64();
    response_text = CharArrayToString(result_bytes, 0, WHOLE_ARRAY, CP_UTF8);
    return true;
 }
@@ -525,7 +595,12 @@ void PollServerActions()
 //+------------------------------------------------------------------+
 void UpdateChartHUD()
 {
-   string conn_text = g_server_online ? "🟢 CONNECTED (Online)" : "🔴 DISCONNECTED (Check Server / URL)";
+   string conn_text;
+   if(g_server_online)
+      conn_text = "🟢 CONNECTED (Online)";
+   else
+      conn_text = "🔴 DISCONNECTED: " + g_last_error_desc;
+
    string auto_text = g_auto_trading_enabled ? "🟢 AUTO-TRADING: ON" : "⏸️ AUTO-TRADING: OFF";
 
    bool terminal_trade_allowed = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
@@ -534,18 +609,53 @@ void UpdateChartHUD()
                               ? "✅ MT5 Algo Trading: ALLOWED"
                               : "⚠️ MT5 Algo Trading: DISABLED (Click Algo Trading button!)";
 
+   string trouble_hint = "";
+   if(!g_server_online)
+   {
+      if(g_last_error_code == 4014)
+      {
+         trouble_hint = "  ⚠️ FIX ERROR 4014 (BLOCKED BY MT5):\n"
+                      + "  1) Menu: Tools (เครื่องมือ) -> Options (ตัวเลือก)\n"
+                      + "  2) Tab: 'Expert Advisors'\n"
+                      + "  3) Check: [✓] Allow WebRequest for listed URL\n"
+                      + "  4) Add URL: " + g_server_url + "\n"
+                      + "  5) Add URL: http://localhost:8000\n"
+                      + "  6) Click OK";
+      }
+      else if(StringFind(g_server_url, ":8080") >= 0)
+      {
+         trouble_hint = "  ⚠️ FIX PORT MISMATCH:\n"
+                      + "  Chart uses old port 8080! Server is on port 8000.\n"
+                      + "  👉 Press F7 on chart -> Change Server URL to: http://127.0.0.1:8000";
+      }
+      else if(g_last_error_code == 5203)
+      {
+         trouble_hint = "  ⚠️ FIX ERROR 5203 (CANNOT CONNECT):\n"
+                      + "  1) Make sure Python server is running on Windows:\n"
+                      + "     python app.py\n"
+                      + "  2) Open Windows browser and test: http://127.0.0.1:8000\n"
+                      + "  3) Press F7 on chart to verify URL: " + g_server_url;
+      }
+      else
+      {
+         trouble_hint = "  ⚠️ FIX CONNECTION:\n"
+                      + "  1) Check 'python app.py' terminal on Windows\n"
+                      + "  2) Verify chart URL (press F7): " + g_server_url;
+      }
+   }
+
    string hud = "========================================\n"
-              + "  🤖 KAIROS-79 EA Bridge v1.01\n"
+              + "  🤖 KAIROS-79 EA Bridge v1.02\n"
               + "========================================\n"
-              + "  Server URL:    " + InpServerUrl + "\n"
-              + "  Status:        " + conn_text + "\n"
-              + "  Web Control:   " + auto_text + "\n"
-              + "  Algo Trading:  " + trade_btn_status + "\n"
-              + "  Magic Number:  " + IntegerToString(InpMagicNumber) + "\n"
-              + "  Symbol:        " + g_symbol + "\n"
+              + "  Server URL:     " + g_server_url + "\n"
+              + "  Status:         " + conn_text + "\n"
+              + "  Web Control:    " + auto_text + "\n"
+              + "  Algo Trading:   " + trade_btn_status + "\n"
+              + "  Magic Number:   " + IntegerToString(InpMagicNumber) + "\n"
+              + "  Symbol:         " + g_symbol + "\n"
               + "  Open Positions: " + IntegerToString(PositionsTotal()) + "\n"
               + "========================================\n"
-              + (g_server_online ? "  ✅ Telemetry Live Syncing" : "  ⚠️ If Offline: Verify Tools -> Options -> WebRequest");
+              + (g_server_online ? "  ✅ Telemetry Live Syncing" : trouble_hint);
 
    Comment(hud);
 }
@@ -556,6 +666,7 @@ void UpdateChartHUD()
 int OnInit()
 {
    g_symbol = (InpSymbolOverride != "") ? InpSymbolOverride : _Symbol;
+   g_server_url = SanitizeServerUrl(InpServerUrl);
 
    // Setup CTrade
    m_trade.SetExpertMagicNumber(InpMagicNumber);
@@ -565,9 +676,13 @@ int OnInit()
       SetupFillingMode(g_symbol);
 
    Print("=======================================================");
-   Print("🚀 Starting KAIROS-79 MT5 Bridge EA on ", g_symbol);
-   Print("🔗 Server URL: ", InpServerUrl);
+   Print("🚀 Starting KAIROS-79 MT5 Bridge EA v1.02 on ", g_symbol);
+   Print("🔗 Configured Server URL: ", g_server_url);
    Print("🛡️ Magic Number: ", InpMagicNumber);
+   if(StringFind(g_server_url, ":8080") >= 0)
+   {
+      Print("⚠️ CAUTION: Configured URL uses port 8080! If KAIROS-79 is on port 8000, please press F7 and update to http://127.0.0.1:8000");
+   }
    Print("=======================================================");
 
    // Initial heartbeat & check
@@ -575,7 +690,7 @@ int OnInit()
    SendHeartbeat();
    UpdateChartHUD();
 
-   // Set high-frequency timer for low latency execution
+   // Set millisecond timer
    EventSetMillisecondTimer(InpPollIntervalMs);
 
    return(INIT_SUCCEEDED);
@@ -607,7 +722,11 @@ void OnTimer()
    }
 
    // 2. Poll pending actions from KAIROS-79
-   PollServerActions();
+   // If offline, throttle polling to avoid freezing UI
+   if(g_server_online || (now_ms - g_last_heartbeat_ms >= 2000))
+   {
+      PollServerActions();
+   }
 }
 
 //+------------------------------------------------------------------+

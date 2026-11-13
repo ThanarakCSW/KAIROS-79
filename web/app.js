@@ -1452,14 +1452,20 @@
 
     // Settings Modal open/close
     const modal = el("settingsModal");
-    el("btnOpenSettings").addEventListener("click", () => {
+    const openSettings = () => {
       populateSettingsForm(currentState ? currentState.config : null);
       const eaUrlEl = el("eaWebRequestUrl");
       if (eaUrlEl && window.location.origin) {
         eaUrlEl.textContent = window.location.origin;
       }
       modal.classList.remove("hidden");
-    });
+    };
+    el("btnOpenSettings").addEventListener("click", openSettings);
+    const mt5PillBtn = el("mt5StatusPill");
+    if (mt5PillBtn) {
+      mt5PillBtn.style.cursor = "pointer";
+      mt5PillBtn.addEventListener("click", openSettings);
+    }
     el("btnCloseSettings").addEventListener("click", () => modal.classList.add("hidden"));
     el("btnCancelSettings").addEventListener("click", () => modal.classList.add("hidden"));
     modal.addEventListener("click", (e) => {
