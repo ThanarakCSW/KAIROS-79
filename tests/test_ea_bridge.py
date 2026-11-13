@@ -620,6 +620,198 @@ class TestEABridge(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_no_duplicate_reenqueue_after_poll(self):
+        """Verify once an active order is polled or rejected, compute_full_state never re-enqueues it."""
+        import tempfile
+        from engine.order_lifecycle import OrderLifecycleManager
+
+        tmp_state = os.path.join(tempfile.gettempdir(), f"k79_test_state_{os.getpid()}_1.json")
+        if os.path.exists(tmp_state):
+            os.remove(tmp_state)
+        try:
+            core = TradingAssistantCore()
+            core.ea_bridge = EABridgeManager(config_path=self.tmp_config, heartbeat_timeout_sec=2.0)
+            core.order_manager = OrderLifecycleManager(persistence_path=tmp_state)
+            core.ea_bridge.set_auto_trading(True)
+            core.ea_bridge.action_queue.clear()
+            core.ea_bridge.executed_signal_ids.clear()
+
+            core.order_manager.register_trade_setup(
+                risk_ticket={
+                    "side": "BUY",
+                    "execution_type": "LIMIT",
+                    "order_type": "BUY LIMIT (Pending)",
+                    "entry_mt5": 2650.0,
+                    "stop_mt5": 2640.0,
+                    "tp1_mt5": 2660.0,
+                    "target_mt5": 2670.0,
+                    "lot_size": 0.10,
+                    "win_prob_passed": True,
+                    "verdict": "PASS",
+                },
+                smc_setup={"side": "BUY", "confluence_score": 85},
+                current_price=2655.0,
+                timeframe="M5",
+                force_replace=True,
+            )
+
+            # First compute_full_state enqueues OPEN_ORDER once
+            core.compute_full_state(timeframe="M5")
+            self.assertEqual(len(core.ea_bridge.action_queue), 1)
+            sig_id = core.ea_bridge.action_queue[0]["signal_id"]
+
+            # Simulate EA polling (moves action to IN_FLIGHT, clears queue)
+            polled = core.ea_bridge.poll_actions()
+            self.assertEqual(len(polled), 1)
+            self.assertEqual(len(core.ea_bridge.action_queue), 0)
+
+            # Second compute_full_state must NOT re-enqueue while awaiting/IN_FLIGHT
+            core.compute_full_state(timeframe="M5")
+            self.assertEqual(len(core.ea_bridge.action_queue), 0)
+
+            # Simulate EA REJECTED report -> must still NOT re-enqueue infinitely
+            rec = core.ea_bridge.record_execution({
+                "action_id": polled[0]["action_id"],
+                "signal_id": sig_id,
+                "status": "REJECTED",
+                "error_msg": "Spread too wide",
+            })
+            core.order_manager.bind_execution_report(rec)
+            core.compute_full_state(timeframe="M5")
+            self.assertEqual(len(core.ea_bridge.action_queue), 0)
+        finally:
+            if os.path.exists(tmp_state):
+                os.remove(tmp_state)
+
+    def test_sub_order_execution_binds_to_correct_sub_order_ticket(self):
+        """Verify sub-order execution binds to sub_order without overwriting primary ticket."""
+        import tempfile
+        from engine.order_lifecycle import OrderLifecycleManager
+
+        tmp_state = os.path.join(tempfile.gettempdir(), f"k79_test_state_{os.getpid()}_2.json")
+        if os.path.exists(tmp_state):
+            os.remove(tmp_state)
+        try:
+            mgr = OrderLifecycleManager(persistence_path=tmp_state)
+            primary = mgr.register_trade_setup(
+                risk_ticket={
+                    "side": "BUY",
+                    "execution_type": "MARKET",
+                    "order_type": "BUY NOW (Market Execution)",
+                    "entry_mt5": 2650.0,
+                    "stop_mt5": 2640.0,
+                    "tp1_mt5": 2660.0,
+                    "target_mt5": 2670.0,
+                    "lot_size": 0.10,
+                    "win_prob_passed": True,
+                    "verdict": "PASS",
+                },
+                smc_setup={"side": "BUY", "confluence_score": 85},
+                current_price=2650.0,
+                timeframe="M5",
+                force_replace=True,
+            )
+            self.assertTrue(mgr.bind_execution_report({
+                "status": "FILLED",
+                "signal_id": primary["order_id"],
+                "ticket": 1001,
+                "fill_price": 2650.20,
+            }))
+
+            sub = mgr.add_sub_order(
+                purpose="RECOVERY",
+                execution_type="MARKET",
+                current_price=2646.0,
+                lot_size=0.10,
+            )
+            self.assertIsNotNone(sub)
+            self.assertTrue(mgr.bind_execution_report({
+                "status": "FILLED",
+                "signal_id": sub["order_id"],
+                "ticket": 1002,
+                "fill_price": 2646.10,
+            }))
+
+            self.assertEqual(mgr.active_orders[0]["broker_ticket"], 1001)
+            self.assertEqual(mgr.active_orders[1]["broker_ticket"], 1002)
+            self.assertEqual(mgr.active_orders[1]["filled_price"], 2646.10)
+        finally:
+            if os.path.exists(tmp_state):
+                os.remove(tmp_state)
+
+    def test_mt5_position_reconciliation_and_tp1_partial_close(self):
+        """Verify reconciliation promotes PENDING->FILLED, cleans external close after 2 misses, and PARTIAL_CLOSED shrinks lot."""
+        import tempfile
+        import time as _time
+        from engine.order_lifecycle import OrderLifecycleManager
+
+        tmp_state = os.path.join(tempfile.gettempdir(), f"k79_test_state_{os.getpid()}_3.json")
+        if os.path.exists(tmp_state):
+            os.remove(tmp_state)
+        try:
+            mgr = OrderLifecycleManager(persistence_path=tmp_state)
+            ord_item = mgr.register_trade_setup(
+                risk_ticket={
+                    "side": "BUY",
+                    "execution_type": "LIMIT",
+                    "order_type": "BUY LIMIT (Pending)",
+                    "entry_mt5": 2650.0,
+                    "stop_mt5": 2640.0,
+                    "tp1_mt5": 2660.0,
+                    "target_mt5": 2670.0,
+                    "lot_size": 0.20,
+                    "win_prob_passed": True,
+                    "verdict": "PASS",
+                },
+                smc_setup={"side": "BUY", "confluence_score": 85},
+                current_price=2655.0,
+                timeframe="M5",
+                force_replace=True,
+            )
+            # 1. EA placed pending limit order on MT5
+            mgr.bind_execution_report({
+                "status": "PLACED",
+                "signal_id": ord_item["order_id"],
+                "ticket": 555001,
+                "fill_price": 2650.0,
+            })
+            self.assertEqual(mgr.active_orders[0]["status"], "PENDING")
+            self.assertEqual(mgr.active_orders[0]["broker_ticket"], 555001)
+
+            # 2. Heartbeat reports ticket 555001 is now an open position -> promotes to FILLED
+            mgr.reconcile_mt5_positions(
+                open_positions=[{"ticket": 555001, "volume": 0.20, "open_price": 2650.0, "sl": 2640.0, "tp": 2670.0}],
+                pending_orders=[],
+                current_price=2652.0,
+            )
+            self.assertEqual(mgr.active_orders[0]["status"], "FILLED")
+
+            # 3. PARTIAL_CLOSED shrinks lot_size and updates SL to breakeven
+            mgr.bind_execution_report({
+                "status": "PARTIAL_CLOSED",
+                "signal_id": ord_item["order_id"],
+                "ticket": 555001,
+                "lot": 0.10,
+                "sl": 2650.25,
+            })
+            self.assertAlmostEqual(mgr.active_orders[0]["lot_size"], 0.10, places=2)
+            self.assertAlmostEqual(mgr.active_orders[0]["stop_mt5"], 2650.25, places=2)
+            self.assertTrue(mgr.active_orders[0]["sl_moved_breakeven"])
+
+            # 4. External close on MT5: 1st miss holds, 2nd miss (age >= 5s) closes order cleanly
+            mgr.active_orders[0]["filled_ts"] = int(_time.time()) - 10
+            ev1 = mgr.reconcile_mt5_positions(open_positions=[], pending_orders=[], current_price=2670.0)
+            self.assertIsNone(ev1)
+            self.assertTrue(mgr.has_active_order())
+
+            ev2 = mgr.reconcile_mt5_positions(open_positions=[], pending_orders=[], current_price=2670.0)
+            self.assertIsNotNone(ev2)
+            self.assertFalse(mgr.has_active_order())
+            self.assertEqual(mgr.order_history[-1]["close_reason"], "MT5_EXTERNAL_CLOSE")
+        finally:
+            if os.path.exists(tmp_state):
+                os.remove(tmp_state)
+
 
 if __name__ == "__main__":
     unittest.main()

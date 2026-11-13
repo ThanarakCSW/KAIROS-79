@@ -152,6 +152,26 @@ class TestRiskGate(unittest.TestCase):
         self.assertEqual(res_micro["verdict"], "REJECT")
         self.assertTrue(any("Margin ไม่พอ" in r for r in res_micro["reject_reasons"]))
 
+    def test_daily_loss_limit_and_spread_guard_rejection(self):
+        """Verify daily drawdown kill switch, spread USD cap, and max trades per day reject entries."""
+        # 1. Daily drawdown >= max_daily_loss_pct -> REJECT
+        cfg_dd = dict(self.config, max_daily_loss_pct=4.0, current_daily_loss_pct=4.2)
+        res_dd = evaluate_risk_and_size(self.setup_buy, self.sim_good, self.news_clear, cfg_dd)
+        self.assertEqual(res_dd["verdict"], "REJECT")
+        self.assertTrue(any("เพดานขาดทุนรายวัน" in r for r in res_dd["reject_reasons"]))
+
+        # 2. Spread USD > max_spread_usd (120 pts * 0.01 = $1.20 > $0.80) -> REJECT
+        cfg_spread = dict(self.config, broker_spread_points=120.0, max_spread_usd=0.80)
+        res_spread = evaluate_risk_and_size(self.setup_buy, self.sim_good, self.news_clear, cfg_spread)
+        self.assertEqual(res_spread["verdict"], "REJECT")
+        self.assertTrue(any("Spread สูงเกินเพดาน" in r for r in res_spread["reject_reasons"]))
+
+        # 3. Max trades per day exhausted -> REJECT
+        cfg_trades = dict(self.config, max_trades_per_day=6, trades_today_count=6)
+        res_trades = evaluate_risk_and_size(self.setup_buy, self.sim_good, self.news_clear, cfg_trades)
+        self.assertEqual(res_trades["verdict"], "REJECT")
+        self.assertTrue(any("โควต้าจำนวนเทรด" in r for r in res_trades["reject_reasons"]))
+
 
 if __name__ == "__main__":
     unittest.main()

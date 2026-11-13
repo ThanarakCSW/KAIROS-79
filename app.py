@@ -186,11 +186,27 @@ class TradingAssistantCore:
             )
             smc["trade_setup"] = opt_gemini_setup
 
+        now_day = int(time.time()) // 86400
+        trades_today_count = sum(
+            1
+            for o in getattr(self.order_manager, "order_history", [])
+            if (int(o.get("created_ts") or 0) // 86400) == now_day
+        )
+        open_portfolio_risk_usd = (
+            sum(float(o.get("actual_risk_usd") or 0.0) for o in self.order_manager.active_orders)
+            if not self.order_manager.has_active_order()
+            else 0.0
+        )
+        ea_acc = self.ea_bridge.account_info or {}
         cfg_for_risk = dict(
             self.config,
             broker_price_offset=0.0,
             trading_style=self.trading_style,
             min_win_prob_pct=min_win_prob,
+            current_daily_loss_pct=float(ea_acc.get("daily_dd_pct") or 0.0),
+            kill_switch_tripped=bool(ea_acc.get("kill_switch_tripped", False)),
+            trades_today_count=trades_today_count,
+            open_portfolio_risk_usd=open_portfolio_risk_usd,
         )
         risk_ticket = evaluate_risk_and_size(
             trade_setup=smc["trade_setup"],
@@ -302,14 +318,17 @@ class TradingAssistantCore:
 
         # Auto-Trading Dispatch to MT5 EA Bridge when Auto-Trading is ON
         if self.ea_bridge.auto_trading_enabled:
-            # Case 1: Primary active order needing dispatch
+            # Case 1: Primary active order needing dispatch (never re-enqueue once dispatched/rejected)
             act_ord = self.order_manager.active_order
             if act_ord and act_ord.get("status") in ("PENDING", "FILLED") and act_ord.get("order_id"):
                 sig_id = act_ord["order_id"]
                 has_ticket = bool(act_ord.get("broker_ticket"))
                 is_in_queue = any(a.get("signal_id") == sig_id for a in self.ea_bridge.action_queue)
-                if not has_ticket and not is_in_queue:
-                    self.ea_bridge.executed_signal_ids.discard(sig_id)
+                already_dispatched = (
+                    sig_id in self.ea_bridge.executed_signal_ids
+                    or bool(act_ord.get("ea_dispatch_status"))
+                )
+                if not has_ticket and not is_in_queue and not already_dispatched:
                     self.ea_bridge.enqueue_action(
                         action_type="OPEN_ORDER",
                         payload={
@@ -351,16 +370,26 @@ class TradingAssistantCore:
                 )
 
             # Case 2: Multi-orders (scale-in / recovery) needing dispatch
-            if order_event and order_event.get("type") == "MULTI_ORDER_ADDED":
+            if order_event and order_event.get("type") in ("MULTI_ORDER_ADDED", "AUTO_ORDER_ADDED", "SUB_ORDER_ADDED"):
                 sub_o = order_event.get("order") or {}
+                if not sub_o and order_event.get("order_id"):
+                    sub_o = next(
+                        (o for o in self.order_manager.active_orders if o.get("order_id") == order_event.get("order_id")),
+                        {},
+                    )
                 sub_id = sub_o.get("order_id")
-                if sub_id and sub_id not in self.ea_bridge.executed_signal_ids:
+                if (
+                    sub_id
+                    and sub_id not in self.ea_bridge.executed_signal_ids
+                    and not sub_o.get("broker_ticket")
+                    and not sub_o.get("ea_dispatch_status")
+                ):
                     self.ea_bridge.enqueue_action(
                         action_type="OPEN_ORDER",
                         payload={
                             "side": sub_o.get("side", risk_ticket["side"]),
                             "order_type": sub_o.get("execution_type", "MARKET"),
-                            "symbol": "XAUUSD",
+                            "symbol": sub_o.get("symbol", "XAUUSD"),
                             "lot": float(sub_o.get("lot_size") or 0.10),
                             "price": float(sub_o.get("entry_mt5") or cur_p),
                             "sl": float(sub_o.get("stop_mt5") or 0.0),
@@ -376,6 +405,8 @@ class TradingAssistantCore:
                     if (
                         sub_id
                         and sub_id not in self.ea_bridge.executed_signal_ids
+                        and not sub_o.get("broker_ticket")
+                        and not sub_o.get("ea_dispatch_status")
                         and sub_o.get("status") in ("PENDING", "FILLED")
                     ):
                         self.ea_bridge.enqueue_action(
@@ -383,7 +414,7 @@ class TradingAssistantCore:
                             payload={
                                 "side": sub_o.get("side", act_ord["side"] if act_ord else "BUY"),
                                 "order_type": sub_o.get("execution_type", "MARKET"),
-                                "symbol": "XAUUSD",
+                                "symbol": sub_o.get("symbol", "XAUUSD"),
                                 "lot": float(sub_o.get("lot_size") or 0.10),
                                 "price": float(sub_o.get("entry_mt5") or cur_p),
                                 "sl": float(sub_o.get("stop_mt5") or 0.0),
@@ -394,9 +425,36 @@ class TradingAssistantCore:
                             signal_id=sub_id,
                         )
 
-            # Case 3: Autonomous Close / Invalidation when disadvantaged or exited
+            # Case 2.5: TP1 Partial Close + Move SL to Breakeven
+            if order_event and order_event.get("type") == "TP1_REACHED":
+                tp1_oid = order_event.get("order_id")
+                target_ord = next(
+                    (o for o in self.order_manager.active_orders if o.get("order_id") == tp1_oid),
+                    self.order_manager.active_order,
+                )
+                if (
+                    target_ord
+                    and target_ord.get("broker_ticket")
+                    and not target_ord.get("tp1_partial_dispatched")
+                ):
+                    target_ord["tp1_partial_dispatched"] = True
+                    close_lot = round(max(0.01, float(target_ord.get("lot_size") or 0.10) * 0.5), 2)
+                    be_sl = float(target_ord.get("breakeven_sl_mt5") or target_ord.get("entry_mt5") or 0.0)
+                    self.ea_bridge.enqueue_action(
+                        action_type="CLOSE_PARTIAL",
+                        payload={
+                            "ticket": int(target_ord["broker_ticket"]),
+                            "symbol": target_ord.get("symbol", "XAUUSD"),
+                            "close_lot": close_lot,
+                            "new_sl": be_sl,
+                        },
+                        signal_id=f"{target_ord['order_id']}-TP1",
+                    )
+
+            # Case 3: Autonomous Close / Invalidation when disadvantaged, circuit-broken, or exited
             if order_event and order_event.get("type") in (
                 "ORDER_CLOSED_DISADVANTAGE",
+                "BUNDLE_CIRCUIT_BREAKER",
                 "TRADE_CLOSED_SL",
                 "TRADE_CLOSED_TP2",
                 "TRADE_CLOSED_BREAKEVEN",
@@ -1314,6 +1372,7 @@ class AssistantServer:
                 "auto_trading_enabled": self.core.ea_bridge.auto_trading_enabled,
                 "has_actions": len(actions) > 0,
                 "actions": actions,
+                "next_poll_ms": 200 if len(actions) > 0 else 500,
                 "server_time": int(time.time()),
             }
             await self.send_http_json(writer, 200, resp_doc)
@@ -1321,10 +1380,19 @@ class AssistantServer:
 
         if path == "/api/ea/heartbeat" and method == "POST":
             payload = safe_json_loads(body_bytes)
-            info = self.core.ea_bridge.record_heartbeat(payload)
-            # Sync balance / equity to core config if non-zero
+            cached_bars = (self.core.hub.cached_bars_by_tf.get(self.core.timeframe) or [])
+            ref_px = float(cached_bars[-1].get("c")) if cached_bars and cached_bars[-1].get("c") else None
+            info = self.core.ea_bridge.record_heartbeat(payload, reference_feed_price=ref_px)
+            # Sync balance / equity, live spread & auto-calibrated broker offset
             if info.get("equity") and float(info["equity"]) > 0:
                 self.core.config["account_balance"] = float(info["equity"])
+            if info.get("spread_points") and float(info["spread_points"]) > 0:
+                self.core.config["broker_spread_points"] = float(info["spread_points"])
+            if (
+                self.core.config.get("auto_sync_broker_offset")
+                and len(self.core.ea_bridge.basis_samples) >= 3
+            ):
+                self.core.config["broker_price_offset"] = float(info.get("dynamic_offset_usd") or 0.0)
             if info.get("symbol"):
                 self.core.hub.preferred_symbol = str(info["symbol"]).strip()
             # Ingest live broker price / tick directly from MT5 EA heartbeat
@@ -1341,6 +1409,12 @@ class AssistantServer:
                     "time": int(time.time()),
                     "ts": int(time.time()),
                 }
+            # Reconcile tracked orders against MT5 open positions & pending orders
+            self.core.order_manager.reconcile_mt5_positions(
+                open_positions=info.get("open_positions") or [],
+                pending_orders=info.get("pending_orders") or [],
+                current_price=float(info.get("price") or 0.0),
+            )
             # Broadcast state so web UI sees live MT5 status immediately
             state = self.core.last_state or {}
             if state:
@@ -1360,17 +1434,7 @@ class AssistantServer:
         if path == "/api/ea/execution" and method == "POST":
             payload = safe_json_loads(body_bytes)
             rec = self.core.ea_bridge.record_execution(payload)
-            # If an order was opened, map ticket to active order
-            if rec.get("status") in ("FILLED", "OPENED") and rec.get("ticket"):
-                t = rec["ticket"]
-                if self.core.order_manager.active_order:
-                    self.core.order_manager.active_order["broker_ticket"] = t
-                    if rec.get("fill_price") and float(rec["fill_price"]) > 0:
-                        self.core.order_manager.active_order["entry_mt5"] = float(
-                            rec["fill_price"]
-                        )
-                    self.core.order_manager.active_order["status"] = "FILLED"
-                    self.core.order_manager.save_to_disk()
+            self.core.order_manager.bind_execution_report(rec)
             state = await asyncio.to_thread(self.core.compute_full_state)
             await self.broadcast(state)
             await self.send_http_json(writer, 200, {"status": "ok", "execution": rec})

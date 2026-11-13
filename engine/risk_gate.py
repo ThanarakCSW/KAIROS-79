@@ -205,8 +205,13 @@ def evaluate_risk_and_size(
             f"โอกาสโดนกวาด SL แล้ววิ่งกลับ (Sweep Risk) สูงถึง {sweep_pct:.1f}% แนะนำพิจารณาขยับ SL หรือรอรับที่โซน {scenario_b_mt5:.2f}"
         )
 
-    # 7. Spread vs SL check & Rollover danger
-    if spread_to_sl_pct > 25.0:
+    # 7. Spread vs SL check, Max Spread cap & Rollover danger
+    max_spread_usd = float(config.get("max_spread_usd") or 0.0)
+    if max_spread_usd > 0.0 and spread_usd > max_spread_usd:
+        reject_reasons.append(
+            f"Spread สูงเกินเพดาน (${spread_usd:.2f} > ${max_spread_usd:.2f}) — งดเปิดออเดอร์เพื่อเลี่ยงต้นทุนแฝง"
+        )
+    elif spread_to_sl_pct > 25.0:
         caution_warnings.append(
             f"ค่า Spread (${spread_usd:.2f}) คิดเป็น {spread_to_sl_pct:.1f}% ของระยะ SL ซึ่งสูงเกินไป"
         )
@@ -229,6 +234,37 @@ def evaluate_risk_and_size(
         passed_checks.append(
             f"Margin ใช้ ${margin_required_usd:.2f} ({margin_required_usd / balance * 100:.1f}%) คงเหลือ Free Margin ${free_margin_usd:.2f} (Leverage 1:{int(leverage)})"
         )
+
+    # 9. Daily Drawdown Kill Switch check
+    max_daily_loss_pct = float(config.get("max_daily_loss_pct") or 0.0)
+    current_daily_loss_pct = float(config.get("current_daily_loss_pct") or 0.0)
+    kill_switch_tripped = bool(config.get("kill_switch_tripped", False))
+    if kill_switch_tripped or (max_daily_loss_pct > 0.0 and current_daily_loss_pct >= max_daily_loss_pct):
+        reject_reasons.append(
+            f"ถึงเพดานขาดทุนรายวันแล้ว ({current_daily_loss_pct:.2f}% >= {max_daily_loss_pct:.2f}%) — Kill Switch ทำงาน หยุดเทรดชั่วคราว"
+        )
+
+    # 10. Max Trades Per Day check
+    max_trades_per_day = int(config.get("max_trades_per_day") or 0)
+    trades_today_count = int(config.get("trades_today_count") or 0)
+    if max_trades_per_day > 0 and trades_today_count >= max_trades_per_day:
+        reject_reasons.append(
+            f"ครบโควต้าจำนวนเทรดสูงสุดต่อวันแล้ว ({trades_today_count}/{max_trades_per_day} ออเดอร์) — พักการเข้าเทรดเพื่อคุมวินัย"
+        )
+
+    # 11. Open Portfolio Risk Budget check
+    max_portfolio_risk_pct = float(config.get("max_portfolio_risk_pct") or 0.0)
+    open_portfolio_risk_usd = float(config.get("open_portfolio_risk_usd") or 0.0)
+    if max_portfolio_risk_pct > 0.0 and balance > 0.0:
+        total_port_risk_pct = ((open_portfolio_risk_usd + actual_risk_usd) / balance) * 100.0
+        if total_port_risk_pct > max_portfolio_risk_pct:
+            reject_reasons.append(
+                f"ความเสี่ยงรวมทั้งพอร์ตเกินเพดาน ({total_port_risk_pct:.2f}% > {max_portfolio_risk_pct:.2f}%) — มีออเดอร์เปิดค้างอยู่แล้ว"
+            )
+        elif open_portfolio_risk_usd > 0.0:
+            passed_checks.append(
+                f"ความเสี่ยงรวมทั้งพอร์ต {total_port_risk_pct:.2f}% (อยู่ในเพดาน <= {max_portfolio_risk_pct:.2f}%)"
+            )
 
     if reject_reasons:
         verdict = "REJECT"

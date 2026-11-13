@@ -377,8 +377,48 @@ class OrderLifecycleManager:
                         )
                     return ev
 
+        # ---------------- 0.5 Bundle Drawdown Circuit Breaker ----------------
+        max_bundle_dd_pct = float(cfg.get("max_bundle_drawdown_pct") or 0.0)
+        equity_base = float((config or {}).get("account_balance") or 0.0)
+        if max_bundle_dd_pct > 0.0 and equity_base > 0.0:
+            bundle_pnl_usd = 0.0
+            for o in self.active_orders:
+                if o.get("status") != "FILLED":
+                    continue
+                o_lot = float(o.get("lot_size") or 0.10)
+                o_ent = float(o.get("filled_price") or o.get("entry_mt5") or current_price)
+                d = (current_price - o_ent) if o.get("side") == "BUY" else (o_ent - current_price)
+                bundle_pnl_usd += d * o_lot * 100.0
+            if bundle_pnl_usd < 0.0:
+                bundle_dd_pct = abs(bundle_pnl_usd) / equity_base * 100.0
+                if bundle_dd_pct >= max_bundle_dd_pct:
+                    ev = self.close_active_order(
+                        reason="BUNDLE_DRAWDOWN_LIMIT",
+                        current_price=current_price,
+                    )
+                    if ev:
+                        ev["type"] = "BUNDLE_CIRCUIT_BREAKER"
+                        ev["reason_th"] = (
+                            f"🛑 ตัดวงจร Bundle Drawdown ({bundle_dd_pct:.2f}% >= {max_bundle_dd_pct:.1f}%) "
+                            f"ปิดทุกไม้อัตโนมัติเพื่อรักษาเงินทุน"
+                        )
+                    return ev
+
         # ---------------- 1. Recovery Opportunity (แก้ไม้ DCA) ----------------
-        if cfg.get("recovery_enabled", True):
+        max_recovery_orders = int(cfg.get("max_recovery_orders") or 1)
+        current_recovery_count = sum(
+            1 for o in self.active_orders if str(o.get("purpose") or "").upper() == "RECOVERY"
+        )
+        require_htf = bool(cfg.get("require_htf_alignment_for_dca", True))
+        trend_bias = (st.get("trend") or {}).get("bias")
+        htf_aligned_for_dca = True
+        if require_htf and trend_bias:
+            htf_aligned_for_dca = (
+                (side == "BUY" and trend_bias == "BULLISH")
+                or (side == "SELL" and trend_bias == "BEARISH")
+            )
+
+        if cfg.get("recovery_enabled", True) and current_recovery_count < max_recovery_orders and htf_aligned_for_dca:
             in_drawdown = False
             safe_above_sl = False
 
@@ -399,8 +439,15 @@ class OrderLifecycleManager:
 
                 # Trigger B: Deep Historical S&R level
                 if not trigger_reason:
-                    hist_sr = (st.get("historical_sr") or {}).get("levels") or []
+                    raw_hsr = st.get("historical_sr")
+                    hist_sr = (
+                        raw_hsr.get("levels") or []
+                        if isinstance(raw_hsr, dict)
+                        else (raw_hsr if isinstance(raw_hsr, list) else [])
+                    )
                     for sr in hist_sr:
+                        if not isinstance(sr, dict):
+                            continue
                         sr_price = float(sr.get("price") or 0.0)
                         if abs(current_price - sr_price) <= (0.45 * atr) and sr.get("touches", 0) >= 2:
                             trigger_reason = f"แตะแนวรับประวัติศาสตร์ ({sr_price:.2f}, ทดสอบ {sr['touches']} ครั้ง)"
@@ -487,8 +534,15 @@ class OrderLifecycleManager:
                         trigger_reason = "กำไรทะลุ +0.6R และโมเมนตัมขยายตัวตามแนวโน้ม"
 
                 if not trigger_reason:
-                    hist_sr = (st.get("historical_sr") or {}).get("levels") or []
+                    raw_hsr = st.get("historical_sr")
+                    hist_sr = (
+                        raw_hsr.get("levels") or []
+                        if isinstance(raw_hsr, dict)
+                        else (raw_hsr if isinstance(raw_hsr, list) else [])
+                    )
                     for sr in hist_sr:
+                        if not isinstance(sr, dict):
+                            continue
                         sr_p = float(sr.get("price") or 0.0)
                         if side == "BUY" and current_price >= sr_p and primary_entry < sr_p:
                             trigger_reason = f"ราคาทะลุแนวต้านประวัติศาสตร์ 15,000 แท่ง ({sr_p:.2f}) เพิ่มความได้เปรียบ"
@@ -961,3 +1015,199 @@ class OrderLifecycleManager:
             out["floating_pnl_r"] = orders_data[0]["floating_pnl_r"]
 
         return out
+
+    def bind_execution_report(self, rec: Dict[str, Any]) -> bool:
+        """Bind an MT5 EA execution report strictly by signal_id / ticket."""
+        status = str(rec.get("status") or "").upper()
+        sig_id = str(rec.get("signal_id") or "").strip()
+        ticket = rec.get("ticket")
+        try:
+            ticket_int = int(ticket) if ticket is not None and str(ticket).strip() != "" else 0
+        except (TypeError, ValueError):
+            ticket_int = 0
+        fill_px = float(rec.get("fill_price") or 0.0)
+
+        target_ord = None
+        if sig_id:
+            for o in self.active_orders:
+                if o.get("order_id") == sig_id:
+                    target_ord = o
+                    break
+        if target_ord is None and ticket_int > 0:
+            for o in self.active_orders:
+                if str(o.get("broker_ticket") or "") == str(ticket_int):
+                    target_ord = o
+                    break
+        if target_ord is None and not sig_id and status in ("FILLED", "OPENED", "PLACED"):
+            # Fallback only when signal_id wasn't reported (legacy/manual test payloads)
+            for o in self.active_orders:
+                if not o.get("broker_ticket"):
+                    target_ord = o
+                    break
+            if target_ord is None and self.active_order and not self.active_order.get("broker_ticket"):
+                target_ord = self.active_order
+
+        if target_ord is None:
+            return False
+
+        now_ts = int(time.time())
+        target_ord["ea_dispatch_status"] = status
+        if status in (
+            "REJECTED",
+            "FAILED",
+            "FAILED_NO_SL",
+            "SKIPPED_DUPLICATE",
+            "SKIPPED_KILL_SWITCH",
+            "SKIPPED_ROLLOVER",
+            "STALE_SIGNAL",
+        ):
+            target_ord["ea_last_error"] = rec.get("error_msg") or status
+            self._sync_primary()
+            self.save_to_disk()
+            return True
+
+        target_ord["ea_last_error"] = ""
+        target_ord["reconcile_miss_count"] = 0
+
+        if status == "PLACED":
+            if ticket_int > 0:
+                target_ord["broker_ticket"] = ticket_int
+            target_ord["status"] = "PENDING"
+            if fill_px > 0.0:
+                target_ord["entry_mt5"] = fill_px
+        elif status in ("FILLED", "OPENED"):
+            if ticket_int > 0:
+                target_ord["broker_ticket"] = ticket_int
+            if fill_px > 0.0:
+                target_ord["entry_mt5"] = fill_px
+                target_ord["filled_price"] = fill_px
+            target_ord["status"] = "FILLED"
+            if not target_ord.get("filled_ts"):
+                target_ord["filled_ts"] = now_ts
+        elif status == "PARTIAL_CLOSED":
+            closed_lot = float(rec.get("lot") or 0.0)
+            cur_lot = float(target_ord.get("lot_size") or 0.0)
+            if closed_lot > 0.0 and cur_lot > closed_lot:
+                target_ord["lot_size"] = round(cur_lot - closed_lot, 2)
+            new_sl = float(rec.get("sl") or 0.0)
+            if new_sl > 0.0:
+                target_ord["stop_mt5"] = new_sl
+                target_ord["sl_moved_breakeven"] = True
+            target_ord["tp1_hit"] = True
+        elif status == "MODIFIED":
+            new_sl = float(rec.get("sl") or 0.0)
+            new_tp = float(rec.get("tp") or 0.0)
+            if new_sl > 0.0:
+                target_ord["stop_mt5"] = new_sl
+            if new_tp > 0.0:
+                target_ord["target_mt5"] = new_tp
+        elif status == "CLOSED":
+            oid = target_ord.get("order_id")
+            if oid:
+                self.close_order_by_id(oid, current_price=fill_px or None, reason="MT5_CLOSED")
+                return True
+        elif status == "CANCELLED":
+            oid = target_ord.get("order_id")
+            if oid:
+                self.cancel_active_order(reason="MT5_CANCELLED", order_id=oid)
+                return True
+
+        self._sync_primary()
+        self.save_to_disk()
+        return True
+
+    def reconcile_mt5_positions(
+        self,
+        open_positions: List[Dict[str, Any]],
+        pending_orders: Optional[List[Dict[str, Any]]] = None,
+        current_price: float = 0.0,
+    ) -> Optional[Dict[str, Any]]:
+        """Reconcile active tracked orders against live MT5 positions & pending orders."""
+        if not self.has_active_order():
+            return None
+
+        pos_by_ticket: Dict[str, Dict[str, Any]] = {}
+        for p in (open_positions or []):
+            t = str(p.get("ticket") or "").strip()
+            if t:
+                pos_by_ticket[t] = p
+
+        pend_by_ticket: Dict[str, Dict[str, Any]] = {}
+        for po in (pending_orders or []):
+            t = str(po.get("ticket") or "").strip()
+            if t:
+                pend_by_ticket[t] = po
+
+        now_ts = int(time.time())
+        changed = False
+        reconcile_event = None
+
+        for ord_item in list(self.active_orders):
+            bt = str(ord_item.get("broker_ticket") or "").strip()
+
+            # Recover missing broker_ticket via comment == order_id
+            if not bt and ord_item.get("order_id"):
+                oid = ord_item["order_id"]
+                for tk, p in pos_by_ticket.items():
+                    if str(p.get("comment") or "") == oid:
+                        ord_item["broker_ticket"] = int(tk) if tk.isdigit() else tk
+                        bt = tk
+                        changed = True
+                        break
+                if not bt:
+                    for tk, po in pend_by_ticket.items():
+                        if str(po.get("comment") or "") == oid:
+                            ord_item["broker_ticket"] = int(tk) if tk.isdigit() else tk
+                            bt = tk
+                            changed = True
+                            break
+
+            if not bt:
+                continue
+
+            if bt in pos_by_ticket:
+                pos = pos_by_ticket[bt]
+                ord_item["reconcile_miss_count"] = 0
+                if ord_item.get("status") == "PENDING":
+                    ord_item["status"] = "FILLED"
+                    ord_item["filled_ts"] = now_ts
+                    open_px = float(pos.get("open_price") or 0.0)
+                    if open_px > 0.0:
+                        ord_item["entry_mt5"] = open_px
+                        ord_item["filled_price"] = open_px
+                    changed = True
+                pos_vol = float(pos.get("volume") or pos.get("lot") or 0.0)
+                if pos_vol > 0.0 and abs(pos_vol - float(ord_item.get("lot_size") or 0.0)) > 0.005:
+                    ord_item["lot_size"] = round(pos_vol, 2)
+                    changed = True
+                pos_sl = float(pos.get("sl") or 0.0)
+                if pos_sl > 0.0 and abs(pos_sl - float(ord_item.get("stop_mt5") or 0.0)) > 0.05:
+                    ord_item["stop_mt5"] = round(pos_sl, 2)
+                    changed = True
+                pos_tp = float(pos.get("tp") or 0.0)
+                if pos_tp > 0.0 and abs(pos_tp - float(ord_item.get("target_mt5") or 0.0)) > 0.05:
+                    ord_item["target_mt5"] = round(pos_tp, 2)
+                    changed = True
+            elif bt in pend_by_ticket:
+                ord_item["reconcile_miss_count"] = 0
+            else:
+                miss = int(ord_item.get("reconcile_miss_count") or 0) + 1
+                ord_item["reconcile_miss_count"] = miss
+                age_sec = now_ts - int(ord_item.get("filled_ts") or ord_item.get("created_ts") or now_ts)
+                if miss >= 2 and age_sec >= 5:
+                    oid = ord_item.get("order_id")
+                    if oid:
+                        if ord_item.get("status") == "PENDING":
+                            reconcile_event = self.cancel_active_order(reason="MT5_EXTERNAL_CANCEL", order_id=oid)
+                        else:
+                            reconcile_event = self.close_order_by_id(
+                                oid,
+                                current_price=current_price or None,
+                                reason="MT5_EXTERNAL_CLOSE",
+                            )
+                        changed = True
+
+        if changed:
+            self._sync_primary()
+            self.save_to_disk()
+        return reconcile_event

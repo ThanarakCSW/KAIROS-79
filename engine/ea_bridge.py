@@ -15,9 +15,11 @@ Capabilities:
   - Idempotent deduplication to prevent double execution
 """
 
+from datetime import datetime, timezone
 import json
 import logging
 import os
+import statistics
 import time
 from typing import Any, Dict, List, Optional
 
@@ -52,17 +54,29 @@ class EABridgeManager:
             "free_margin": 0.0,
             "margin_level_pct": 0.0,
             "spread_points": 0.0,
+            "spread_usd": 0.0,
             "symbol": "XAUUSD",
             "open_positions": [],
             "open_positions_count": 0,
+            "pending_orders": [],
+            "pending_orders_count": 0,
             "total_floating_pnl": 0.0,
+            "ea_version": "",
+            "daily_dd_pct": 0.0,
+            "kill_switch_tripped": False,
+            "dynamic_offset_usd": 0.0,
         }
 
-        # Action Queue
+        # Action Queue & Signal/Telemetry Buffers
         self.action_queue: List[Dict[str, Any]] = []
         self.action_history: List[Dict[str, Any]] = []
         self.executed_signal_ids: set = set()
+        self.signal_states: Dict[str, Dict[str, Any]] = {}
         self.execution_history: List[Dict[str, Any]] = []
+        self.basis_samples: List[float] = []
+        self.spread_samples: List[float] = []
+        self.day_start_equity: float = 0.0
+        self.current_day_str: str = ""
         self._action_counter: int = 0
 
         self.load_config()
@@ -119,36 +133,77 @@ class EABridgeManager:
         """Record live polling activity from MT5 EA."""
         self.last_poll_ts = time.time()
 
-    def record_heartbeat(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    def record_heartbeat(
+        self,
+        data: Dict[str, Any],
+        reference_feed_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Record live telemetry sent by MT5 EA."""
         now = time.time()
         self.last_heartbeat_ts = now
 
         pos_list = data.get("open_positions") or []
+        pending_list = data.get("pending_orders") or []
         tot_pnl = sum(float(p.get("profit", 0.0)) for p in pos_list)
 
         bid = float(data["bid"]) if data.get("bid") is not None else None
         ask = float(data["ask"]) if data.get("ask") is not None else None
         price = float(data["price"]) if data.get("price") is not None else (bid or None)
+        spread_pts = float(data.get("spread_points") or 0.0)
+        if bid is not None and ask is not None and ask > 0.0 and bid > 0.0:
+            spread_usd = round(max(0.0, ask - bid), 3)
+        else:
+            spread_usd = round(max(0.0, spread_pts * 0.01), 3)
+
+        self.spread_samples.append(spread_usd)
+        self.spread_samples = self.spread_samples[-20:]
+
+        balance = round(float(data.get("balance") or 0.0), 2)
+        equity = round(float(data.get("equity") or 0.0), 2)
+
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self.current_day_str != today_str or self.day_start_equity <= 0.0:
+            if equity > 0.0 or balance > 0.0:
+                self.current_day_str = today_str
+                self.day_start_equity = equity if equity > 0.0 else balance
+
+        local_dd_pct = 0.0
+        if self.day_start_equity > 0.0 and equity > 0.0:
+            local_dd_pct = max(0.0, ((self.day_start_equity - equity) / self.day_start_equity) * 100.0)
+        ea_dd_pct = float(data.get("daily_dd_pct") or 0.0)
+        daily_dd_pct = round(max(local_dd_pct, ea_dd_pct), 2)
+
+        dynamic_offset = self.account_info.get("dynamic_offset_usd", 0.0)
+        if reference_feed_price is not None and reference_feed_price > 0.0 and price is not None and price > 0.0:
+            self.basis_samples.append(price - float(reference_feed_price))
+            self.basis_samples = self.basis_samples[-20:]
+            dynamic_offset = round(statistics.median(self.basis_samples), 2)
 
         self.account_info = {
             "account_id": data.get("account_id"),
             "broker": str(data.get("broker") or "MetaTrader 5"),
             "server": str(data.get("server") or ""),
             "currency": str(data.get("currency") or "USD"),
-            "balance": round(float(data.get("balance") or 0.0), 2),
-            "equity": round(float(data.get("equity") or 0.0), 2),
+            "balance": balance,
+            "equity": equity,
             "margin": round(float(data.get("margin") or 0.0), 2),
             "free_margin": round(float(data.get("free_margin") or 0.0), 2),
             "margin_level_pct": round(float(data.get("margin_level_pct") or 0.0), 2),
-            "spread_points": round(float(data.get("spread_points") or 0.0), 1),
+            "spread_points": round(spread_pts, 1),
+            "spread_usd": spread_usd,
             "symbol": str(data.get("symbol") or "XAUUSD"),
             "bid": bid,
             "ask": ask,
             "price": price,
             "open_positions": pos_list,
             "open_positions_count": len(pos_list),
+            "pending_orders": pending_list,
+            "pending_orders_count": len(pending_list),
             "total_floating_pnl": round(tot_pnl, 2),
+            "ea_version": str(data.get("ea_version") or self.account_info.get("ea_version") or ""),
+            "daily_dd_pct": daily_dd_pct,
+            "kill_switch_tripped": bool(data.get("kill_switch_tripped", False)),
+            "dynamic_offset_usd": dynamic_offset,
             "last_seen_ts": int(now),
         }
         return self.account_info
@@ -165,6 +220,7 @@ class EABridgeManager:
           - OPEN_ORDER: payload={side, order_type, lot, price, sl, tp, comment}
           - MODIFY_ORDER: payload={ticket, new_sl, new_tp}
           - CLOSE_ORDER: payload={ticket}
+          - CLOSE_PARTIAL: payload={ticket, close_lot, new_sl}
           - CLOSE_ALL: payload={symbol, magic}
         """
         # Idempotency check for new orders
@@ -187,6 +243,16 @@ class EABridgeManager:
             **payload,
         }
 
+        if signal_id:
+            self.signal_states[signal_id] = {
+                "signal_id": signal_id,
+                "action_id": action_id,
+                "type": action["type"],
+                "status": "QUEUED",
+                "ticket": None,
+                "updated_at": now_ts,
+            }
+
         # Avoid duplicate close commands for the same ticket
         if action["type"] == "CLOSE_ORDER" and payload.get("ticket"):
             t = payload["ticket"]
@@ -200,10 +266,15 @@ class EABridgeManager:
     def poll_actions(self) -> List[Dict[str, Any]]:
         """Called by MT5 EA GET /api/ea/poll.
         Returns pending actions and advances them to IN_FLIGHT."""
+        now_ts = int(time.time())
         pending = list(self.action_queue)
         for act in pending:
             act["status"] = "IN_FLIGHT"
-            act["dispatched_at"] = int(time.time())
+            act["dispatched_at"] = now_ts
+            sig_id = act.get("signal_id")
+            if sig_id and sig_id in self.signal_states:
+                self.signal_states[sig_id]["status"] = "IN_FLIGHT"
+                self.signal_states[sig_id]["updated_at"] = now_ts
             # Merge payload keys to top level for ultra-simple EA parsing
             if isinstance(act.get("payload"), dict):
                 for k, v in act["payload"].items():
@@ -218,12 +289,16 @@ class EABridgeManager:
     def record_execution(self, exec_data: Dict[str, Any]) -> Dict[str, Any]:
         """Record order execution confirmation sent back from MT5 EA."""
         now_ts = int(time.time())
+        status = str(exec_data.get("status") or "SUCCESS").upper()
+        signal_id = exec_data.get("signal_id") or ""
+        ticket = exec_data.get("ticket")
         rec = {
             "received_at": now_ts,
             "action_id": exec_data.get("action_id"),
-            "signal_id": exec_data.get("signal_id"),
-            "status": str(exec_data.get("status") or "SUCCESS").upper(),
-            "ticket": exec_data.get("ticket"),
+            "signal_id": signal_id,
+            "status": status,
+            "order_type": exec_data.get("order_type") or "",
+            "ticket": ticket,
             "deal": exec_data.get("deal"),
             "symbol": exec_data.get("symbol") or "XAUUSD",
             "side": exec_data.get("side"),
@@ -237,6 +312,18 @@ class EABridgeManager:
             "error_code": exec_data.get("error_code") or 0,
             "error_msg": exec_data.get("error_msg") or "",
         }
+        if signal_id:
+            self.signal_states[signal_id] = {
+                "signal_id": signal_id,
+                "action_id": rec["action_id"],
+                "status": status,
+                "order_type": rec["order_type"],
+                "ticket": ticket,
+                "fill_price": rec["fill_price"],
+                "error_code": rec["error_code"],
+                "error_msg": rec["error_msg"],
+                "updated_at": now_ts,
+            }
         self.execution_history.append(rec)
         self.execution_history = self.execution_history[-100:]
         return rec
@@ -261,9 +348,16 @@ class EABridgeManager:
             "margin": acc.get("margin"),
             "free_margin": acc.get("free_margin"),
             "spread_points": acc.get("spread_points"),
+            "spread_usd": acc.get("spread_usd", 0.0),
             "open_positions_count": acc.get("open_positions_count", 0),
             "open_positions": acc.get("open_positions", []),
+            "pending_orders_count": acc.get("pending_orders_count", 0),
+            "pending_orders": acc.get("pending_orders", []),
             "total_floating_pnl": acc.get("total_floating_pnl", 0.0),
+            "ea_version": acc.get("ea_version", ""),
+            "daily_dd_pct": acc.get("daily_dd_pct", 0.0),
+            "kill_switch_tripped": acc.get("kill_switch_tripped", False),
+            "dynamic_offset_usd": acc.get("dynamic_offset_usd", 0.0),
             "pending_actions_count": len(self.action_queue),
             "recent_executions_count": len(self.execution_history),
             "last_execution": self.execution_history[-1] if self.execution_history else None,
