@@ -279,6 +279,60 @@ class TestAppIntegration(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_scalping_vs_intraday_distinct_setups_and_advisory(self):
+        """Verify that Scalping and Intraday modes produce distinct entries, SL/TP bounds, and advisory."""
+        core = TradingAssistantCore()
+        s_intra = core.compute_full_state(timeframe="M5", trading_style="intraday", force_refresh=True)
+        s_scalp = core.compute_full_state(timeframe="M5", trading_style="scalping", force_refresh=True)
+
+        self.assertEqual(s_intra["trading_style"], "intraday")
+        self.assertEqual(s_scalp["trading_style"], "scalping")
+
+        # Setups must differ in entry or stop or target
+        ts_i = s_intra["smc"]["trade_setup"]
+        ts_s = s_scalp["smc"]["trade_setup"]
+        self.assertTrue(
+            ts_i["entry"] != ts_s["entry"] or ts_i["stop"] != ts_s["stop"] or ts_i["target"] != ts_s["target"],
+            f"Expected distinct setups between Intraday ({ts_i}) and Scalping ({ts_s})",
+        )
+
+        # Scalping target RR should be capped tightly (<= 1.6x)
+        self.assertLessEqual(ts_s["reward_risk"], 1.65)
+
+        # AI Advisory headlines and scenarios must be tailored to their style
+        self.assertIn("โหมดปกติ", s_intra["ai_advisory"]["headline"])
+        self.assertIn("เทรดสั้น", s_scalp["ai_advisory"]["headline"])
+        self.assertIn("Scalping", s_scalp["ai_advisory"]["scenarios"]["scenario_a"]["title"])
+
+    def test_leverage_update_and_active_order_margin_recalculation(self):
+        """Verify leverage updates recalculate margin required dynamically even on active orders."""
+        core = TradingAssistantCore()
+        core.update_settings({"leverage": 100.0, "account_balance": 5000.0})
+        st100 = core.compute_full_state(timeframe="M5", trading_style="intraday")
+        self.assertEqual(st100["risk_ticket"]["leverage"], 100.0)
+        m100 = st100["risk_ticket"]["margin_required_usd"]
+        self.assertGreater(m100, 0)
+
+        # Update to 1000 leverage -> margin should drop by 10x
+        core.update_settings({"leverage": 1000.0})
+        st1000 = core.compute_full_state(timeframe="M5", trading_style="intraday")
+        self.assertEqual(st1000["risk_ticket"]["leverage"], 1000.0)
+        m1000 = st1000["risk_ticket"]["margin_required_usd"]
+        self.assertAlmostEqual(m1000, m100 / 10.0, delta=1.0)
+
+        # Style switch cancels pending order of previous style
+        core.order_manager.cancel_active_order(reason="TEST_CLEANUP")
+        core.order_manager.register_trade_setup(
+            st1000["risk_ticket"], st1000["smc"]["trade_setup"], 2650.0, "M5", "intraday", force_replace=True
+        )
+        if core.order_manager.has_active_order() and core.order_manager.active_order.get("status") == "PENDING":
+            self.assertEqual(core.order_manager.active_order["trading_style"], "intraday")
+            # Switching style to scalping should cancel the intraday pending order
+            st_switched = core.compute_full_state(timeframe="M5", trading_style="scalping")
+            self.assertEqual(st_switched["trading_style"], "scalping")
+            if core.order_manager.has_active_order():
+                self.assertEqual(core.order_manager.active_order["trading_style"], "scalping")
+
 
 if __name__ == "__main__":
     unittest.main()

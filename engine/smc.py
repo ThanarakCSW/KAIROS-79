@@ -481,37 +481,38 @@ def build_trade_setup(
 
     chosen_ob = candidate_obs[0] if candidate_obs else None
     if is_scalp and scalp_info:
-        # In Scalping mode, always plan a forward pullback limit entry (ahead of price, never chasing a passed candle)
+        # In Scalping mode, prioritize fast momentum and tight EMA 9/21 pullbacks
         bias = scalp_info.get("scalp_bias", "BULLISH")
         side = "BUY" if bias == "BULLISH" else "SELL"
+        e9 = float(scalp_info.get("ema9") or current_price)
         scalp_ob = next(
-            (o for o in candidate_obs if o["bias"] == bias and o["distance_usd"] <= atr_val * 1.5),
+            (o for o in candidate_obs if o["bias"] == bias and o["distance_usd"] <= atr_val * 0.85),
             None,
         )
         if scalp_ob:
             zone_low, zone_high = scalp_ob["low"], scalp_ob["high"]
             if side == "BUY":
-                # Strictly below current_price so it is always a forward-looking BUY LIMIT in advance
                 target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price <= zone_high else zone_high
-                entry = min(round(current_price - max(0.20, atr_val * 0.15), 2), target_lvl)
+                entry = min(round(current_price - max(0.15, atr_val * 0.10), 2), target_lvl)
             else:
-                # Strictly above current_price so it is always a forward-looking SELL LIMIT in advance
                 target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price >= zone_low else zone_low
-                entry = max(round(current_price + max(0.20, atr_val * 0.15), 2), target_lvl)
+                entry = max(round(current_price + max(0.15, atr_val * 0.10), 2), target_lvl)
         else:
-            e9 = float(scalp_info.get("ema9") or current_price)
             if side == "BUY":
-                pullback_lvl = min(e9, current_price - max(0.30, atr_val * 0.25))
+                pullback_lvl = min(e9, current_price - max(0.20, atr_val * 0.15))
                 entry = round(pullback_lvl, 2)
-                zone_low = entry - atr_val * 0.35
-                zone_high = entry + atr_val * 0.10
+                zone_low = entry - atr_val * 0.25
+                zone_high = entry + atr_val * 0.08
             else:
-                pullback_lvl = max(e9, current_price + max(0.30, atr_val * 0.25))
+                pullback_lvl = max(e9, current_price + max(0.20, atr_val * 0.15))
                 entry = round(pullback_lvl, 2)
-                zone_low = entry - atr_val * 0.10
-                zone_high = entry + atr_val * 0.35
+                zone_low = entry - atr_val * 0.08
+                zone_high = entry + atr_val * 0.25
         confluence_score = int(scalp_info.get("scalp_score") or 58)
-        confluence_factors = list(scalp_info.get("triggers") or [])
+        confluence_factors = [
+            f"⚡ EMA9/21 Scalp Ribbon ({scalp_info.get('ribbon_state', '-')})",
+            *list(scalp_info.get("triggers") or []),
+        ]
     elif chosen_ob:
         bias = chosen_ob["bias"]
         side = "BUY" if bias == "BULLISH" else "SELL"
@@ -671,16 +672,23 @@ def build_trade_setup(
         confluence_factors.append(f"Chart Pattern: {pat_name} ({pat_status})")
 
     # Stop Loss placement: beyond distal edge of zone + ATR buffer + Broker Spread
-    sl_buffer = max(atr_val * (0.32 if is_scalp else 0.45), spread_usd * 2.0)
-    min_sl_atr = 0.72 if is_scalp else 0.90
-    min_target_rr = 1.25 if is_scalp else 1.55
-    default_target_rr = 1.45 if is_scalp else 2.0
+    sl_buffer = max(atr_val * (0.25 if is_scalp else 0.50), spread_usd * (1.5 if is_scalp else 2.5))
+    min_sl_atr = 0.65 if is_scalp else 1.05
+    min_target_rr = 1.25 if is_scalp else 1.60
+    default_target_rr = 1.45 if is_scalp else 2.20
     combined_sr = sr_zones + htf_zones + hist_sr
     if side == "BUY":
-        raw_stop = min(zone_low - sl_buffer, entry - max(atr_val * min_sl_atr, spread_usd * 3.0))
+        raw_stop = min(zone_low - sl_buffer, entry - max(atr_val * min_sl_atr, spread_usd * 2.5))
+        if is_scalp and scalp_info.get("ema21"):
+            e21 = float(scalp_info["ema21"])
+            if e21 < entry:
+                raw_stop = max(raw_stop, e21 - sl_buffer)
         stop = r2(raw_stop)
-        risk = max(0.4, entry - stop)
-        tp1 = r2(entry + risk * (0.85 if is_scalp else 1.0))
+        risk = max(0.35, entry - stop)
+        if is_scalp and risk > atr_val * 1.0:
+            stop = r2(entry - atr_val * 0.85)
+            risk = max(0.35, entry - stop)
+        tp1 = r2(entry + risk * (0.80 if is_scalp else 1.0))
 
         up_targets = [
             p["price"]
@@ -696,8 +704,8 @@ def build_trade_setup(
         if is_scalp and inst and inst.get("vwap") and float(inst["vwap"]) >= entry + risk * min_target_rr:
             up_targets.append(float(inst["vwap"]))
         target = r2(min(up_targets)) if up_targets else r2(entry + risk * default_target_rr)
-        if is_scalp and (target - entry) > risk * 2.1:
-            target = r2(entry + risk * 1.55)
+        if is_scalp and (target - entry) > risk * 1.60:
+            target = r2(entry + risk * 1.45)
 
         deeper_zones = [
             o for o in obs if o["bias"] == "BULLISH" and o["high"] < zone_low
@@ -708,10 +716,17 @@ def build_trade_setup(
         invalidation_price = r2(stop - atr_val * 0.45)
     else:
         # For SELL, Stop Loss is hit by Ask (High + Spread), so include spread_usd explicitly
-        raw_stop = max(zone_high + sl_buffer + spread_usd, entry + max(atr_val * min_sl_atr, spread_usd * 3.0))
+        raw_stop = max(zone_high + sl_buffer + spread_usd, entry + max(atr_val * min_sl_atr, spread_usd * 2.5))
+        if is_scalp and scalp_info.get("ema21"):
+            e21 = float(scalp_info["ema21"])
+            if e21 > entry:
+                raw_stop = min(raw_stop, e21 + sl_buffer + spread_usd)
         stop = r2(raw_stop)
-        risk = max(0.4, stop - entry)
-        tp1 = r2(entry - risk * (0.85 if is_scalp else 1.0))
+        risk = max(0.35, stop - entry)
+        if is_scalp and risk > atr_val * 1.0:
+            stop = r2(entry + atr_val * 0.85)
+            risk = max(0.35, stop - entry)
+        tp1 = r2(entry - risk * (0.80 if is_scalp else 1.0))
 
         dn_targets = [
             p["price"]
@@ -727,8 +742,8 @@ def build_trade_setup(
         if is_scalp and inst and inst.get("vwap") and float(inst["vwap"]) <= entry - risk * min_target_rr:
             dn_targets.append(float(inst["vwap"]))
         target = r2(max(dn_targets)) if dn_targets else r2(entry - risk * default_target_rr)
-        if is_scalp and (entry - target) > risk * 2.1:
-            target = r2(entry - risk * 1.55)
+        if is_scalp and (entry - target) > risk * 1.60:
+            target = r2(entry - risk * 1.45)
 
         higher_zones = [
             o for o in obs if o["bias"] == "BEARISH" and o["low"] > zone_high

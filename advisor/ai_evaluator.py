@@ -83,6 +83,18 @@ def _validate_gemini_trade_decision(
         if risk < 0.25 or risk > atr_val * 8.0:
             return None
 
+        trading_style = str(fallback_setup.get("trading_style") or "intraday").lower()
+        is_scalp = trading_style == "scalping"
+
+        # In scalping mode, enforce tight SL and compact targets
+        if is_scalp:
+            if risk > atr_val * 1.15:
+                stop = r2(entry - atr_val * 0.85 if side == "BUY" else entry + atr_val * 0.85)
+                risk = abs(entry - stop)
+            if reward > risk * 1.65:
+                target = r2(entry + risk * 1.45 if side == "BUY" else entry - risk * 1.45)
+                reward = abs(target - entry)
+
         rr = round(reward / max(0.01, risk), 2)
         scen_b = float(
             decision.get("scenario_b_sweep_reentry")
@@ -109,6 +121,8 @@ def _validate_gemini_trade_decision(
 
         return {
             "symbol": "XAUUSD",
+            "trading_style": trading_style,
+            "style_label_th": "⚡ โหมดเทรดสั้น (Gold Scalping)" if is_scalp else "🎯 โหมดเทรดรอบปกติ (Intraday SMC)",
             "side": side,
             "execution_type": exec_type,
             "order_type": order_type,
@@ -208,13 +222,38 @@ def call_gemini_full_chart_analyst(
         "recent_40_candles": recent_bars,
     }
 
+    trading_style = str(smc.get("trading_style") or config.get("trading_style", "intraday")).lower()
+    is_scalp = trading_style == "scalping"
+
+    if is_scalp:
+        style_prompt = (
+            "โหมดวิเคราะห์ปัจจุบัน: ⚡ SCALPING (เทรดสั้น จบรอบเร็ว M1/M5)\n"
+            "กฎเฉพาะทางสำหรับ SCALPING:\n"
+            "1. เน้นทำกำไรสั้นและไว (Quick Scalp) ยึดโมเมนตัม EMA 9/21 Ribbon, Micro Liquidity Sweep และ StochRSI/RSI7\n"
+            "2. Stop Loss (SL): ต้องวางแบบแคบ กระชับ ปลอดภัย (Tight SL ประมาณ 1.0 - 2.5 USD หรือ 0.65 - 0.90 ATR) ห้ามวางกว้างแบบสวิงรายวัน\n"
+            "3. Take Profit (TP): ล็อกเป้าหมายสั้นและมีความเป็นไปได้สูง (R:R 1.25 - 1.6x หรือ 1.5 - 4.0 USD จากจุดเข้า)\n"
+            "4. จุดเข้า (Entry): สามารถแนะนำเข้าทันที (order_type: BUY/SELL NOW, status: ACTIVE_IN_ZONE) หากเกิดโมเมนตัมยืนยัน หรือดัก Pullback สั้นๆ ที่ EMA 9/21 หรือ Micro OB ใกล้ราคาปัจจุบัน\n"
+        )
+        target_field_desc = '    "target": ตัวเลขราคา TP (เป้าหมายสั้น R:R 1.25 - 1.60x หรือ 1.5 - 4.0 USD),\n'
+    else:
+        style_prompt = (
+            "โหมดวิเคราะห์ปัจจุบัน: 🎯 INTRADAY (เทรดรอบสวิงรายวัน SMC Swing)\n"
+            "กฎเฉพาะทางสำหรับ INTRADAY:\n"
+            "1. เน้นรอบสวิงตามโครงสร้าง Institutional Order Block (OB), Fair Value Gap (FVG) และแนวรับ-ต้านหลายไทม์เฟรม M15/H1/H4\n"
+            "2. Stop Loss (SL): วางพ้นขอบโซนสวิงหลัก (Structural SL กว้างกว่า ประมาณ 3.5 - 7.0 USD หรือ 1.2 - 1.8 ATR)\n"
+            "3. Take Profit (TP): หวังผลตาม Liquidity Pools / Session High-Low / HTF Targets (R:R ตั้งแต่ 1.8 - 3.5x ขึ้นไป)\n"
+            "4. จุดเข้า (Entry): ต้องเป็นคำสั่งดักล่วงหน้า (order_type: BUY/SELL LIMIT, status: WAITING_PULLBACK) ที่โซนรับ-ต้านหลักล่วงหน้าเท่านั้น\n"
+        )
+        target_field_desc = '    "target": ตัวเลขราคา TP (ต้องสอดคล้องกับแนวรับ-ต้าน MTF/Liquidity และได้ R:R >= 1.6),\n'
+
     user_prompt = (
+        f"{style_prompt}\n"
         "วิเคราะห์กราฟ XAUUSD จากข้อมูลแท่งเทียน 40 แท่งล่าสุด พฤติกรรมแท่งเทียนย้อนหลัง 60 แท่ง (historical_candle_behavior) "
         "ความสอดคล้องและแนวรับ-ต้านจากหลายไทม์เฟรม M5, M15, H1, H4 (multi_timeframe_confluence) "
         "โซน SMC ที่ยังไม่ถูกใช้งาน (Unmitigated OB, FVG) เส้น EMA 20/50/200 ค่า ATR(14) และผลจำลองกราฟจากสถิติจริง 15,000 เส้นทางด้านล่างนี้\n"
         "กฎเหล็กสำคัญ:\n"
         "1. ห้ามเมคตัวเลขหรือเร่งให้เปิดออเดอร์เด็ดขาด! อิงจากตัวเลขและสถิติจริงเท่านั้น หากโอกาสถึง TP ไม่เกิน 50% ให้สั่ง 'รอจังหวะ (WAIT)' ทันที\n"
-        "2. ต้องบอกจุดเข้าล่วงหน้าเท่านั้น (BUY LIMIT ต้องอยู่ต่ำกว่าราคาปัจจุบันที่โซนรับที่ยังไม่ถูกใช้ / SELL LIMIT ต้องอยู่สูงกว่าราคาปัจจุบันที่โซนต้านที่ยังไม่ถูกใช้) ห้ามบอกจุดเข้าที่ราคาวิ่งผ่านไปแล้วเด็ดขาด\n"
+        "2. จุดเข้าต้องสอดคล้องกับโหมดการเทรดที่ระบุด้านบนอย่างเคร่งครัด\n"
         "ให้คุณตัดสินใจแผนเทรดที่ดีที่สุดด้วยตัวเอง แล้วตอบกลับเป็น JSON เท่านั้นตามโครงสร้างนี้:\n"
         "{\n"
         '  "trade_decision": {\n'
@@ -222,7 +261,7 @@ def call_gemini_full_chart_analyst(
         '    "status": "ACTIVE_IN_ZONE หรือ WAITING_PULLBACK",\n'
         '    "entry": ตัวเลขราคาจุดเข้า,\n'
         '    "stop": ตัวเลขราคา SL (ต้องวางพ้นขอบโซนและปลอดภัยจาก ATR/Spread),\n'
-        '    "target": ตัวเลขราคา TP (ต้องสอดคล้องกับแนวรับ-ต้าน MTF/Liquidity และได้ R:R >= 1.5),\n'
+        + target_field_desc +
         '    "zone_low": ตัวเลขขอบล่างโซนเข้า,\n'
         '    "zone_high": ตัวเลขขอบบนโซนเข้า,\n'
         '    "scenario_b_sweep_reentry": ตัวเลขจุดดักเข้าไม้สองหากโดนกวาด SL แรก,\n'
@@ -373,7 +412,22 @@ def build_deterministic_advisory(
             f"{vf.get('headline_th')}"
         )
 
+    scalp = structure.get("scalping") or {}
+    risk_dist = abs(entry - stop)
+    if trading_style == "scalping":
+        strategy_header = (
+            f"⚡ [กลยุทธ์ SCALPING เทรดสั้น M1/M5] โฟกัสรอบเร็วตามโมเมนตัม EMA9/21 Ribbon ({scalp.get('ribbon_state', '-')}) "
+            f"ค่า StochRSI={scalp.get('stoch_rsi_k', 0):.0f} / RSI7={scalp.get('rsi7', 0):.1f} วาง Stop Loss แคบพิเศษ {risk_dist:.2f}$ "
+            f"เพื่อคุมความเสี่ยงและออกออเดอร์ทำรอบไว (เป้า TP {target:.2f} R:R 1:{rr:.2f}) | "
+        )
+    else:
+        strategy_header = (
+            f"🎯 [กลยุทธ์ INTRADAY สวิงรายวัน SMC] โฟกัสโครงสร้าง Institutional Order Block (OB) และ Fair Value Gap (FVG) "
+            f"วาง Stop Loss พ้นขอบโซนสวิงหลัก {risk_dist:.2f}$ เพื่อรันเทรนด์ยาวตามเป้าสภาพคล่อง (เป้า TP {target:.2f} R:R 1:{rr:.2f}) | "
+        )
+
     confluence_summary = (
+        f"{strategy_header}"
         f"โครงสร้างหลัก ({structure['timeframe']}) อยู่ในสภาวะ {trend['regime']} ({trend['bias']}) โดยมีการเรียงตัวของเส้นค่าเฉลี่ยแบบ "
         f"{trend['ema_alignment']} (EMA20={trend['ema20']:.2f}, EMA50={trend['ema50']:.2f}, EMA200={trend['ema200']:.2f}) "
         f"โซนเข้าเทรดมีปัจจัยหนุน {len(factors)} ข้อ: {', '.join(factors)}"
@@ -425,27 +479,52 @@ def build_deterministic_advisory(
         "blind_spots": blind_spots,
         "scenarios": {
             "scenario_a": {
-                "title": scenarios["scenario_a_primary"]["title"],
+                "title": (
+                    f"Scenario A (แผนทำรอบสั้น Scalping {side})"
+                    if trading_style == "scalping"
+                    else scenarios["scenario_a_primary"]["title"]
+                ),
                 "probability_pct": scenarios["scenario_a_primary"]["probability_pct"],
                 "detail": (
-                    f"โฟกัสเข้า {side} ที่โซน {entry:.2f} (ขนาด {lot:.2f} Lot) ตั้ง SL = {stop:.2f} | "
-                    f"เมื่อแตะ TP1 = {tp1:.2f} (1:1R) ให้แบ่งปิด 50% (+${risk_ticket.get('tp1_partial_profit_usd', 0):.2f}) และขยับ SL มาบังทุนที่ {risk_ticket.get('breakeven_sl_mt5', entry):.2f} เพื่อถือลุ้น TP2 = {target:.2f}"
+                    f"เข้าตามสัญญาณ {risk_ticket.get('order_type', side)} ที่โซน {entry:.2f} ({lot:.2f} Lot) ตั้ง SL แคบกระชับ {stop:.2f} (SL {risk_dist:.2f}$) และล็อกกำไรไวที่ TP {target:.2f} (R:R 1:{rr:.2f})"
+                    if trading_style == "scalping"
+                    else (
+                        f"โฟกัสเข้า {side} ที่โซน {entry:.2f} (ขนาด {lot:.2f} Lot) ตั้ง SL = {stop:.2f} | "
+                        f"เมื่อแตะ TP1 = {tp1:.2f} (1:1R) ให้แบ่งปิด 50% (+${risk_ticket.get('tp1_partial_profit_usd', 0):.2f}) และขยับ SL มาบังทุนที่ {risk_ticket.get('breakeven_sl_mt5', entry):.2f} เพื่อถือลุ้น TP2 = {target:.2f}"
+                    )
                 ),
             },
             "scenario_b": {
-                "title": scenarios["scenario_b_sweep_trap"]["title"],
+                "title": (
+                    "Scenario B (จุดดักเข้าใหม่หากเกิด Micro Sweep)"
+                    if trading_style == "scalping"
+                    else scenarios["scenario_b_sweep_trap"]["title"]
+                ),
                 "probability_pct": scenarios["scenario_b_sweep_trap"]["probability_pct"],
                 "detail": (
-                    f"หากราคาทิ้งไส้เทียนกวาดทะลุ {stop:.2f} ลงไปทดสอบโซนสภาพคล่องหรือแนวรับ-ต้าน HTF ถัดไปที่ {risk_ticket['scenario_b_reentry_mt5']:.2f} "
-                    f"แล้วปิดแท่งกลับเข้ามาได้ (Wick Sweep) สามารถพิจารณาแบ่งไม้รอดักที่ {risk_ticket['scenario_b_reentry_mt5']:.2f} แทนการไล่ราคา"
+                    f"หากราคาเกิดไส้เทียนสะบัดกิน SL ที่ {stop:.2f} ไปทดสอบแนวรับ-ต้านย่อยที่ {risk_ticket['scenario_b_reentry_mt5']:.2f} "
+                    f"แล้วดีดกลับเร็ว สามารถรอดักจังหวะเข้าใหม่เพื่อทำรอบถัดไป"
+                    if trading_style == "scalping"
+                    else (
+                        f"หากราคาทิ้งไส้เทียนกวาดทะลุ {stop:.2f} ลงไปทดสอบโซนสภาพคล่องหรือแนวรับ-ต้าน HTF ถัดไปที่ {risk_ticket['scenario_b_reentry_mt5']:.2f} "
+                        f"แล้วปิดแท่งกลับเข้ามาได้ (Wick Sweep) สามารถพิจารณาแบ่งไม้รอดักที่ {risk_ticket['scenario_b_reentry_mt5']:.2f} แทนการไล่ราคา"
+                    )
                 ),
             },
             "scenario_c": {
-                "title": scenarios["scenario_c_invalidation"]["title"],
+                "title": (
+                    "Scenario C (จุดยกเลิกแผน Scalping ทันที)"
+                    if trading_style == "scalping"
+                    else scenarios["scenario_c_invalidation"]["title"]
+                ),
                 "probability_pct": scenarios["scenario_c_invalidation"]["probability_pct"],
                 "detail": (
-                    f"หากแท่งเทียน {structure['timeframe']} ปิดเนื้อเทียนหลุดระดับ {risk_ticket['scenario_c_invalidation_mt5']:.2f} "
-                    f"แสดงว่าโครงสร้างฝั่ง {side} ถูกทำลายสมบูรณ์ (BOS ฝั่งตรงข้าม) ให้ยกเลิกแผนนี้ทันที ห้ามเปิดไม้แก้พอร์ต"
+                    f"หากราคาหลุดทะลุ {risk_ticket['scenario_c_invalidation_mt5']:.2f} ให้ยกเลิกแผน Scalping นี้ทันทีเพื่อรักษาทุน"
+                    if trading_style == "scalping"
+                    else (
+                        f"หากแท่งเทียน {structure['timeframe']} ปิดเนื้อเทียนหลุดระดับ {risk_ticket['scenario_c_invalidation_mt5']:.2f} "
+                        f"แสดงว่าโครงสร้างฝั่ง {side} ถูกทำลายสมบูรณ์ (BOS ฝั่งตรงข้าม) ให้ยกเลิกแผนนี้ทันที ห้ามเปิดไม้แก้พอร์ต"
+                    )
                 ),
             },
         },
@@ -479,8 +558,9 @@ def evaluate_chart_with_gemini_or_fallback(
     if not api_key:
         return smc["trade_setup"], None
 
+    trading_style = str(smc.get("trading_style") or config.get("trading_style", "intraday")).lower()
     cache_key = hashlib.sha256(
-        f"{structure['timeframe']}:{structure['last_bar_time']}:{round(float(structure['current_price']), 0)}:{model}:{api_key[-6:]}".encode(
+        f"{structure['timeframe']}:{trading_style}:{structure['last_bar_time']}:{round(float(structure['current_price']), 0)}:{model}:{api_key[-6:]}".encode(
             "utf-8"
         )
     ).hexdigest()[:20]

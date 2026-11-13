@@ -215,6 +215,11 @@ class TradingAssistantCore:
 
         min_conf = int((self.config.get("ai") or {}).get("auto_trigger_min_confluence") or 55)
         if self.order_manager.has_active_order():
+            act = self.order_manager.active_order
+            if act and act.get("status") == "PENDING" and act.get("trading_style") != self.trading_style:
+                self.order_manager.cancel_active_order(reason="STYLE_CHANGED")
+
+        if self.order_manager.has_active_order():
             # Autonomously scan and execute recovery (แก้ไม้) or scale-in (ทำกำไรเพิ่ม)
             auto_event = self.order_manager.check_and_apply_auto_multi_order(
                 current_price=cur_p,
@@ -232,6 +237,16 @@ class TradingAssistantCore:
 
             active_ord = self.order_manager.get_active_order_dict(cur_p)
             if active_ord:
+                cur_lev = max(1.0, float(self.config.get("leverage") or 100.0))
+                act_lot = float(active_ord.get("total_lot_size", active_ord["lot_size"]))
+                act_entry = float(active_ord.get("avg_entry_price", active_ord["entry_mt5"]))
+                cur_bal = float(self.config.get("account_balance", 5000.0))
+                contract_size = float(self.config.get("contract_size", 100.0))
+                margin_req = round((act_lot * contract_size * act_entry) / cur_lev, 2)
+                risk_ticket["leverage"] = cur_lev
+                risk_ticket["margin_required_usd"] = margin_req
+                risk_ticket["free_margin_usd"] = round(cur_bal - margin_req, 2)
+                risk_ticket["margin_level_pct"] = round((cur_bal / margin_req) * 100.0, 1) if margin_req > 0 else 9999.0
                 risk_ticket["side"] = active_ord["side"]
                 risk_ticket["execution_type"] = active_ord.get("execution_type", "LIMIT")
                 risk_ticket["order_type"] = active_ord.get("order_type", f"{active_ord['side']} LIMIT")
@@ -774,7 +789,11 @@ class AssistantServer:
         elif action == "change_style":
             style = str(cmd.get("trading_style") or "intraday").lower()
             tf = cmd.get("timeframe")
-            state = await asyncio.to_thread(self.core.compute_full_state, tf, True, False, style)
+            if self.core.order_manager.has_active_order():
+                act = self.core.order_manager.active_order
+                if act and act.get("status") == "PENDING" and act.get("trading_style") != style:
+                    self.core.order_manager.cancel_active_order(reason="STYLE_CHANGED")
+            state = await asyncio.to_thread(self.core.compute_full_state, tf, True, True, style)
             await self.broadcast(state)
         elif action == "step_replay":
             self.auto_replay = False

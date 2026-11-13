@@ -1638,13 +1638,21 @@ body {
   gap: 12px;
 }
 
-.modal-form label {
+.modal-form label,
+.modal-form .form-field {
   display: flex;
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.modal-form .form-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0;
 }
 
 .modal-form input {

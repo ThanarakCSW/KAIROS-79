@@ -1128,22 +1128,10 @@
       el("scenCDetail").textContent = sc.scenario_c.detail;
     }
 
-    // Populate modal settings
-    const cfg = state.config || {};
-    if (document.activeElement !== el("cfgBalance")) el("cfgBalance").value = cfg.account_balance ?? 5000;
-    if (document.activeElement !== el("cfgLeverage") && el("cfgLeverage")) {
-      const curLev = cfg.leverage ?? 100;
-      el("cfgLeverage").value = curLev;
-      document.querySelectorAll(".btn-lev-chip").forEach((chip) => {
-        chip.classList.toggle("active", Number(chip.dataset.lev) === Number(curLev));
-      });
-    }
-    if (document.activeElement !== el("cfgRiskPct")) el("cfgRiskPct").value = cfg.risk_per_trade_pct ?? 1.0;
-    if (document.activeElement !== el("cfgOffset")) el("cfgOffset").value = cfg.broker_price_offset ?? 0.0;
-    if (document.activeElement !== el("cfgSpread")) el("cfgSpread").value = cfg.broker_spread_points ?? 25;
-    if (el("cfgAutoMultiOrder")) {
-      const multiCfg = cfg.multi_order || {};
-      el("cfgAutoMultiOrder").checked = multiCfg.auto_mode_enabled !== false;
+    // Only populate modal settings if modal is closed, to avoid overwriting user edits
+    const modalEl = el("settingsModal");
+    if (modalEl && modalEl.classList.contains("hidden")) {
+      populateSettingsForm(state.config || {});
     }
 
     renderChartPatterns(state);
@@ -1151,6 +1139,25 @@
     if (state.is_new_signal_alert) {
       playAlertBeep(tk.verdict);
       showToast(`🔔 แจ้งเตือนสัญญาณ ${tk.side} XAUUSD (${tk.verdict})`);
+    }
+  }
+
+  function populateSettingsForm(cfg) {
+    if (!cfg) return;
+    if (el("cfgBalance")) el("cfgBalance").value = cfg.account_balance ?? 5000;
+    if (el("cfgLeverage")) {
+      const curLev = cfg.leverage ?? 100;
+      el("cfgLeverage").value = curLev;
+      document.querySelectorAll(".btn-lev-chip").forEach((chip) => {
+        chip.classList.toggle("active", Number(chip.dataset.lev) === Number(curLev));
+      });
+    }
+    if (el("cfgRiskPct")) el("cfgRiskPct").value = cfg.risk_per_trade_pct ?? 1.0;
+    if (el("cfgOffset")) el("cfgOffset").value = cfg.broker_price_offset ?? 0.0;
+    if (el("cfgSpread")) el("cfgSpread").value = cfg.broker_spread_points ?? 25;
+    if (el("cfgAutoMultiOrder")) {
+      const multiCfg = cfg.multi_order || {};
+      el("cfgAutoMultiOrder").checked = multiCfg.auto_mode_enabled !== false;
     }
   }
 
@@ -1351,6 +1358,11 @@
         // When switching to scalping on H1/H4, automatically switch to M5 for fast scalping
         const curTf = currentState ? currentState.timeframe : "M5";
         const targetTf = style === "scalping" && (curTf === "H1" || curTf === "H4") ? "M5" : curTf;
+        showToast(
+          style === "scalping"
+            ? "⚡ สลับสู่โหมดเทรดสั้น (Scalping) — กำลังวิเคราะห์จุดเข้าแบบรวดเร็ว..."
+            : "🎯 สลับสู่โหมดปกติ (Intraday SMC) — กำลังวิเคราะห์จุดเข้ารอบสวิง..."
+        );
         sendWs({ action: "change_style", trading_style: style, timeframe: targetTf });
       });
     });
@@ -1431,7 +1443,10 @@
 
     // Settings Modal open/close
     const modal = el("settingsModal");
-    el("btnOpenSettings").addEventListener("click", () => modal.classList.remove("hidden"));
+    el("btnOpenSettings").addEventListener("click", () => {
+      populateSettingsForm(currentState ? currentState.config : null);
+      modal.classList.remove("hidden");
+    });
     el("btnCloseSettings").addEventListener("click", () => modal.classList.add("hidden"));
     el("btnCancelSettings").addEventListener("click", () => modal.classList.add("hidden"));
     modal.addEventListener("click", (e) => {
@@ -1587,12 +1602,28 @@
 
     // Leverage Preset Buttons in Settings Modal
     document.querySelectorAll(".btn-lev-chip").forEach((chip) => {
-      chip.addEventListener("click", () => {
+      chip.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const levVal = chip.dataset.lev;
+        const levInput = el("cfgLeverage");
+        if (levInput) {
+          levInput.value = levVal;
+          levInput.dispatchEvent(new Event("input", { bubbles: true }));
+        }
         document.querySelectorAll(".btn-lev-chip").forEach((c) => c.classList.remove("active"));
         chip.classList.add("active");
-        if (el("cfgLeverage")) el("cfgLeverage").value = chip.dataset.lev;
       });
     });
+
+    if (el("cfgLeverage")) {
+      el("cfgLeverage").addEventListener("input", () => {
+        const val = Number(el("cfgLeverage").value);
+        document.querySelectorAll(".btn-lev-chip").forEach((chip) => {
+          chip.classList.toggle("active", Number(chip.dataset.lev) === val);
+        });
+      });
+    }
 
     // Save Settings Form
     el("settingsForm").addEventListener("submit", async (e) => {
