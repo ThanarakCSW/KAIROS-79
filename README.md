@@ -71,10 +71,12 @@ cp config.example.json config.json
 3. **รันเซิร์ฟเวอร์**
 
 ```bash
-python3 app.py --port 8080
+python3 app.py
 ```
 
-เปิดเบราว์เซอร์ไปที่ **`http://127.0.0.1:8080`**
+เปิดเบราว์เซอร์ไปที่ **`http://localhost:8000`** หรือ **`http://127.0.0.1:8000`**
+
+*(หากใช้งานร่วมกับ MetaTrader 5 EA บน Windows PC / VPS สามารถดู IP วง LAN หรือ Public IP ที่ระบบแสดงขึ้นมาบน Terminal เพื่อนำไปใส่ใน MT5 WebRequest ได้ทันที)*
 
 ---
 

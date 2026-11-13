@@ -1076,6 +1076,19 @@ body {
   transform: translateY(-1px);
 }
 
+.btn-order-action.btn-send-mt5 {
+  background: linear-gradient(135deg, rgba(245, 184, 65, 0.25), rgba(56, 189, 248, 0.2));
+  border-color: rgba(245, 184, 65, 0.6);
+  color: #fbbf24;
+  font-weight: 700;
+  box-shadow: 0 0 8px rgba(245, 184, 65, 0.15);
+}
+.btn-order-action.btn-send-mt5:hover {
+  background: linear-gradient(135deg, rgba(245, 184, 65, 0.4), rgba(56, 189, 248, 0.35));
+  box-shadow: 0 0 12px rgba(245, 184, 65, 0.35);
+  border-color: #fbbf24;
+}
+
 .btn-order-action.btn-fill {
   background: rgba(16, 185, 129, 0.15);
   border-color: rgba(16, 185, 129, 0.45);

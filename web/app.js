@@ -403,6 +403,7 @@
     const execPill = el("orderExecTypePill");
     const pnlBadge = el("orderPnlBadge");
     const msg = el("orderStatusMsg");
+    const btnSendMT5 = el("btnSendOrderToMT5");
     const btnFill = el("btnOrderFillNow");
     const btnAdd = el("btnAddSubOrder");
     const btnBE = el("btnOrderBreakeven");
@@ -428,6 +429,7 @@
       }
       if (pnlBadge) pnlBadge.style.display = "none";
       if (msg) msg.textContent = "กำลังติดตามโครงสร้างตลาด SMC เมื่อ Confluence และโอกาสถึง TP > 50% ระบบจะล็อคแผนเข้าทันที";
+      if (btnSendMT5) btnSendMT5.style.display = "none";
       if (btnFill) btnFill.style.display = "none";
       if (btnAdd) btnAdd.style.display = "none";
       if (btnBE) btnBE.style.display = "none";
@@ -521,6 +523,7 @@
         msg.textContent = ord.management_note_th || `ถือครอง ${side} @ ${entry.toFixed(2)} — ถึง TP1 แบ่งปิด 50% และเลื่อน SL บังทุน`;
       }
 
+      if (btnSendMT5) btnSendMT5.style.display = "none";
       if (btnFill) btnFill.style.display = "none";
       if (btnAdd) btnAdd.style.display = "inline-flex";
       if (btnBE) {
@@ -558,6 +561,7 @@
         msg.textContent = ord.management_note_th || `ตั้งคำสั่ง ${side} LIMIT ใน MT5 แล้ว ${dir} $${dist.toFixed(2)} (จุดเข้าล็อคถาวร)`;
       }
 
+      if (btnSendMT5) btnSendMT5.style.display = "inline-flex";
       if (btnFill) btnFill.style.display = "inline-flex";
       if (btnAdd) btnAdd.style.display = "inline-flex";
       if (btnBE) btnBE.style.display = "none";
@@ -983,6 +987,7 @@
       if (el("orderStatusMsg")) {
         el("orderStatusMsg").textContent = `โอกาสชนะตามสถิติ ${probs.win_pct || 0}% ยังไม่เกิน 50% — กำลังเฝ้ารอโซน ${watchPrice} และรอความได้เปรียบ`;
       }
+      if (el("btnSendOrderToMT5")) el("btnSendOrderToMT5").style.display = "none";
       if (el("btnOrderFillNow")) el("btnOrderFillNow").style.display = "none";
       if (el("btnOrderCancel")) el("btnOrderCancel").style.display = "none";
     } else {
@@ -1024,6 +1029,10 @@
         if (el("orderLifecycleCard")) {
           el("orderLifecycleCard").className = "order-lifecycle-bar status-pending";
         }
+      }
+      if (el("btnSendOrderToMT5")) {
+        const isAlreadyFilled = activeOrd && activeOrd.status === "FILLED";
+        el("btnSendOrderToMT5").style.display = (!isAlreadyFilled && winProbPassed && tk.verdict !== "REJECT") ? "inline-flex" : "none";
       }
       if (el("btnOrderFillNow")) el("btnOrderFillNow").style.display = "inline-flex";
       if (el("btnOrderCancel")) el("btnOrderCancel").style.display = "inline-flex";
@@ -1445,6 +1454,10 @@
     const modal = el("settingsModal");
     el("btnOpenSettings").addEventListener("click", () => {
       populateSettingsForm(currentState ? currentState.config : null);
+      const eaUrlEl = el("eaWebRequestUrl");
+      if (eaUrlEl && window.location.origin) {
+        eaUrlEl.textContent = window.location.origin;
+      }
       modal.classList.remove("hidden");
     });
     el("btnCloseSettings").addEventListener("click", () => modal.classList.add("hidden"));
@@ -1511,13 +1524,20 @@
       showToast("กำลังส่งกราฟและผลจำลอง 15,000 เส้นทางให้ Gemini วิเคราะห์...");
     });
 
-    // Order Action Buttons (Fill Now, Breakeven, Close, Cancel, Scan New)
+    // Order Action Buttons (Send to MT5, Fill Now, Breakeven, Close, Cancel, Scan New)
     const getCurPrice = () => {
       if (currentState && currentState.structure && currentState.structure.current_price) {
         return Number(currentState.structure.current_price);
       }
       return parseFloat(el("livePrice").textContent) || 0;
     };
+
+    if (el("btnSendOrderToMT5")) {
+      el("btnSendOrderToMT5").addEventListener("click", () => {
+        sendWs({ action: "send_order_to_mt5" });
+        showToast("🚀 ส่งคำสั่งซื้อขายไปยัง MetaTrader 5 เรียบร้อย!");
+      });
+    }
 
     if (el("btnOrderFillNow")) {
       el("btnOrderFillNow").addEventListener("click", () => {

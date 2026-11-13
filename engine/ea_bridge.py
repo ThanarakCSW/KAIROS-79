@@ -30,7 +30,7 @@ class EABridgeManager:
     def __init__(
         self,
         config_path: Optional[str] = None,
-        heartbeat_timeout_sec: float = 6.0,
+        heartbeat_timeout_sec: float = 12.0,
     ) -> None:
         self.config_path = config_path or os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
@@ -40,6 +40,7 @@ class EABridgeManager:
         # State
         self.auto_trading_enabled: bool = False
         self.last_heartbeat_ts: float = 0.0
+        self.last_poll_ts: float = 0.0
         self.account_info: Dict[str, Any] = {
             "account_id": None,
             "broker": "Waiting for MT5...",
@@ -108,10 +109,15 @@ class EABridgeManager:
 
     @property
     def is_connected(self) -> bool:
-        """Check whether MT5 EA has sent a heartbeat recently."""
-        if self.last_heartbeat_ts <= 0:
-            return False
-        return (time.time() - self.last_heartbeat_ts) <= self.heartbeat_timeout_sec
+        """Check whether MT5 EA has sent a heartbeat or poll recently."""
+        now = time.time()
+        hb_active = (self.last_heartbeat_ts > 0) and ((now - self.last_heartbeat_ts) <= self.heartbeat_timeout_sec)
+        poll_active = (self.last_poll_ts > 0) and ((now - self.last_poll_ts) <= self.heartbeat_timeout_sec)
+        return hb_active or poll_active
+
+    def record_poll(self) -> None:
+        """Record live polling activity from MT5 EA."""
+        self.last_poll_ts = time.time()
 
     def record_heartbeat(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Record live telemetry sent by MT5 EA."""
@@ -227,6 +233,8 @@ class EABridgeManager:
         """Summary dictionary for Web UI and API clients."""
         conn = self.is_connected
         acc = self.account_info
+        recent_ts = max(self.last_heartbeat_ts, self.last_poll_ts)
+        last_seen = round(time.time() - recent_ts, 1) if recent_ts > 0 else None
         return {
             "auto_trading_enabled": self.auto_trading_enabled,
             "is_connected": conn,
@@ -249,4 +257,5 @@ class EABridgeManager:
             "last_heartbeat_ago_sec": round(time.time() - self.last_heartbeat_ts, 1)
             if self.last_heartbeat_ts > 0
             else None,
+            "last_seen_sec": last_seen,
         }

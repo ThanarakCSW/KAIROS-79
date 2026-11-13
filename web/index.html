@@ -179,6 +179,7 @@
 
           <!-- Action Buttons -->
           <div class="lifecycle-actions" id="orderActionButtons">
+            <button id="btnSendOrderToMT5" class="btn-order-action btn-send-mt5" title="ส่งคำสั่งซื้อขายนี้ตรงไปยัง MetaTrader 5 ทันที">🚀 ส่งเข้า MT5 ทันที</button>
             <button id="btnOrderFillNow" class="btn-order-action btn-fill" title="กดเมื่อราคาใน MT5 เกี่ยวเปิดออเดอร์แล้ว">⚡ เปิดออเดอร์แล้ว</button>
             <button id="btnAddSubOrder" class="btn-order-action btn-add" style="display:none;" title="เปิดไม้เพิ่มทันทีที่ราคาปัจจุบัน (แก้ไม้เมื่อติดลบ หรือทำกำไรเพิ่มเมื่อบวก)">➕ เปิดไม้เพิ่ม (แก้ไม้/สเกล)</button>
             <button id="btnOrderBreakeven" class="btn-order-action btn-be" style="display:none;" title="กดเมื่อเลื่อน SL มาบังทุนแล้ว">🛡️ บังทุนแล้ว</button>
@@ -440,7 +441,7 @@
               <input type="checkbox" id="cfgAutoTrading" style="width: 18px; height: 18px; accent-color: #38bdf8; cursor: pointer;" />
               <span style="font-size: 12px; color: var(--text-primary);">เปิดใช้งาน Auto-Trading (เมื่อเปิด สัญญาณจะส่งเข้าพอร์ต MT5 ทันที)</span>
             </div>
-            <small style="color: var(--text-muted); margin-top: 4px;">รองรับ MT5 บน Windows PC / VPS ผ่าน WebRequest URL: <code>http://127.0.0.1:8000</code> (Magic: 797979)</small>
+            <small style="color: var(--text-muted); margin-top: 4px;">รองรับ MT5 บน Windows PC / VPS ผ่าน WebRequest URL: <code id="eaWebRequestUrl">http://127.0.0.1:8000</code> (Magic: 797979)</small>
           </label>
         </div>
 

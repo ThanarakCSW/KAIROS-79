@@ -245,6 +245,102 @@ class TestEABridge(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_polling_activity_records_keepalive(self):
+        """Verify record_poll marks MT5 EA as connected even before telemetry heartbeat."""
+        self.assertFalse(self.bridge.is_connected)
+        self.bridge.record_poll()
+        self.assertTrue(self.bridge.is_connected)
+        st = self.bridge.get_status_dict()
+        self.assertTrue(st["is_connected"])
+        self.assertEqual(st["status_label"], "CONNECTED")
+
+    def test_auto_dispatch_and_manual_order_to_mt5(self):
+        """Verify active order dispatch upon Auto ON and manual send_order_to_mt5 WS command."""
+        from app import AssistantServer
+        from engine.order_lifecycle import OrderLifecycleManager
+        import tempfile
+        import time
+
+        srv = AssistantServer(host="127.0.0.1", port=8000)
+        tmp_dir = tempfile.TemporaryDirectory()
+        tmp_persist_path = os.path.join(tmp_dir.name, "test_active_order.json")
+        srv.core.order_manager = OrderLifecycleManager(persistence_path=tmp_persist_path)
+
+        # 1. Register an active trade order while Auto-Trading is OFF
+        srv.core.ea_bridge.auto_trading_enabled = False
+        dummy_risk = {
+            "side": "BUY",
+            "execution_type": "LIMIT",
+            "entry_mt5": 2650.0,
+            "stop_mt5": 2645.0,
+            "tp1_mt5": 2655.0,
+            "target_mt5": 2660.0,
+            "lot_size": 0.10,
+            "actual_risk_usd": 50.0,
+            "reward_risk": 2.0,
+            "win_prob_passed": True,
+            "verdict": "PASS",
+            "fingerprint": "test_fp_001",
+        }
+        dummy_smc = {
+            "side": "BUY",
+            "execution_type": "LIMIT",
+            "confluence_score": 85,
+        }
+        ord_obj = srv.core.order_manager.register_trade_setup(
+            risk_ticket=dummy_risk,
+            smc_setup=dummy_smc,
+            current_price=2652.0,
+            timeframe="M5",
+            force_replace=True,
+        )
+        self.assertIsNotNone(ord_obj)
+        self.assertTrue(srv.core.order_manager.has_active_order())
+        # Action queue should be empty because Auto-Trading was OFF
+        self.assertEqual(len(srv.core.ea_bridge.action_queue), 0)
+
+        # 2. User turns Auto-Trading ON -> compute_full_state() must immediately enqueue the order!
+        srv.core.ea_bridge.set_auto_trading(True)
+        # Mock last spot price
+        srv.core.hub.latest_spot = {"price": 2652.0, "time": int(time.time())}
+        srv.core.compute_full_state()
+
+        self.assertGreaterEqual(len(srv.core.ea_bridge.action_queue), 1)
+        dispatched_act = srv.core.ea_bridge.action_queue[0]
+        self.assertEqual(dispatched_act["type"], "OPEN_ORDER")
+        self.assertEqual(dispatched_act["side"], "BUY")
+        self.assertEqual(dispatched_act["lot"], 0.10)
+        self.assertEqual(dispatched_act["price"], 2650.0)
+
+        # 3. Test Manual Dispatch via WebSocket command
+        async def _test_ws():
+            from unittest.mock import MagicMock
+            mock_client = MagicMock()
+            mock_client.closed = False
+
+            # Drain queue first
+            srv.core.ea_bridge.poll_actions()
+            self.assertEqual(len(srv.core.ea_bridge.action_queue), 0)
+
+            # User clicks "⚡ ส่งเข้า MT5 ทันที"
+            await srv.handle_ws_command(mock_client, {"action": "send_order_to_mt5"})
+            self.assertEqual(len(srv.core.ea_bridge.action_queue), 1)
+            manual_act = srv.core.ea_bridge.action_queue[0]
+            self.assertEqual(manual_act["type"], "OPEN_ORDER")
+            self.assertTrue(manual_act.get("manual"))
+
+            # 4. Test close_active_order enqueues CLOSE_ORDER when broker_ticket is set
+            srv.core.order_manager.active_order["broker_ticket"] = 123456
+            srv.core.ea_bridge.poll_actions()  # Clear queue
+            await srv.handle_ws_command(mock_client, {"action": "close_active_order", "current_price": 2655.0})
+            self.assertEqual(len(srv.core.ea_bridge.action_queue), 1)
+            close_act = srv.core.ea_bridge.action_queue[0]
+            self.assertEqual(close_act["type"], "CLOSE_ORDER")
+            self.assertEqual(close_act["ticket"], 123456)
+
+        asyncio.run(_test_ws())
+        tmp_dir.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()

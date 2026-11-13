@@ -297,51 +297,99 @@ class TradingAssistantCore:
                 risk_ticket["active_order"] = None
 
         # Auto-Trading Dispatch to MT5 EA Bridge when Auto-Trading is ON
-        if (
-            self.ea_bridge.auto_trading_enabled
-            and order_event
-            and order_event.get("type") == "NEW_ORDER_REGISTERED"
-            and risk_ticket.get("win_prob_passed", False)
-            and risk_ticket.get("verdict") in ("PASS", "CAUTION")
-        ):
-            sig_id = risk_ticket.get("fingerprint") or f"sig_{int(time.time())}"
-            self.ea_bridge.enqueue_action(
-                action_type="OPEN_ORDER",
-                payload={
-                    "side": risk_ticket["side"],
-                    "order_type": risk_ticket.get("execution_type", "LIMIT"),
-                    "symbol": "XAUUSD",
-                    "lot": float(risk_ticket.get("lot_size") or 0.10),
-                    "price": float(risk_ticket.get("entry_mt5") or cur_p),
-                    "sl": float(risk_ticket.get("stop_mt5") or 0.0),
-                    "tp": float(risk_ticket.get("target_mt5") or 0.0),
-                    "tp1": float(risk_ticket.get("tp1_mt5") or 0.0),
-                    "magic": 797979,
-                    "comment": f"K79-{risk_ticket['side']}",
-                },
-                signal_id=sig_id,
-            )
-        elif (
-            self.ea_bridge.auto_trading_enabled
-            and order_event
-            and order_event.get("type") == "MULTI_ORDER_ADDED"
-        ):
-            sub_o = order_event.get("order") or {}
-            self.ea_bridge.enqueue_action(
-                action_type="OPEN_ORDER",
-                payload={
-                    "side": sub_o.get("side", risk_ticket["side"]),
-                    "order_type": sub_o.get("execution_type", "MARKET"),
-                    "symbol": "XAUUSD",
-                    "lot": float(sub_o.get("lot_size") or 0.10),
-                    "price": float(sub_o.get("entry_mt5") or cur_p),
-                    "sl": float(sub_o.get("stop_mt5") or 0.0),
-                    "tp": float(sub_o.get("target_mt5") or 0.0),
-                    "magic": 797979,
-                    "comment": f"K79-{sub_o.get('purpose', 'MULTI')}",
-                },
-                signal_id=sub_o.get("order_id"),
-            )
+        if self.ea_bridge.auto_trading_enabled:
+            # Case 1: Primary active order needing dispatch
+            act_ord = self.order_manager.active_order
+            if (
+                act_ord
+                and act_ord.get("status") in ("PENDING", "FILLED")
+                and act_ord.get("order_id")
+                and act_ord.get("order_id") not in self.ea_bridge.executed_signal_ids
+            ):
+                sig_id = act_ord["order_id"]
+                self.ea_bridge.enqueue_action(
+                    action_type="OPEN_ORDER",
+                    payload={
+                        "side": act_ord["side"],
+                        "order_type": act_ord.get("execution_type", "LIMIT"),
+                        "symbol": act_ord.get("symbol", "XAUUSD"),
+                        "lot": float(act_ord.get("lot_size") or risk_ticket.get("lot_size") or 0.10),
+                        "price": float(act_ord.get("entry_mt5") or cur_p),
+                        "sl": float(act_ord.get("stop_mt5") or 0.0),
+                        "tp": float(act_ord.get("target_mt5") or 0.0),
+                        "tp1": float(act_ord.get("tp1_mt5") or 0.0),
+                        "magic": 797979,
+                        "comment": f"K79-{act_ord['side']}",
+                    },
+                    signal_id=sig_id,
+                )
+            elif (
+                order_event
+                and order_event.get("type") == "NEW_ORDER_REGISTERED"
+                and risk_ticket.get("win_prob_passed", False)
+                and risk_ticket.get("verdict") in ("PASS", "CAUTION")
+            ):
+                sig_id = risk_ticket.get("fingerprint") or f"sig_{int(time.time())}"
+                self.ea_bridge.enqueue_action(
+                    action_type="OPEN_ORDER",
+                    payload={
+                        "side": risk_ticket["side"],
+                        "order_type": risk_ticket.get("execution_type", "LIMIT"),
+                        "symbol": "XAUUSD",
+                        "lot": float(risk_ticket.get("lot_size") or 0.10),
+                        "price": float(risk_ticket.get("entry_mt5") or cur_p),
+                        "sl": float(risk_ticket.get("stop_mt5") or 0.0),
+                        "tp": float(risk_ticket.get("target_mt5") or 0.0),
+                        "tp1": float(risk_ticket.get("tp1_mt5") or 0.0),
+                        "magic": 797979,
+                        "comment": f"K79-{risk_ticket['side']}",
+                    },
+                    signal_id=sig_id,
+                )
+
+            # Case 2: Multi-orders (scale-in / recovery) needing dispatch
+            if order_event and order_event.get("type") == "MULTI_ORDER_ADDED":
+                sub_o = order_event.get("order") or {}
+                sub_id = sub_o.get("order_id")
+                if sub_id and sub_id not in self.ea_bridge.executed_signal_ids:
+                    self.ea_bridge.enqueue_action(
+                        action_type="OPEN_ORDER",
+                        payload={
+                            "side": sub_o.get("side", risk_ticket["side"]),
+                            "order_type": sub_o.get("execution_type", "MARKET"),
+                            "symbol": "XAUUSD",
+                            "lot": float(sub_o.get("lot_size") or 0.10),
+                            "price": float(sub_o.get("entry_mt5") or cur_p),
+                            "sl": float(sub_o.get("stop_mt5") or 0.0),
+                            "tp": float(sub_o.get("target_mt5") or 0.0),
+                            "magic": 797979,
+                            "comment": f"K79-{sub_o.get('purpose', 'MULTI')}",
+                        },
+                        signal_id=sub_id,
+                    )
+            elif len(self.order_manager.active_orders) > 1:
+                for sub_o in self.order_manager.active_orders[1:]:
+                    sub_id = sub_o.get("order_id")
+                    if (
+                        sub_id
+                        and sub_id not in self.ea_bridge.executed_signal_ids
+                        and sub_o.get("status") in ("PENDING", "FILLED")
+                    ):
+                        self.ea_bridge.enqueue_action(
+                            action_type="OPEN_ORDER",
+                            payload={
+                                "side": sub_o.get("side", act_ord["side"] if act_ord else "BUY"),
+                                "order_type": sub_o.get("execution_type", "MARKET"),
+                                "symbol": "XAUUSD",
+                                "lot": float(sub_o.get("lot_size") or 0.10),
+                                "price": float(sub_o.get("entry_mt5") or cur_p),
+                                "sl": float(sub_o.get("stop_mt5") or 0.0),
+                                "tp": float(sub_o.get("target_mt5") or 0.0),
+                                "magic": 797979,
+                                "comment": f"K79-{sub_o.get('purpose', 'MULTI')}",
+                            },
+                            signal_id=sub_id,
+                        )
 
         signal_tracker = evaluate_signal_performance(
             bars=chart_bars,
@@ -514,7 +562,7 @@ async def read_ws_frame(reader: asyncio.StreamReader) -> Optional[str]:
 
 
 class AssistantServer:
-    def __init__(self, host: str = "127.0.0.1", port: int = 8080) -> None:
+    def __init__(self, host: str = "0.0.0.0", port: int = 8000) -> None:
         self.host = host
         self.port = port
         self.core = TradingAssistantCore()
@@ -820,11 +868,23 @@ class AssistantServer:
             await self.broadcast(state)
         elif action == "cancel_active_order":
             reason = str(cmd.get("reason") or "MANUAL_CANCEL")
+            act = self.core.order_manager.active_order
+            if act and act.get("broker_ticket"):
+                self.core.ea_bridge.enqueue_action(
+                    action_type="CLOSE_ORDER",
+                    payload={"ticket": int(act["broker_ticket"])},
+                )
             self.core.order_manager.cancel_active_order(reason=reason)
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
             await self.broadcast(state)
         elif action == "close_active_order":
             cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            act = self.core.order_manager.active_order
+            if act and act.get("broker_ticket"):
+                self.core.ea_bridge.enqueue_action(
+                    action_type="CLOSE_ORDER",
+                    payload={"ticket": int(act["broker_ticket"])},
+                )
             self.core.order_manager.close_active_order(reason="MANUAL_CLOSE", current_price=cp)
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
             await self.broadcast(state)
@@ -835,6 +895,44 @@ class AssistantServer:
             await self.broadcast(state)
         elif action == "set_breakeven":
             self.core.order_manager.set_breakeven()
+            act = self.core.order_manager.active_order
+            if act and act.get("broker_ticket"):
+                self.core.ea_bridge.enqueue_action(
+                    action_type="MODIFY_ORDER",
+                    payload={
+                        "ticket": int(act["broker_ticket"]),
+                        "new_sl": float(act.get("entry_mt5") or 0.0),
+                        "new_tp": float(act.get("target_mt5") or 0.0),
+                    },
+                )
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+        elif action == "send_order_to_mt5":
+            act = self.core.order_manager.active_order
+            last_st = self.core.last_state or {}
+            rt = last_st.get("risk_ticket") or {}
+            cur_p = float(self.core.hub.latest_spot.get("price") or (act.get("entry_mt5") if act else 0.0) or (rt.get("entry_mt5") or 0.0))
+            side = (act.get("side") if act else None) or rt.get("side") or "BUY"
+            sig_id = (act.get("order_id") if act else None) or rt.get("fingerprint") or f"manual_{int(time.time())}"
+            # Discard so manual dispatch can re-queue even if already queued
+            self.core.ea_bridge.executed_signal_ids.discard(sig_id)
+            self.core.ea_bridge.enqueue_action(
+                action_type="OPEN_ORDER",
+                payload={
+                    "side": side,
+                    "order_type": (act.get("execution_type") if act else None) or rt.get("execution_type") or "LIMIT",
+                    "symbol": "XAUUSD",
+                    "lot": float((act.get("lot_size") if act else None) or rt.get("lot_size") or 0.10),
+                    "price": float((act.get("entry_mt5") if act else None) or rt.get("entry_mt5") or cur_p),
+                    "sl": float((act.get("stop_mt5") if act else None) or rt.get("stop_mt5") or 0.0),
+                    "tp": float((act.get("target_mt5") if act else None) or rt.get("target_mt5") or 0.0),
+                    "tp1": float((act.get("tp1_mt5") if act else None) or rt.get("tp1_mt5") or 0.0),
+                    "magic": 797979,
+                    "comment": f"K79-{side}-MANUAL",
+                    "manual": True,
+                },
+                signal_id=sig_id,
+            )
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
             await self.broadcast(state)
         elif action == "scan_new_setup":
@@ -864,6 +962,10 @@ class AssistantServer:
             await self.broadcast(state)
         elif action == "close_all_active_orders":
             cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            self.core.ea_bridge.enqueue_action(
+                action_type="CLOSE_ALL",
+                payload={"symbol": "XAUUSD", "magic": 797979},
+            )
             self.core.order_manager.close_all_orders(current_price=cp)
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
             await self.broadcast(state)
@@ -979,6 +1081,7 @@ class AssistantServer:
         # --- MT5 EA Bridge HTTP Endpoints ---
         if path == "/api/ea/poll" and method in ("GET", "POST"):
             actions = self.core.ea_bridge.poll_actions()
+            self.core.ea_bridge.record_poll()
             resp_doc = {
                 "status": "ok",
                 "auto_trading_enabled": self.core.ea_bridge.auto_trading_enabled,
@@ -1119,8 +1222,23 @@ class AssistantServer:
         tick_task = asyncio.create_task(self.tick_loop())
         tv_task = asyncio.create_task(self.tv_ws_loop())
         ws_task = asyncio.create_task(self.binance_ws_loop())
-        print(f"KAIROS-79 (Precision Gold Timing & Risk System) running at http://{self.host}:{self.port}")
-        print(f"Active Data Feed: {self.core.last_state.get('data_source') if self.core.last_state else 'initializing'}")
+
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            lan_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            lan_ip = "127.0.0.1"
+
+        print("=" * 64)
+        print("🚀 KAIROS-79 (Precision Gold Timing & Risk System) Online")
+        print(f"🌐 Web Dashboard (Local):    http://localhost:{self.port}")
+        print(f"🌐 Web Dashboard (LAN/VPS):  http://{lan_ip}:{self.port}")
+        print(f"🤖 MT5 EA Bridge URL:        http://{lan_ip}:{self.port} (or http://127.0.0.1:{self.port})")
+        print(f"Active Data Feed:            {self.core.last_state.get('data_source') if self.core.last_state else 'initializing'}")
+        print("=" * 64)
         try:
             async with server:
                 await server.serve_forever()
@@ -1132,8 +1250,8 @@ class AssistantServer:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Run KAIROS-79 (Precision Gold Timing & Risk System) Web Server.")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args(argv)
 
     srv = AssistantServer(host=args.host, port=args.port)

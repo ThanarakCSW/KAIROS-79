@@ -34,7 +34,7 @@ CPositionInfo  m_position;
 COrderInfo     m_order;
 
 string         g_symbol;
-datetime       g_last_heartbeat_time = 0;
+ulong          g_last_heartbeat_ms = 0;
 bool           g_server_online = false;
 bool           g_auto_trading_enabled = false;
 int            g_consecutive_errors = 0;
@@ -148,6 +148,14 @@ bool SendHttpRequest(const string method, const string endpoint, const string po
       return false;
    }
 
+   if(res < 200 || res >= 300)
+   {
+      g_consecutive_errors++;
+      g_server_online = false;
+      PrintFormat("⚠️ WebRequest to %s returned HTTP %d", url, res);
+      return false;
+   }
+
    g_consecutive_errors = 0;
    g_server_online = true;
    response_text = CharArrayToString(result_bytes, 0, WHOLE_ARRAY, CP_UTF8);
@@ -206,8 +214,16 @@ void SendHeartbeat()
    double mgn_level = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
 
    MqlTick tick;
-   SymbolInfoTick(g_symbol, tick);
-   double spread_pts = (tick.ask - tick.bid) / SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+   double pt = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+   if(pt <= 0.0) pt = _Point;
+   if(pt <= 0.0) pt = 0.01;
+   double spread_pts = 0.0;
+   if(SymbolInfoTick(g_symbol, tick))
+   {
+      if(tick.ask > tick.bid && pt > 0.0)
+         spread_pts = (tick.ask - tick.bid) / pt;
+   }
+   if(spread_pts < 0.0 || spread_pts > 9999.0) spread_pts = 0.0;
 
    string pos_json = BuildOpenPositionsJson();
 
@@ -275,7 +291,10 @@ void ExecuteOpenOrder(const string action_json)
       SendExecutionReport(action_id, signal_id, "FAILED", 0, side, lot, 0, 0, sl, tp, 0, comment, 10001, "Cannot get market tick");
       return;
    }
-   double current_spread_pts = (tick.ask - tick.bid) / SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+   double pt = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+   if(pt <= 0.0) pt = _Point;
+   if(pt <= 0.0) pt = 0.01;
+   double current_spread_pts = (tick.ask > tick.bid && pt > 0.0) ? (tick.ask - tick.bid) / pt : 0.0;
    if(current_spread_pts > InpMaxSpreadPoints)
    {
       PrintFormat("🛡️ Order rejected: Spread %.1f points exceeds max allowed %.1f points", current_spread_pts, InpMaxSpreadPoints);
@@ -292,20 +311,29 @@ void ExecuteOpenOrder(const string action_json)
    double fill_p = 0.0;
    double slip_pts = 0.0;
 
+   // Determine whether to execute as Market or Pending Limit
+   bool execute_as_market = (order_type == "MARKET" || price <= 0.0);
+   if(!execute_as_market)
+   {
+      // If price has reached or crossed entry, execute as market to prevent invalid price rejection
+      if(side == "BUY" && price >= tick.ask) execute_as_market = true;
+      if(side == "SELL" && price <= tick.bid) execute_as_market = true;
+   }
+
    // 1. Market Order Execution
-   if(order_type == "MARKET" || price <= 0.0 || MathAbs(price - (side == "BUY" ? tick.ask : tick.bid)) <= 0.50)
+   if(execute_as_market)
    {
       if(side == "BUY")
       {
          ok = m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment);
          fill_p = m_trade.ResultPrice();
-         slip_pts = (fill_p > 0 && tick.ask > 0) ? (fill_p - tick.ask) / SymbolInfoDouble(g_symbol, SYMBOL_POINT) : 0.0;
+         slip_pts = (fill_p > 0 && tick.ask > 0 && pt > 0) ? (fill_p - tick.ask) / pt : 0.0;
       }
       else
       {
          ok = m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
          fill_p = m_trade.ResultPrice();
-         slip_pts = (fill_p > 0 && tick.bid > 0) ? (tick.bid - fill_p) / SymbolInfoDouble(g_symbol, SYMBOL_POINT) : 0.0;
+         slip_pts = (fill_p > 0 && tick.bid > 0 && pt > 0) ? (tick.bid - fill_p) / pt : 0.0;
       }
    }
    // 2. Pending Limit Order Execution
@@ -469,7 +497,8 @@ void PollServerActions()
 
       if(act_type == "OPEN_ORDER")
       {
-         if(g_auto_trading_enabled)
+         bool is_manual = JsonExtractBool(action_json, "manual", false);
+         if(g_auto_trading_enabled || is_manual)
             ExecuteOpenOrder(action_json);
          else
             Print("⚠️ OPEN_ORDER ignored: Auto-Trading is OFF on Web Dashboard");
@@ -496,19 +525,27 @@ void PollServerActions()
 //+------------------------------------------------------------------+
 void UpdateChartHUD()
 {
-   string conn_text = g_server_online ? "🟢 CONNECTED (Online)" : "🔴 DISCONNECTED (Check Server)";
+   string conn_text = g_server_online ? "🟢 CONNECTED (Online)" : "🔴 DISCONNECTED (Check Server / URL)";
    string auto_text = g_auto_trading_enabled ? "🟢 AUTO-TRADING: ON" : "⏸️ AUTO-TRADING: OFF";
 
+   bool terminal_trade_allowed = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
+   bool ea_trade_allowed = (bool)MqlInfoInteger(MQL_TRADE_ALLOWED);
+   string trade_btn_status = (terminal_trade_allowed && ea_trade_allowed)
+                              ? "✅ MT5 Algo Trading: ALLOWED"
+                              : "⚠️ MT5 Algo Trading: DISABLED (Click Algo Trading button!)";
+
    string hud = "========================================\n"
-              + "  🤖 KAIROS-79 EA Bridge v1.00\n"
+              + "  🤖 KAIROS-79 EA Bridge v1.01\n"
               + "========================================\n"
               + "  Server URL:    " + InpServerUrl + "\n"
               + "  Status:        " + conn_text + "\n"
               + "  Web Control:   " + auto_text + "\n"
+              + "  Algo Trading:  " + trade_btn_status + "\n"
               + "  Magic Number:  " + IntegerToString(InpMagicNumber) + "\n"
               + "  Symbol:        " + g_symbol + "\n"
               + "  Open Positions: " + IntegerToString(PositionsTotal()) + "\n"
-              + "========================================";
+              + "========================================\n"
+              + (g_server_online ? "  ✅ Telemetry Live Syncing" : "  ⚠️ If Offline: Verify Tools -> Options -> WebRequest");
 
    Comment(hud);
 }
@@ -534,6 +571,7 @@ int OnInit()
    Print("=======================================================");
 
    // Initial heartbeat & check
+   g_last_heartbeat_ms = GetTickCount64();
    SendHeartbeat();
    UpdateChartHUD();
 
@@ -558,13 +596,13 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-   datetime now = TimeCurrent();
+   ulong now_ms = GetTickCount64();
 
    // 1. Send Heartbeat Telemetry every N seconds
-   if(now - g_last_heartbeat_time >= InpHeartbeatIntervalSec)
+   if(now_ms - g_last_heartbeat_ms >= (ulong)(InpHeartbeatIntervalSec * 1000))
    {
       SendHeartbeat();
-      g_last_heartbeat_time = now;
+      g_last_heartbeat_ms = now_ms;
       UpdateChartHUD();
    }
 
