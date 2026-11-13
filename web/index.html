@@ -93,6 +93,8 @@
         <!-- Compact Single-Row Floating Chart HUD (Only Key Info, Never Blocks Candles) -->
         <div class="chart-hud">
           <div class="hud-row">
+            <span class="hud-tag" id="barsCountBadge" title="จำนวนแท่งเทียนที่นำมาคำนวณและวิเคราะห์ย้อนหลังลึก">📊 1,500 แท่ง</span>
+            <span class="hud-tag" id="chartPatternBadge" title="รูปแบบกราฟในอดีต (Chart Pattern)">📐 Pattern: —</span>
             <span class="hud-tag" id="atrBadge">ATR: —</span>
             <span class="hud-tag ema-tag"><i class="dot ema20"></i><span id="hudEma20">20: —</span></span>
             <span class="hud-tag ema-tag"><i class="dot ema50"></i><span id="hudEma50">50: —</span></span>
@@ -326,6 +328,34 @@
             <div class="pane-section">
               <h4>📈 ข้อสรุปทางสถิติ (Monte Carlo Verdict)</h4>
               <p id="simVerdictText" class="sim-verdict-box">—</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section 3: Historical Chart Patterns (Collapsible) -->
+        <div class="acc-card" id="accPatterns">
+          <button class="acc-head" type="button" data-acc="accPatterns" title="คลิกเพื่อย่อ/ขยาย รูปแบบกราฟในอดีต (Chart Patterns)">
+            <div class="acc-title-left">
+              <span class="acc-icon">📐</span>
+              <span class="acc-title-text">รูปแบบกราฟในอดีต (Chart Patterns)</span>
+              <span id="patternsHeaderBadge" class="acc-pill">1,500 แท่ง</span>
+            </div>
+            <span class="acc-indicator">▸</span>
+          </button>
+
+          <div class="acc-body" id="accBodyPatterns" style="display: none;">
+            <div class="pane-section">
+              <h4>🎯 รูปแบบกราฟล่าสุดที่กำลังส่งผล</h4>
+              <div id="patternActiveCard" class="pattern-active-card">
+                <div class="pattern-active-empty">กำลังสแกนหารูปแบบกราฟ...</div>
+              </div>
+            </div>
+            <div class="pane-section">
+              <div class="pattern-section-head">
+                <h4>📜 ประวัติการตรวจพบรูปแบบย้อนหลัง</h4>
+                <span id="patternStatsSummary" class="pattern-stats-pill">—</span>
+              </div>
+              <div id="recentPatternsList" class="patterns-history-list"></div>
             </div>
           </div>
         </div>

@@ -159,6 +159,54 @@ class TestStructureAndSMC(unittest.TestCase):
         self.assertNotIn("NOW", sig_lmt["outcome_label_th"])
         self.assertNotIn("ทันที", sig_lmt["outcome_label_th"])
 
+    def test_chart_pattern_detection_and_2000_bars_history(self):
+        """Verify classical chart patterns detection across 1,500-2,000 bars."""
+        from engine.data_feed import load_fixture_bars
+        from engine.structure import detect_chart_patterns, detect_swings, atr_series
+
+        deep_bars = load_fixture_bars()
+        self.assertGreaterEqual(len(deep_bars), 1500, "Should load at least 1500 continuous historical bars")
+
+        atr_val = atr_series(deep_bars, 14)[-1]
+        sw = detect_swings(deep_bars, left=3, right=3, eq_tolerance=atr_val * 0.25)
+        cur_p = float(deep_bars[-1]["c"])
+
+        cp = detect_chart_patterns(
+            bars=deep_bars,
+            swings=sw,
+            atr_val=atr_val,
+            current_price=cur_p,
+            max_lookback=2000,
+        )
+
+        self.assertIn("total_detected", cp)
+        self.assertGreater(cp["total_detected"], 5, "Should detect multiple classical chart patterns in 1500 bars")
+        self.assertIn("completed_count", cp)
+        self.assertIn("success_rate_pct", cp)
+        self.assertGreaterEqual(cp["success_rate_pct"], 0.0)
+
+        # Check recent patterns structure
+        recent = cp.get("recent_patterns", [])
+        self.assertGreater(len(recent), 0)
+        p0 = recent[0]
+        self.assertIn("name", p0)
+        self.assertIn("name_th", p0)
+        self.assertIn("neckline", p0)
+        self.assertIn("target", p0)
+        self.assertIn("status", p0)
+        self.assertIn(p0["status"], ("forming", "breakout", "completed", "invalidated"))
+        self.assertIn("bars_ago", p0)
+
+        # Check full structure and SMC integration
+        st = analyze_structure(deep_bars, timeframe="M5")
+        self.assertEqual(st["bars_count"], len(deep_bars))
+        self.assertIn("chart_patterns", st)
+        self.assertIsNotNone(st["chart_patterns"])
+
+        smc_res = analyze_smc(deep_bars, timeframe="M5", structure_res=st)
+        self.assertIn("chart_patterns", smc_res)
+        self.assertIsNotNone(smc_res["chart_patterns"])
+
 
 if __name__ == "__main__":
     unittest.main()

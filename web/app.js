@@ -601,6 +601,29 @@
     }
 
     // Compact Single-Row Floating Chart HUD
+    const barCount = (state.bars && state.bars.length) || st.bars_count || 1500;
+    if (el("barsCountBadge")) {
+      el("barsCountBadge").textContent = `📊 ${Number(barCount).toLocaleString()} แท่ง`;
+    }
+
+    const cp = state.chart_patterns || st.chart_patterns || {};
+    const activePat = cp.active_pattern || st.active_chart_pattern;
+    if (el("chartPatternBadge")) {
+      if (activePat) {
+        el("chartPatternBadge").textContent = `📐 ${activePat.name_th || activePat.name}: ${activePat.status_th || activePat.status}`;
+        el("chartPatternBadge").className =
+          "hud-tag " +
+          (activePat.bias === "BULLISH"
+            ? "hud-tag-bull"
+            : activePat.bias === "BEARISH"
+            ? "hud-tag-bear"
+            : "");
+      } else {
+        el("chartPatternBadge").textContent = `📐 Pattern: ปกติ`;
+        el("chartPatternBadge").className = "hud-tag";
+      }
+    }
+
     el("atrBadge").textContent = `ATR: $${Number(st.atr14 || 0).toFixed(2)}`;
     el("hudEma20").textContent = `20: ${trend.ema20 || "-"}`;
     el("hudEma50").textContent = `50: ${trend.ema50 || "-"}`;
@@ -688,6 +711,23 @@
     // Bottom Dock Tab 2: Top SMC Zones + Key MTF/Institutional/Macro Structure
     if (el("structureOverviewList")) {
       const structCards = [];
+
+      // Active Chart Pattern Card (Deep Pattern Recognition)
+      if (activePat) {
+        const isBull = activePat.bias === "BULLISH";
+        structCards.push(`
+          <div class="mini-zone-card ${isBull ? "bull" : "bear"}">
+            <div class="mini-zone-top">
+              <strong>📐 ${activePat.name_th || activePat.name}</strong>
+              <span class="mini-zone-price">เป้า $${Number(activePat.target).toFixed(2)}</span>
+            </div>
+            <div class="mini-zone-sub">
+              <span class="badge-hist-touches">${activePat.status_th || activePat.status}</span>
+              <span>Neckline $${Number(activePat.neckline).toFixed(2)} • ${activePat.description_th || ""}</span>
+            </div>
+          </div>
+        `);
+      }
 
       // 4-TF + Institutional summary card
       const tfs = mtf.timeframes || {};
@@ -1063,9 +1103,132 @@
       el("cfgAutoMultiOrder").checked = multiCfg.auto_mode_enabled !== false;
     }
 
+    renderChartPatterns(state);
+
     if (state.is_new_signal_alert) {
       playAlertBeep(tk.verdict);
       showToast(`🔔 แจ้งเตือนสัญญาณ ${tk.side} XAUUSD (${tk.verdict})`);
+    }
+  }
+
+  function renderChartPatterns(state) {
+    const st = state.structure || {};
+    const cp = state.chart_patterns || st.chart_patterns || {};
+    const activePat = cp.active_pattern || st.active_chart_pattern;
+    const recentPatterns = cp.recent_patterns || st.recent_chart_patterns || [];
+    const totalDetected = cp.total_detected || recentPatterns.length || 0;
+    const completedCount = cp.completed_count || 0;
+    const winRate = cp.success_rate_pct !== undefined ? cp.success_rate_pct : 0;
+    const barsCount = (state.bars && state.bars.length) || st.bars_count || 1500;
+
+    // Header badge
+    if (el("patternsHeaderBadge")) {
+      el("patternsHeaderBadge").textContent = `${Number(barsCount).toLocaleString()} แท่ง`;
+    }
+
+    // Stats summary pill
+    if (el("patternStatsSummary")) {
+      if (totalDetected > 0) {
+        el("patternStatsSummary").textContent = `สำเร็จ ${completedCount}/${totalDetected} (${winRate}% Win Rate)`;
+      } else {
+        el("patternStatsSummary").textContent = `สแกน ${barsCount} แท่ง`;
+      }
+    }
+
+    // Active Pattern Highlight Card
+    const activeCardEl = el("patternActiveCard");
+    if (activeCardEl) {
+      if (activePat) {
+        const isBull = activePat.bias === "BULLISH";
+        const statusClass =
+          activePat.status === "completed"
+            ? "status-completed"
+            : activePat.status === "breakout"
+            ? "status-breakout"
+            : "status-forming";
+        const statusBadgeIcon =
+          activePat.status === "completed"
+            ? "🏆"
+            : activePat.status === "breakout"
+            ? "⚡"
+            : "⏳";
+
+        activeCardEl.className = `pattern-active-card ${isBull ? "bull" : "bear"}`;
+        activeCardEl.innerHTML = `
+          <div class="pat-head">
+            <div class="pat-title-grp">
+              <span class="pat-icon">${isBull ? "📈" : "📉"}</span>
+              <strong>${activePat.name_th || activePat.name}</strong>
+            </div>
+            <span class="pat-status-badge ${statusClass}">
+              ${statusBadgeIcon} ${activePat.status_th || activePat.status}
+            </span>
+          </div>
+          <div class="pat-metrics-grid">
+            <div class="pat-metric">
+              <span class="pat-metric-label">NECKLINE</span>
+              <strong class="pat-metric-val">$${Number(activePat.neckline || 0).toFixed(2)}</strong>
+            </div>
+            <div class="pat-metric">
+              <span class="pat-metric-label">เป้าหมาย (TARGET)</span>
+              <strong class="pat-metric-val highlight">$${Number(activePat.target || 0).toFixed(2)}</strong>
+            </div>
+            <div class="pat-metric">
+              <span class="pat-metric-label">ระยะทำกำไร</span>
+              <strong class="pat-metric-val">${activePat.height_usd ? `+$${Number(activePat.height_usd).toFixed(2)}` : "-"}</strong>
+            </div>
+          </div>
+          <p class="pat-desc">${activePat.description_th || activePat.description || "-"}</p>
+        `;
+      } else {
+        activeCardEl.className = "pattern-active-card neutral";
+        activeCardEl.innerHTML = `
+          <div class="pattern-active-empty">
+            <span>🔍 ไม่พบ Chart Pattern ขนาดใหญ่ที่กำลังฟอร์มตัวใน 40 แท่งล่าสุด</span>
+            <small>ระบบติดตามแนวรับต้านและโครงสร้าง SMC เป็นหลัก</small>
+          </div>
+        `;
+      }
+    }
+
+    // Recent Historical Patterns List
+    const listEl = el("recentPatternsList");
+    if (listEl) {
+      if (recentPatterns.length > 0) {
+        listEl.innerHTML = recentPatterns
+          .map((p) => {
+            const isBull = p.bias === "BULLISH";
+            const outcomeBadge =
+              p.status === "completed"
+                ? `<span class="pat-pill-done">✓ สำเร็จ</span>`
+                : p.status === "breakout"
+                ? `<span class="pat-pill-breakout">⚡ เบรคเอาท์</span>`
+                : p.status === "invalidated"
+                ? `<span class="pat-pill-cancel">✕ ยกเลิก</span>`
+                : `<span class="pat-pill-forming">⏳ กำลังฟอร์ม</span>`;
+
+            return `
+            <div class="pat-item ${isBull ? "bull" : "bear"}">
+              <div class="pat-item-left">
+                <span class="pat-item-icon">${isBull ? "🟢" : "🔴"}</span>
+                <div>
+                  <strong>${p.name_th || p.name}</strong>
+                  <div class="pat-item-sub">
+                    Neckline $${Number(p.neckline).toFixed(2)} • เป้า $${Number(p.target).toFixed(2)}
+                  </div>
+                </div>
+              </div>
+              <div class="pat-item-right">
+                ${outcomeBadge}
+                <span class="pat-time-ago">${p.bars_ago !== undefined ? `${p.bars_ago} แท่งก่อน` : ""}</span>
+              </div>
+            </div>
+          `;
+          })
+          .join("");
+      } else {
+        listEl.innerHTML = `<div class="empty-hint">ยังไม่พบประวัติ Pattern ในแท่งเทียนชุดนี้</div>`;
+      }
     }
   }
 

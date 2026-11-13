@@ -340,6 +340,7 @@ class TradingAssistantCore:
             "order_history": self.order_manager.order_history[-10:],
             "bars": chart_bars,
             "structure": structure,
+            "chart_patterns": structure.get("chart_patterns"),
             "market_flow": market_flow,
             "mtf": mtf,
             "macro": macro,

@@ -661,6 +661,15 @@ def build_trade_setup(
         confluence_score = min(100, confluence_score + 8)
         confluence_factors.append(f"แนวรับต้านเดิมย้อนหลัง ({best_hist['touches_count']}x @ {best_hist['mid']:.2f})")
 
+    # Chart Pattern Confluence (Double Top/Bottom, H&S, Triangles, Flags)
+    chart_patterns = structure_res.get("chart_patterns") or {}
+    active_pat = chart_patterns.get("active_pattern")
+    if active_pat and active_pat.get("bias") == bias:
+        confluence_score = min(100, confluence_score + 9)
+        pat_name = active_pat.get("name_th") or active_pat.get("name")
+        pat_status = active_pat.get("status_th") or active_pat.get("status")
+        confluence_factors.append(f"Chart Pattern: {pat_name} ({pat_status})")
+
     # Stop Loss placement: beyond distal edge of zone + ATR buffer + Broker Spread
     sl_buffer = max(atr_val * (0.32 if is_scalp else 0.45), spread_usd * 2.0)
     min_sl_atr = 0.72 if is_scalp else 0.90
@@ -806,6 +815,7 @@ def analyze_smc(
         "fvgs": fvgs,
         "liquidity_pools": pools,
         "trade_setup": setup,
+        "chart_patterns": st.get("chart_patterns"),
     }
 
 

@@ -414,6 +414,527 @@ def detect_historical_sr_levels(
     }
 
 
+def detect_chart_patterns(
+    bars: List[Dict[str, Any]],
+    swings: Dict[str, List[Dict[str, Any]]],
+    atr_val: float,
+    current_price: float,
+    max_lookback: int = 2000,
+) -> Dict[str, Any]:
+    """Scan and recognize classical chart patterns across deep historical bars (1,000 - 2,000 bars).
+
+    Patterns detected:
+      1. Double Bottom (W-Pattern) - Bullish Reversal
+      2. Double Top (M-Pattern) - Bearish Reversal
+      3. Head & Shoulders - Bearish Reversal
+      4. Inverse Head & Shoulders - Bullish Reversal
+      5. Ascending Triangle - Bullish Continuation
+      6. Descending Triangle - Bearish Continuation
+      7. Bull Flag - Bullish Continuation
+      8. Bear Flag - Bearish Continuation
+
+    Returns:
+      - active_pattern: the most recent and currently active/forming pattern
+      - recent_patterns: list of detected patterns across history with validation status
+      - total_detected: total pattern count
+      - completed_count: count of patterns that hit their projected target
+      - success_rate_pct: historical accuracy of the pattern signals
+      - pattern_bias: BULLISH | BEARISH | NEUTRAL
+      - confluence_score: 0-25 score boost
+      - summary_th: concise explanation in Thai
+    """
+    if not bars or len(bars) < 20:
+        return {
+            "active_pattern": None,
+            "recent_patterns": [],
+            "total_detected": 0,
+            "completed_count": 0,
+            "success_rate_pct": 0.0,
+            "pattern_bias": "NEUTRAL",
+            "confluence_score": 0,
+            "summary_th": "ข้อมูลแท่งเทียนไม่เพียงพอสำหรับการตรวจจับ Chart Pattern",
+            "historical_patterns": [],
+        }
+
+    n_bars = len(bars)
+    start_bar_idx = max(0, n_bars - max_lookback)
+
+    # Filter swings within lookback
+    all_highs = [h for h in swings.get("highs", []) if h["index"] >= start_bar_idx]
+    all_lows = [l for l in swings.get("lows", []) if l["index"] >= start_bar_idx]
+
+    detected: List[Dict[str, Any]] = []
+
+    # 1. Double Bottoms (W-Pattern)
+    for i in range(len(all_lows) - 1):
+        l1, l2 = all_lows[i], all_lows[i + 1]
+        dist_bars = l2["index"] - l1["index"]
+        if 5 <= dist_bars <= 90:
+            if abs(l1["price"] - l2["price"]) <= max(1.2, atr_val * 0.40):
+                interv_h = [h for h in all_highs if l1["index"] < h["index"] < l2["index"]]
+                if interv_h:
+                    neckline = max(h["price"] for h in interv_h)
+                    height = neckline - min(l1["price"], l2["price"])
+                    if height >= max(2.5, atr_val * 1.2):
+                        target = round(neckline + height, 2)
+                        end_idx = l2["index"]
+                        broken = False
+                        completed = False
+                        invalidated = False
+                        base_floor = min(l1["price"], l2["price"]) - atr_val * 0.5
+                        for b in bars[end_idx:]:
+                            if float(b["c"]) > neckline:
+                                broken = True
+                            if float(b["h"]) >= target:
+                                completed = True
+                                break
+                            if float(b["l"]) < base_floor and not broken:
+                                invalidated = True
+                                break
+                        status = (
+                            "completed"
+                            if completed
+                            else ("invalidated" if invalidated else ("breakout" if broken else "forming"))
+                        )
+                        status_th = {
+                            "completed": "บรรลุเป้าหมายแล้ว",
+                            "breakout": "เบรคเอาท์แล้ว (Breakout)",
+                            "forming": "กำลังฟอร์มตัว (Forming)",
+                            "invalidated": "หลุดแนวรับยกเลิก",
+                        }[status]
+                        detected.append(
+                            {
+                                "id": f"w_bottom_{l1['index']}_{l2['index']}",
+                                "name": "Double Bottom",
+                                "name_th": "ดับเบิลบอททอม (W-Pattern)",
+                                "bias": "BULLISH",
+                                "type": "bullish_reversal",
+                                "neckline": r2(neckline),
+                                "base_level": r2(min(l1["price"], l2["price"])),
+                                "target": target,
+                                "height_usd": r2(height),
+                                "status": status,
+                                "status_th": status_th,
+                                "bars_ago": n_bars - 1 - end_idx,
+                                "end_index": end_idx,
+                                "time": int(bars[end_idx]["t"]),
+                                "confluence_score": 85 if status in ("breakout", "forming") else 60,
+                                "description_th": f"รูปแบบ W-Pattern แตะแนวรับคู่ ${min(l1['price'], l2['price']):.2f} Neckline ${neckline:.2f} เป้าหมาย ${target:.2f}",
+                            }
+                        )
+
+    # 2. Double Tops (M-Pattern)
+    for i in range(len(all_highs) - 1):
+        h1, h2 = all_highs[i], all_highs[i + 1]
+        dist_bars = h2["index"] - h1["index"]
+        if 5 <= dist_bars <= 90:
+            if abs(h1["price"] - h2["price"]) <= max(1.2, atr_val * 0.40):
+                interv_l = [l for l in all_lows if h1["index"] < l["index"] < h2["index"]]
+                if interv_l:
+                    neckline = min(l["price"] for l in interv_l)
+                    height = max(h1["price"], h2["price"]) - neckline
+                    if height >= max(2.5, atr_val * 1.2):
+                        target = round(neckline - height, 2)
+                        end_idx = h2["index"]
+                        broken = False
+                        completed = False
+                        invalidated = False
+                        ceil_top = max(h1["price"], h2["price"]) + atr_val * 0.5
+                        for b in bars[end_idx:]:
+                            if float(b["c"]) < neckline:
+                                broken = True
+                            if float(b["l"]) <= target:
+                                completed = True
+                                break
+                            if float(b["h"]) > ceil_top and not broken:
+                                invalidated = True
+                                break
+                        status = (
+                            "completed"
+                            if completed
+                            else ("invalidated" if invalidated else ("breakout" if broken else "forming"))
+                        )
+                        status_th = {
+                            "completed": "บรรลุเป้าหมายแล้ว",
+                            "breakout": "เบรคเอาท์แล้ว (Breakout)",
+                            "forming": "กำลังฟอร์มตัว (Forming)",
+                            "invalidated": "ทะลุต้านยกเลิก",
+                        }[status]
+                        detected.append(
+                            {
+                                "id": f"m_top_{h1['index']}_{h2['index']}",
+                                "name": "Double Top",
+                                "name_th": "ดับเบิลท็อป (M-Pattern)",
+                                "bias": "BEARISH",
+                                "type": "bearish_reversal",
+                                "neckline": r2(neckline),
+                                "base_level": r2(max(h1["price"], h2["price"])),
+                                "target": target,
+                                "height_usd": r2(height),
+                                "status": status,
+                                "status_th": status_th,
+                                "bars_ago": n_bars - 1 - end_idx,
+                                "end_index": end_idx,
+                                "time": int(bars[end_idx]["t"]),
+                                "confluence_score": 85 if status in ("breakout", "forming") else 60,
+                                "description_th": f"รูปแบบ M-Pattern ชนแนวต้านคู่ ${max(h1['price'], h2['price']):.2f} Neckline ${neckline:.2f} เป้าหมาย ${target:.2f}",
+                            }
+                        )
+
+    # 3. Head & Shoulders
+    for i in range(len(all_highs) - 2):
+        h1, h2, h3 = all_highs[i], all_highs[i + 1], all_highs[i + 2]
+        if h2["price"] > h1["price"] + atr_val * 0.4 and h2["price"] > h3["price"] + atr_val * 0.4:
+            if abs(h1["price"] - h3["price"]) <= atr_val * 1.6:
+                v1 = [l for l in all_lows if h1["index"] < l["index"] < h2["index"]]
+                v2 = [l for l in all_lows if h2["index"] < l["index"] < h3["index"]]
+                if v1 and v2:
+                    neckline = (min(l["price"] for l in v1) + min(l["price"] for l in v2)) / 2.0
+                    height = h2["price"] - neckline
+                    if height >= atr_val * 1.5:
+                        target = round(neckline - height, 2)
+                        end_idx = h3["index"]
+                        broken = False
+                        completed = False
+                        invalidated = False
+                        for b in bars[end_idx:]:
+                            if float(b["c"]) < neckline:
+                                broken = True
+                            if float(b["l"]) <= target:
+                                completed = True
+                                break
+                            if float(b["h"]) > h2["price"]:
+                                invalidated = True
+                                break
+                        status = (
+                            "completed"
+                            if completed
+                            else ("invalidated" if invalidated else ("breakout" if broken else "forming"))
+                        )
+                        status_th = {
+                            "completed": "บรรลุเป้าหมายแล้ว",
+                            "breakout": "เบรคเอาท์แล้ว (Breakout)",
+                            "forming": "กำลังฟอร์มตัว (Forming)",
+                            "invalidated": "ทะลุหัวยกเลิก",
+                        }[status]
+                        detected.append(
+                            {
+                                "id": f"hs_{h1['index']}_{h3['index']}",
+                                "name": "Head & Shoulders",
+                                "name_th": "เฮดแอนด์โชลเดอร์ส (H&S)",
+                                "bias": "BEARISH",
+                                "type": "bearish_reversal",
+                                "neckline": r2(neckline),
+                                "base_level": r2(h2["price"]),
+                                "target": target,
+                                "height_usd": r2(height),
+                                "status": status,
+                                "status_th": status_th,
+                                "bars_ago": n_bars - 1 - end_idx,
+                                "end_index": end_idx,
+                                "time": int(bars[end_idx]["t"]),
+                                "confluence_score": 90 if status in ("breakout", "forming") else 65,
+                                "description_th": f"รูปแบบ Head & Shoulders หัวที่ ${h2['price']:.2f} Neckline ${neckline:.2f} เป้าหมาย ${target:.2f}",
+                            }
+                        )
+
+    # 4. Inverse Head & Shoulders
+    for i in range(len(all_lows) - 2):
+        l1, l2, l3 = all_lows[i], all_lows[i + 1], all_lows[i + 2]
+        if l2["price"] < l1["price"] - atr_val * 0.4 and l2["price"] < l3["price"] - atr_val * 0.4:
+            if abs(l1["price"] - l3["price"]) <= atr_val * 1.6:
+                p1 = [h for h in all_highs if l1["index"] < h["index"] < l2["index"]]
+                p2 = [h for h in all_highs if l2["index"] < h["index"] < l3["index"]]
+                if p1 and p2:
+                    neckline = (max(h["price"] for h in p1) + max(h["price"] for h in p2)) / 2.0
+                    height = neckline - l2["price"]
+                    if height >= atr_val * 1.5:
+                        target = round(neckline + height, 2)
+                        end_idx = l3["index"]
+                        broken = False
+                        completed = False
+                        invalidated = False
+                        for b in bars[end_idx:]:
+                            if float(b["c"]) > neckline:
+                                broken = True
+                            if float(b["h"]) >= target:
+                                completed = True
+                                break
+                            if float(b["l"]) < l2["price"]:
+                                invalidated = True
+                                break
+                        status = (
+                            "completed"
+                            if completed
+                            else ("invalidated" if invalidated else ("breakout" if broken else "forming"))
+                        )
+                        status_th = {
+                            "completed": "บรรลุเป้าหมายแล้ว",
+                            "breakout": "เบรคเอาท์แล้ว (Breakout)",
+                            "forming": "กำลังฟอร์มตัว (Forming)",
+                            "invalidated": "หลุดหัวล่างยกเลิก",
+                        }[status]
+                        detected.append(
+                            {
+                                "id": f"inv_hs_{l1['index']}_{l3['index']}",
+                                "name": "Inverse Head & Shoulders",
+                                "name_th": "กลับหัว (Inverse H&S)",
+                                "bias": "BULLISH",
+                                "type": "bullish_reversal",
+                                "neckline": r2(neckline),
+                                "base_level": r2(l2["price"]),
+                                "target": target,
+                                "height_usd": r2(height),
+                                "status": status,
+                                "status_th": status_th,
+                                "bars_ago": n_bars - 1 - end_idx,
+                                "end_index": end_idx,
+                                "time": int(bars[end_idx]["t"]),
+                                "confluence_score": 90 if status in ("breakout", "forming") else 65,
+                                "description_th": f"รูปแบบ Inverse H&S หัวล่าง ${l2['price']:.2f} Neckline ${neckline:.2f} เป้าหมาย ${target:.2f}",
+                            }
+                        )
+
+    # 5. Ascending Triangle & Descending Triangle
+    for i in range(len(all_highs) - 1):
+        h1, h2 = all_highs[i], all_highs[i + 1]
+        dist_bars = h2["index"] - h1["index"]
+        if 8 <= dist_bars <= 70 and abs(h1["price"] - h2["price"]) <= max(1.0, atr_val * 0.35):
+            in_lows = [l for l in all_lows if h1["index"] <= l["index"] <= h2["index"] + 5]
+            if len(in_lows) >= 2 and in_lows[-1]["price"] > in_lows[0]["price"] + atr_val * 0.35:
+                neckline = (h1["price"] + h2["price"]) / 2.0
+                base = in_lows[0]["price"]
+                height = neckline - base
+                if height >= atr_val * 1.2:
+                    target = round(neckline + height, 2)
+                    end_idx = h2["index"]
+                    broken = False
+                    completed = False
+                    for b in bars[end_idx:]:
+                        if float(b["c"]) > neckline:
+                            broken = True
+                        if float(b["h"]) >= target:
+                            completed = True
+                            break
+                    status = "completed" if completed else ("breakout" if broken else "forming")
+                    detected.append(
+                        {
+                            "id": f"asc_tri_{h1['index']}_{h2['index']}",
+                            "name": "Ascending Triangle",
+                            "name_th": "สามเหลี่ยมยกตัว (Ascending Triangle)",
+                            "bias": "BULLISH",
+                            "type": "bullish_continuation",
+                            "neckline": r2(neckline),
+                            "base_level": r2(base),
+                            "target": target,
+                            "height_usd": r2(height),
+                            "status": status,
+                            "status_th": "บรรลุเป้าหมายแล้ว"
+                            if status == "completed"
+                            else ("เบรคเอาท์แล้ว" if status == "breakout" else "กำลังฟอร์มตัว"),
+                            "bars_ago": n_bars - 1 - end_idx,
+                            "end_index": end_idx,
+                            "time": int(bars[end_idx]["t"]),
+                            "confluence_score": 80 if status in ("breakout", "forming") else 60,
+                            "description_th": f"สามเหลี่ยมยกตัว ชนต้าน ${neckline:.2f} ยก Low สูงขึ้น เป้าหมาย ${target:.2f}",
+                        }
+                    )
+
+    for i in range(len(all_lows) - 1):
+        l1, l2 = all_lows[i], all_lows[i + 1]
+        dist_bars = l2["index"] - l1["index"]
+        if 8 <= dist_bars <= 70 and abs(l1["price"] - l2["price"]) <= max(1.0, atr_val * 0.35):
+            in_highs = [h for h in all_highs if l1["index"] <= h["index"] <= l2["index"] + 5]
+            if len(in_highs) >= 2 and in_highs[-1]["price"] < in_highs[0]["price"] - atr_val * 0.35:
+                neckline = (l1["price"] + l2["price"]) / 2.0
+                base = in_highs[0]["price"]
+                height = base - neckline
+                if height >= atr_val * 1.2:
+                    target = round(neckline - height, 2)
+                    end_idx = l2["index"]
+                    broken = False
+                    completed = False
+                    for b in bars[end_idx:]:
+                        if float(b["c"]) < neckline:
+                            broken = True
+                        if float(b["l"]) <= target:
+                            completed = True
+                            break
+                    status = "completed" if completed else ("breakout" if broken else "forming")
+                    detected.append(
+                        {
+                            "id": f"desc_tri_{l1['index']}_{l2['index']}",
+                            "name": "Descending Triangle",
+                            "name_th": "สามเหลี่ยมกดตัว (Descending Triangle)",
+                            "bias": "BEARISH",
+                            "type": "bearish_continuation",
+                            "neckline": r2(neckline),
+                            "base_level": r2(base),
+                            "target": target,
+                            "height_usd": r2(height),
+                            "status": status,
+                            "status_th": "บรรลุเป้าหมายแล้ว"
+                            if status == "completed"
+                            else ("เบรคเอาท์แล้ว" if status == "breakout" else "กำลังฟอร์มตัว"),
+                            "bars_ago": n_bars - 1 - end_idx,
+                            "end_index": end_idx,
+                            "time": int(bars[end_idx]["t"]),
+                            "confluence_score": 80 if status in ("breakout", "forming") else 60,
+                            "description_th": f"สามเหลี่ยมกดตัว แนวรับแบน ${neckline:.2f} กด High ต่ำลง เป้าหมาย ${target:.2f}",
+                        }
+                    )
+
+    # 6. Bull & Bear Flags (Scanned on recent 400 bars)
+    flag_scan_start = max(0, n_bars - 400)
+    for i in range(flag_scan_start, n_bars - 12, 4):
+        for pole_len in (7, 10, 14):
+            p_start = i - pole_len
+            if p_start < 0:
+                continue
+            p_start_c = float(bars[p_start]["c"])
+            p_end_c = float(bars[i]["c"])
+            pole_height = p_end_c - p_start_c
+            # Bull Flag
+            if pole_height >= atr_val * 2.8:
+                f_end = min(n_bars - 1, i + 12)
+                if f_end - i >= 5:
+                    f_bars = bars[i:f_end]
+                    f_high = max(float(b["h"]) for b in f_bars)
+                    f_low = min(float(b["l"]) for b in f_bars)
+                    retrace = p_end_c - f_low
+                    if 0 <= retrace <= pole_height * 0.52:
+                        target = round(f_high + pole_height, 2)
+                        completed = any(float(b["h"]) >= target for b in bars[f_end:])
+                        broken = float(bars[-1]["c"]) > f_high
+                        status = "completed" if completed else ("breakout" if broken else "forming")
+                        detected.append(
+                            {
+                                "id": f"bull_flag_{i}",
+                                "name": "Bull Flag",
+                                "name_th": "ธงกระทิง (Bull Flag)",
+                                "bias": "BULLISH",
+                                "type": "bullish_continuation",
+                                "neckline": r2(f_high),
+                                "base_level": r2(p_end_c),
+                                "target": target,
+                                "height_usd": r2(pole_height),
+                                "status": status,
+                                "status_th": "บรรลุเป้าหมายแล้ว"
+                                if status == "completed"
+                                else ("เบรคเอาท์แล้ว" if status == "breakout" else "กำลังฟอร์มตัว"),
+                                "bars_ago": n_bars - 1 - f_end,
+                                "end_index": f_end,
+                                "time": int(bars[f_end]["t"]),
+                                "confluence_score": 78 if status in ("breakout", "forming") else 55,
+                                "description_th": f"ธงกระทิง (Bull Flag) เสากระโดง ${pole_height:.2f} พักตัวสวย เป้า ${target:.2f}",
+                            }
+                        )
+                        break
+            # Bear Flag
+            elif pole_height <= -atr_val * 2.8:
+                drop_abs = abs(pole_height)
+                f_end = min(n_bars - 1, i + 12)
+                if f_end - i >= 5:
+                    f_bars = bars[i:f_end]
+                    f_high = max(float(b["h"]) for b in f_bars)
+                    f_low = min(float(b["l"]) for b in f_bars)
+                    bounce = f_high - p_end_c
+                    if 0 <= bounce <= drop_abs * 0.52:
+                        target = round(f_low - drop_abs, 2)
+                        completed = any(float(b["l"]) <= target for b in bars[f_end:])
+                        broken = float(bars[-1]["c"]) < f_low
+                        status = "completed" if completed else ("breakout" if broken else "forming")
+                        detected.append(
+                            {
+                                "id": f"bear_flag_{i}",
+                                "name": "Bear Flag",
+                                "name_th": "ธงหมี (Bear Flag)",
+                                "bias": "BEARISH",
+                                "type": "bearish_continuation",
+                                "neckline": r2(f_low),
+                                "base_level": r2(p_end_c),
+                                "target": target,
+                                "height_usd": r2(drop_abs),
+                                "status": status,
+                                "status_th": "บรรลุเป้าหมายแล้ว"
+                                if status == "completed"
+                                else ("เบรคเอาท์แล้ว" if status == "breakout" else "กำลังฟอร์มตัว"),
+                                "bars_ago": n_bars - 1 - f_end,
+                                "end_index": f_end,
+                                "time": int(bars[f_end]["t"]),
+                                "confluence_score": 78 if status in ("breakout", "forming") else 55,
+                                "description_th": f"ธงหมี (Bear Flag) เสากระโดงลง ${drop_abs:.2f} พักตัวสวย เป้า ${target:.2f}",
+                            }
+                        )
+                        break
+
+    # Deduplicate patterns: if same name and end_index within 15 bars, keep the one with larger height
+    deduped: List[Dict[str, Any]] = []
+    detected.sort(key=lambda p: (p["end_index"], -p["height_usd"]))
+    for p in detected:
+        is_dup = False
+        for dp in deduped:
+            if dp["name"] == p["name"] and abs(dp["end_index"] - p["end_index"]) <= 14:
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append(p)
+
+    # Sort deduped patterns by recency (bars_ago ascending = most recent first)
+    deduped.sort(key=lambda p: p["bars_ago"])
+
+    # Active pattern: prefer forming or breakout within last 80 bars, or the most recent pattern if bars_ago <= 40
+    active_cand = [
+        p for p in deduped if p["status"] in ("breakout", "forming") and p["bars_ago"] <= 80
+    ]
+    if not active_cand:
+        active_cand = [p for p in deduped if p["bars_ago"] <= 40]
+    active_pattern = active_cand[0] if active_cand else None
+
+    # Calculate statistics across historical bars
+    total_detected = len(deduped)
+    completed_count = sum(1 for p in deduped if p["status"] == "completed")
+    success_rate = (
+        round((completed_count / total_detected * 100.0), 1) if total_detected > 0 else 0.0
+    )
+
+    # Pattern bias
+    pattern_bias = (
+        active_pattern["bias"]
+        if active_pattern
+        else ("BULLISH" if deduped and deduped[0]["bias"] == "BULLISH" else "NEUTRAL")
+    )
+
+    # Confluence score
+    conf_score = active_pattern.get("confluence_score", 0) if active_pattern else 0
+
+    # Summary Thai
+    if active_pattern:
+        summary_th = (
+            f"ตรวจพบ {total_detected} รูปแบบในประวัติ {n_bars} แท่ง (สำเร็จ {completed_count} ครั้ง Win Rate {success_rate:.0f}%) | "
+            f"ล่าสุด: {active_pattern['name_th']} ({active_pattern['status_th']}) "
+            f"Neckline ${active_pattern['neckline']:.2f} เป้า ${active_pattern['target']:.2f}"
+        )
+    elif total_detected > 0:
+        summary_th = (
+            f"ตรวจพบ {total_detected} รูปแบบในประวัติ {n_bars} แท่ง (สำเร็จ {completed_count} ครั้ง Win Rate {success_rate:.0f}%)"
+        )
+    else:
+        summary_th = f"สแกนประวัติ {n_bars} แท่ง ไม่พบ Chart Pattern ชัดเจนในโซนปัจจุบัน"
+
+    return {
+        "active_pattern": active_pattern,
+        "recent_patterns": deduped[:8],
+        "total_detected": total_detected,
+        "completed_count": completed_count,
+        "success_rate_pct": success_rate,
+        "pattern_bias": pattern_bias,
+        "confluence_score": conf_score,
+        "summary_th": summary_th,
+        "historical_patterns": deduped[:25],
+    }
+
+
 def evaluate_trend_regime(
     current_price: float,
     ema20: Optional[float],
@@ -1326,6 +1847,13 @@ def analyze_structure(
         mtf_bars_by_tf=mtf_bars_by_tf,
         primary_tf=timeframe,
     )
+    chart_patterns = detect_chart_patterns(
+        bars=bars,
+        swings=swings,
+        atr_val=atr_val,
+        current_price=current_price,
+        max_lookback=2000,
+    )
     trend = evaluate_trend_regime(
         current_price=current_price,
         ema20=e20_list[-1],
@@ -1386,6 +1914,9 @@ def analyze_structure(
         "sr_zones": sr_zones,
         "historical_sr": hist_sr.get("all", []),
         "historical_sr_details": hist_sr,
+        "chart_patterns": chart_patterns,
+        "active_chart_pattern": chart_patterns.get("active_pattern"),
+        "recent_chart_patterns": chart_patterns.get("recent_patterns", []),
         "nearest_support": nearest_support,
         "nearest_resistance": nearest_resistance,
         "nearest_historical_support": hist_sr.get("nearest_support"),
