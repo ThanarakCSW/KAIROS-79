@@ -259,6 +259,7 @@ class EABridgeManager:
             "total_floating_pnl": acc.get("total_floating_pnl", 0.0),
             "pending_actions_count": len(self.action_queue),
             "recent_executions_count": len(self.execution_history),
+            "last_execution": self.execution_history[-1] if self.execution_history else None,
             "last_heartbeat_ago_sec": round(time.time() - self.last_heartbeat_ts, 1)
             if self.last_heartbeat_ts > 0
             else None,

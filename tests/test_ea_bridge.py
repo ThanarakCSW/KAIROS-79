@@ -431,13 +431,35 @@ class TestEABridge(unittest.TestCase):
         """Verify autonomous Limit order dispatch to EA and immediate CLOSE_ORDER on disadvantage."""
         core = TradingAssistantCore()
         core.ea_bridge.set_auto_trading(True)
+        core.ea_bridge.action_queue.clear()
+        core.ea_bridge.executed_signal_ids.clear()
+
+        # Register pending LIMIT setup needing autonomous dispatch
+        core.order_manager.register_trade_setup(
+            risk_ticket={
+                "side": "BUY",
+                "execution_type": "LIMIT",
+                "order_type": "BUY LIMIT (Pending)",
+                "entry_mt5": 2650.0,
+                "stop_mt5": 2640.0,
+                "tp1_mt5": 2660.0,
+                "target_mt5": 2670.0,
+                "lot_size": 0.10,
+                "win_prob_passed": True,
+                "verdict": "PASS",
+            },
+            smc_setup={"side": "BUY", "confluence_score": 85},
+            current_price=2655.0,
+            timeframe="M5",
+            force_replace=True,
+        )
 
         # 1. State computation enqueues an OPEN_ORDER action for MT5 EA
         state = core.compute_full_state(timeframe="M5")
         self.assertGreaterEqual(len(core.ea_bridge.action_queue), 1)
         action = core.ea_bridge.action_queue[0]
         self.assertEqual(action["type"], "OPEN_ORDER")
-        self.assertIn("order_type", action)
+        self.assertEqual(action["order_type"], "LIMIT")
 
         # 2. Simulate order filled on MT5 with broker ticket 998877
         if core.order_manager.has_active_order():
@@ -457,6 +479,146 @@ class TestEABridge(unittest.TestCase):
             self.assertGreaterEqual(len(core.ea_bridge.action_queue), 1)
             self.assertEqual(core.ea_bridge.action_queue[0]["type"], "CLOSE_ORDER")
             self.assertEqual(core.ea_bridge.action_queue[0]["ticket"], 998877)
+
+    def test_dispatch_test_order_market_and_limit(self):
+        """Verify dispatch_test_order generates BUY MARKET, BUY LIMIT, and SELL MARKET orders."""
+        from app import AssistantServer
+
+        srv = AssistantServer(host="127.0.0.1", port=8000)
+
+        # 1. Test BUY MARKET
+        res_buy_mkt = srv.dispatch_test_order(side="BUY", order_type="MARKET")
+        self.assertEqual(res_buy_mkt["status"], "ok")
+        act_buy = res_buy_mkt["action"]
+        self.assertEqual(act_buy["type"], "OPEN_ORDER")
+        self.assertEqual(act_buy["side"], "BUY")
+        self.assertEqual(act_buy["order_type"], "MARKET")
+        self.assertEqual(act_buy["lot"], 0.01)
+        self.assertGreater(act_buy["price"], 0.0)
+        self.assertLess(act_buy["sl"], act_buy["price"])
+        self.assertGreater(act_buy["tp"], act_buy["price"])
+
+        # 2. Test BUY LIMIT
+        cur_p = float(
+            (srv.core.hub.latest_spot or {}).get("price")
+            or (srv.core.hub.fixture_bars[-1]["c"] if srv.core.hub.fixture_bars else 2650.0)
+        )
+        res_buy_lmt = srv.dispatch_test_order(side="BUY", order_type="LIMIT")
+        self.assertEqual(res_buy_lmt["status"], "ok")
+        act_lmt = res_buy_lmt["action"]
+        self.assertEqual(act_lmt["side"], "BUY")
+        self.assertEqual(act_lmt["order_type"], "LIMIT")
+        self.assertEqual(act_lmt["lot"], 0.01)
+        # Entry price must be below market price so it sits pending
+        self.assertLess(act_lmt["price"], cur_p)
+        self.assertLess(act_lmt["sl"], act_lmt["price"])
+        self.assertGreater(act_lmt["tp"], act_lmt["price"])
+
+        # 3. Test SELL MARKET
+        res_sell_mkt = srv.dispatch_test_order(side="SELL", order_type="MARKET", lot=0.02)
+        self.assertEqual(res_sell_mkt["status"], "ok")
+        act_sell = res_sell_mkt["action"]
+        self.assertEqual(act_sell["side"], "SELL")
+        self.assertEqual(act_sell["order_type"], "MARKET")
+        self.assertEqual(act_sell["lot"], 0.02)
+        self.assertGreater(act_sell["sl"], act_sell["price"])
+        self.assertLess(act_sell["tp"], act_sell["price"])
+
+        # Clean up
+        if srv.core.order_manager.has_active_order():
+            srv.core.order_manager.close_active_order(reason="TEST_CLEANUP", current_price=2650.0)
+
+    def test_http_test_order_endpoint_roundtrip(self):
+        """Verify HTTP POST /api/ea/test_order enqueues action and /api/ea/poll retrieves it."""
+        from app import AssistantServer
+
+        srv = AssistantServer(host="127.0.0.1", port=8000)
+
+        class _MemWriter:
+            def __init__(self):
+                self.buffer = bytearray()
+            def write(self, data):
+                self.buffer.extend(data)
+            async def drain(self):
+                pass
+            def close(self):
+                pass
+
+        async def _run():
+            # 1. POST /api/ea/test_order
+            raw_body = json.dumps({"side": "BUY", "order_type": "MARKET", "lot": 0.01}).encode("utf-8")
+            req_bytes = (
+                f"POST /api/ea/test_order HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:8000\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(raw_body)}\r\n\r\n"
+            ).encode("utf-8") + raw_body
+
+            reader = asyncio.StreamReader()
+            reader.feed_data(req_bytes)
+            reader.feed_eof()
+            writer = _MemWriter()
+            await srv.handle_client(reader, writer)
+
+            resp = bytes(writer.buffer)
+            self.assertIn(b"200 OK", resp)
+            body = json.loads(resp.split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertEqual(body["status"], "ok")
+            self.assertEqual(body["action"]["type"], "OPEN_ORDER")
+            self.assertEqual(body["action"]["side"], "BUY")
+
+            # 2. GET /api/ea/poll to verify MT5 EA receives the action
+            poll_bytes = b"GET /api/ea/poll HTTP/1.1\r\nHost: 127.0.0.1:8000\r\n\r\n"
+            p_reader = asyncio.StreamReader()
+            p_reader.feed_data(poll_bytes)
+            p_reader.feed_eof()
+            p_writer = _MemWriter()
+            await srv.handle_client(p_reader, p_writer)
+
+            p_resp = bytes(p_writer.buffer)
+            self.assertIn(b"200 OK", p_resp)
+            p_body = json.loads(p_resp.split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertTrue(p_body["has_actions"])
+            actions = p_body["actions"]
+            self.assertGreaterEqual(len(actions), 1)
+            self.assertEqual(actions[-1]["side"], "BUY")
+
+            # 3. POST /api/ea/execution to report FILLED ticket
+            exec_body = json.dumps({
+                "action_id": actions[-1]["action_id"],
+                "status": "FILLED",
+                "ticket": 1234567,
+                "side": "BUY",
+                "lot": 0.01,
+                "fill_price": 2650.50,
+            }).encode("utf-8")
+            exec_req = (
+                f"POST /api/ea/execution HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:8000\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(exec_body)}\r\n\r\n"
+            ).encode("utf-8") + exec_body
+
+            e_reader = asyncio.StreamReader()
+            e_reader.feed_data(exec_req)
+            e_reader.feed_eof()
+            e_writer = _MemWriter()
+            await srv.handle_client(e_reader, e_writer)
+
+            e_resp = bytes(e_writer.buffer)
+            self.assertIn(b"200 OK", e_resp)
+
+            # Check status dictionary includes last_execution with ticket
+            st_dict = srv.core.ea_bridge.get_status_dict()
+            self.assertIsNotNone(st_dict["last_execution"])
+            self.assertEqual(st_dict["last_execution"]["ticket"], 1234567)
+            self.assertEqual(st_dict["last_execution"]["status"], "FILLED")
+
+            # Clean up
+            if srv.core.order_manager.has_active_order():
+                srv.core.order_manager.close_active_order(reason="TEST_CLEANUP", current_price=2650.0)
+
+        asyncio.run(_run())
 
 
 if __name__ == "__main__":

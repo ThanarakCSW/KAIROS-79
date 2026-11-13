@@ -926,12 +926,14 @@ class AssistantServer:
         # Discard so manual dispatch can re-queue even if already queued
         self.core.ea_bridge.executed_signal_ids.discard(sig_id)
 
+        exec_type = (act.get("execution_type") if act else None) or "MARKET"
+        sym = self.core.hub.preferred_symbol or "XAUUSD"
         action = self.core.ea_bridge.enqueue_action(
             action_type="OPEN_ORDER",
             payload={
                 "side": side,
-                "order_type": "MARKET",
-                "symbol": "XAUUSD",
+                "order_type": exec_type,
+                "symbol": sym,
                 "lot": float((act.get("lot_size") if act else None) or rt.get("lot_size") or 0.10),
                 "price": float((act.get("entry_mt5") if act else None) or cur_p),
                 "sl": float((act.get("stop_mt5") if act else None) or rt.get("stop_mt5") or 0.0),
@@ -944,6 +946,119 @@ class AssistantServer:
             signal_id=sig_id,
         )
         return {"status": "ok", "action": action, "active_order": act}
+
+    def dispatch_test_order(
+        self,
+        side: str = "BUY",
+        order_type: str = "MARKET",
+        lot: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Dispatch an instant test BUY/SELL (Market or Limit) order directly into MT5 EA queue."""
+        side = str(side or "BUY").upper()
+        if side not in ("BUY", "SELL"):
+            side = "BUY"
+        order_type = str(order_type or "MARKET").upper()
+        if order_type not in ("MARKET", "LIMIT"):
+            order_type = "MARKET"
+
+        cur_p = float(
+            (self.core.hub.latest_spot or {}).get("price")
+            or (self.core.hub.fixture_bars[-1]["c"] if self.core.hub.fixture_bars else 2650.0)
+        )
+
+        test_lot = float(lot) if lot and float(lot) > 0 else 0.01
+
+        # Calculate entry, SL, TP based on type
+        if order_type == "MARKET":
+            entry_p = round(cur_p, 2)
+            if side == "BUY":
+                sl_p = round(cur_p - 4.00, 2)
+                tp_p = round(cur_p + 8.00, 2)
+                tp1_p = round(cur_p + 4.00, 2)
+            else:
+                sl_p = round(cur_p + 4.00, 2)
+                tp_p = round(cur_p - 8.00, 2)
+                tp1_p = round(cur_p - 4.00, 2)
+        else:  # LIMIT
+            # For BUY LIMIT: place entry $2.50 below market so it sits as pending order waiting to be filled
+            # For SELL LIMIT: place entry $2.50 above market
+            if side == "BUY":
+                entry_p = round(cur_p - 2.50, 2)
+                sl_p = round(entry_p - 4.00, 2)
+                tp_p = round(entry_p + 8.00, 2)
+                tp1_p = round(entry_p + 4.00, 2)
+            else:
+                entry_p = round(cur_p + 2.50, 2)
+                sl_p = round(entry_p + 4.00, 2)
+                tp_p = round(entry_p - 8.00, 2)
+                tp1_p = round(entry_p - 4.00, 2)
+
+        exec_desc = f"{side} NOW (Market Test)" if order_type == "MARKET" else f"{side} LIMIT (Pending Test)"
+
+        # Register trade setup so Web UI tracks it and displays PnL
+        self.core.order_manager.register_trade_setup(
+            risk_ticket={
+                "side": side,
+                "entry_mt5": entry_p,
+                "stop_mt5": sl_p,
+                "tp1_mt5": tp1_p,
+                "target_mt5": tp_p,
+                "lot_size": test_lot,
+                "actual_risk_usd": round(test_lot * 100 * 4.0, 2),
+                "potential_profit_usd": round(test_lot * 100 * 8.0, 2),
+                "reward_risk": 2.0,
+                "order_type": exec_desc,
+                "execution_type": order_type,
+            },
+            trade_setup={
+                "side": side,
+                "setup_type": f"TEST_{order_type}",
+                "entry": entry_p,
+                "stop": sl_p,
+                "tp1": tp1_p,
+                "target": tp_p,
+                "lot_size": test_lot,
+                "confidence": "TEST_SIGNAL",
+            },
+            current_price=cur_p,
+            timeframe=self.core.timeframe,
+            trading_style=self.core.trading_style,
+            force_replace=True,
+        )
+        act = self.core.order_manager.active_order
+
+        # Generate unique signal_id for MT5 tracking
+        sig_id = f"test_{side.lower()}_{order_type.lower()}_{int(time.time() * 1000)}"
+        if act:
+            act["order_id"] = sig_id
+
+        # Discard previous executed record so manual dispatch always queues fresh
+        self.core.ea_bridge.executed_signal_ids.discard(sig_id)
+
+        sym = self.core.hub.preferred_symbol or "XAUUSD"
+        action = self.core.ea_bridge.enqueue_action(
+            action_type="OPEN_ORDER",
+            payload={
+                "side": side,
+                "order_type": order_type,
+                "symbol": sym,
+                "lot": test_lot,
+                "price": entry_p,
+                "sl": sl_p,
+                "tp": tp_p,
+                "tp1": tp1_p,
+                "magic": 797979,
+                "comment": f"K79-TEST-{side[:1]}{order_type[:1]}",
+                "manual": True,
+            },
+            signal_id=sig_id,
+        )
+        return {
+            "status": "ok",
+            "message": f"ส่งคำสั่งทดสอบ {side} ({order_type}) ขนาด {test_lot} Lot ไปยัง MT5 แล้ว",
+            "action": action,
+            "active_order": act,
+        }
 
     async def handle_ws_command(self, client: WebSocketClient, cmd: Dict[str, Any]) -> None:
         action = str(cmd.get("action") or "")
@@ -1026,6 +1141,13 @@ class AssistantServer:
             await self.broadcast(state)
         elif action == "send_order_to_mt5":
             self.dispatch_order_to_mt5()
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+        elif action == "dispatch_test_order":
+            side = str(cmd.get("side") or "BUY")
+            order_type = str(cmd.get("order_type") or "MARKET")
+            lot = float(cmd.get("lot")) if cmd.get("lot") else None
+            self.dispatch_test_order(side=side, order_type=order_type, lot=lot)
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
             await self.broadcast(state)
         elif action == "scan_new_setup":
@@ -1250,6 +1372,17 @@ class AssistantServer:
 
         if path == "/api/ea/send_order" and method == "POST":
             res = self.dispatch_order_to_mt5()
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+            await self.send_http_json(writer, 200, res)
+            return
+
+        if path == "/api/ea/test_order" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            side = str(payload.get("side") or "BUY")
+            order_type = str(payload.get("order_type") or "MARKET")
+            lot = float(payload.get("lot")) if payload.get("lot") else None
+            res = self.dispatch_test_order(side=side, order_type=order_type, lot=lot)
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
             await self.broadcast(state)
             await self.send_http_json(writer, 200, res)

@@ -188,6 +188,14 @@
             <button id="btnScanNewSetup" class="btn-order-action btn-scan" title="รีเซ็ตและสั่ง AI สแกนแผนใหม่">🔄 สแกนใหม่</button>
           </div>
 
+          <!-- MT5 Test Dispatch Controls -->
+          <div class="test-order-bar" id="testOrderBar">
+            <span class="test-bar-label">🧪 ทดสอบส่งคำสั่งเข้า MT5:</span>
+            <button id="btnTestBuyMarket" type="button" class="btn-order-action btn-test-buy" title="ยิงคำสั่งทดสอบ BUY ที่ราคาตลาดปัจจุบัน (Market 0.01 Lot) เข้า MT5 ทันที">⚡ ยิง BUY Market</button>
+            <button id="btnTestBuyLimit" type="button" class="btn-order-action btn-test-limit" title="ยิงคำสั่งทดสอบ BUY LIMIT ดักย่อ -$2.50 ต่ำกว่าราคาปัจจุบัน (Pending Limit 0.01 Lot) เข้า MT5 ทันที">⏳ ยิง BUY Limit</button>
+            <button id="btnTestSellMarket" type="button" class="btn-order-action btn-test-sell" title="ยิงคำสั่งทดสอบ SELL ที่ราคาตลาดปัจจุบัน (Market 0.01 Lot) เข้า MT5 ทันที">⚡ ยิง SELL Market</button>
+          </div>
+
           <!-- Multi-Order Active Positions List -->
           <div id="multiOrdersCard" class="multi-orders-wrap" style="display:none;">
             <div class="multi-orders-head">

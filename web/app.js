@@ -12,6 +12,7 @@
   let priceLines = [];
   let activeChartMode = "ai";
   let lastTvTf = null;
+  let lastReportedExecId = null;
   const BKK_OFFSET = 7 * 3600; // UTC+7 Bangkok timezone alignment with TradingView
 
   const el = (id) => document.getElementById(id);
@@ -429,7 +430,7 @@
       }
       if (pnlBadge) pnlBadge.style.display = "none";
       if (msg) msg.textContent = "กำลังติดตามโครงสร้างตลาด SMC เมื่อ Confluence และโอกาสถึง TP > 50% ระบบจะล็อคแผนเข้าทันที";
-      if (btnSendMT5) btnSendMT5.style.display = "none";
+      if (btnSendMT5) btnSendMT5.style.display = "inline-flex";
       if (btnFill) btnFill.style.display = "none";
       if (btnAdd) btnAdd.style.display = "none";
       if (btnBE) btnBE.style.display = "none";
@@ -613,6 +614,25 @@
         mt5Pill.className = "meta-pill pill-mt5-offline";
         mt5Text.textContent = "MT5: Offline";
         mt5Pill.title = "MetaTrader 5 EA ยังไม่ได้เชื่อมต่อ (เปิด MT5 บน Windows/VPS แล้วรัน KAIROS79_Bridge.mq5)";
+      }
+    }
+
+    // Check for execution reports from MT5 (e.g. FILLED, FAILED_ALGO_DISABLED, REJECTED)
+    const lastExec = ea.last_execution;
+    if (lastExec && lastExec.action_id && lastExec.action_id !== lastReportedExecId) {
+      lastReportedExecId = lastExec.action_id;
+      const st = String(lastExec.status || "").toUpperCase();
+      if (st === "FILLED" || st === "OPENED") {
+        playAlertBeep("PASS");
+        showToast(`🟢 MT5 ออกออเดอร์สำเร็จ! Ticket #${lastExec.ticket} (${lastExec.side} ${lastExec.lot} Lot @ ${Number(lastExec.fill_price || 0).toFixed(2)})`);
+      } else if (st === "FAILED_ALGO_DISABLED") {
+        showToast("❌ MT5 ปฏิเสธ: ปุ่ม Algo Trading บน MT5 ยังเป็นสีแดง! กรุณากดปุ่ม Algo Trading ให้เป็นสีเขียว");
+      } else if (st === "REJECTED_SPREAD") {
+        showToast("🛡️ MT5 ปฏิเสธ: Spread ของโบรกเกอร์สูงเกินกำหนด");
+      } else if (st === "CLOSED" || st === "CLOSED_ALL") {
+        showToast(`🏁 MT5 ปิดออเดอร์เรียบร้อยแล้ว (กำไร/ขาดทุน: $${Number(lastExec.profit || 0).toFixed(2)})`);
+      } else if (st.includes("FAILED")) {
+        showToast(`⚠️ MT5 แจ้งเตือนข้อผิดพลาด: ${lastExec.error_code || ""} ${lastExec.error_msg || ""}`);
       }
     }
 
@@ -993,7 +1013,7 @@
       }
       if (el("btnSendOrderToMT5")) {
         const hasTicket = activeOrd && activeOrd.broker_ticket;
-        el("btnSendOrderToMT5").style.display = (!hasTicket && activeOrd) ? "inline-flex" : "none";
+        el("btnSendOrderToMT5").style.display = hasTicket ? "none" : "inline-flex";
       }
       if (el("btnOrderFillNow")) el("btnOrderFillNow").style.display = "none";
       if (el("btnOrderCancel")) el("btnOrderCancel").style.display = "none";
@@ -1039,7 +1059,7 @@
       }
       if (el("btnSendOrderToMT5")) {
         const hasTicket = activeOrd && activeOrd.broker_ticket;
-        el("btnSendOrderToMT5").style.display = (!hasTicket && tk.verdict !== "REJECT") ? "inline-flex" : "none";
+        el("btnSendOrderToMT5").style.display = hasTicket ? "none" : "inline-flex";
       }
       if (el("btnOrderFillNow")) el("btnOrderFillNow").style.display = "inline-flex";
       if (el("btnOrderCancel")) el("btnOrderCancel").style.display = "inline-flex";
@@ -1560,6 +1580,55 @@
           console.warn("send_order HTTP fallback:", e);
         }
         showToast("🚀 ส่งคำสั่งซื้อขายไปยัง MetaTrader 5 เรียบร้อย!");
+      });
+    }
+
+    // Quick Test Dispatch Buttons (BUY Market, BUY Limit, SELL Market)
+    if (el("btnTestBuyMarket")) {
+      el("btnTestBuyMarket").addEventListener("click", async () => {
+        sendWs({ action: "dispatch_test_order", side: "BUY", order_type: "MARKET" });
+        try {
+          await fetch("/api/ea/test_order", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ side: "BUY", order_type: "MARKET" }),
+          });
+        } catch (e) {
+          console.warn("test_order HTTP fallback:", e);
+        }
+        showToast("⚡ ยิงคำสั่งทดสอบ BUY Market (0.01 Lot) เข้า MT5 แล้ว! รอ MT5 ดึงคำสั่ง...");
+      });
+    }
+
+    if (el("btnTestBuyLimit")) {
+      el("btnTestBuyLimit").addEventListener("click", async () => {
+        sendWs({ action: "dispatch_test_order", side: "BUY", order_type: "LIMIT" });
+        try {
+          await fetch("/api/ea/test_order", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ side: "BUY", order_type: "LIMIT" }),
+          });
+        } catch (e) {
+          console.warn("test_order HTTP fallback:", e);
+        }
+        showToast("⏳ ยิงคำสั่งทดสอบ BUY LIMIT (0.01 Lot ดักย่อ -$2.50) เข้า MT5 แล้ว! ตรวจสอบแถบ Orders ใน MT5");
+      });
+    }
+
+    if (el("btnTestSellMarket")) {
+      el("btnTestSellMarket").addEventListener("click", async () => {
+        sendWs({ action: "dispatch_test_order", side: "SELL", order_type: "MARKET" });
+        try {
+          await fetch("/api/ea/test_order", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ side: "SELL", order_type: "MARKET" }),
+          });
+        } catch (e) {
+          console.warn("test_order HTTP fallback:", e);
+        }
+        showToast("⚡ ยิงคำสั่งทดสอบ SELL Market (0.01 Lot) เข้า MT5 แล้ว! รอ MT5 ดึงคำสั่ง...");
       });
     }
 

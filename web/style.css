@@ -1130,6 +1130,62 @@ body {
   color: #e9d5ff;
 }
 
+/* MT5 Test Dispatch Controls */
+.test-order-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
+  padding: 5px 8px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px dashed rgba(99, 102, 241, 0.35);
+  border-radius: 6px;
+}
+
+.test-bar-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #a5b4fc;
+  margin-right: 2px;
+}
+
+.btn-order-action.btn-test-buy {
+  background: rgba(16, 185, 129, 0.18);
+  border-color: rgba(16, 185, 129, 0.6);
+  color: #34d399;
+  font-weight: 700;
+}
+.btn-order-action.btn-test-buy:hover {
+  background: rgba(16, 185, 129, 0.35);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);
+  border-color: #34d399;
+}
+
+.btn-order-action.btn-test-limit {
+  background: rgba(245, 184, 65, 0.18);
+  border-color: rgba(245, 184, 65, 0.6);
+  color: #fbbf24;
+  font-weight: 700;
+}
+.btn-order-action.btn-test-limit:hover {
+  background: rgba(245, 184, 65, 0.35);
+  box-shadow: 0 0 8px rgba(245, 184, 65, 0.3);
+  border-color: #fbbf24;
+}
+
+.btn-order-action.btn-test-sell {
+  background: rgba(244, 63, 94, 0.18);
+  border-color: rgba(244, 63, 94, 0.6);
+  color: #fb7185;
+  font-weight: 700;
+}
+.btn-order-action.btn-test-sell:hover {
+  background: rgba(244, 63, 94, 0.35);
+  box-shadow: 0 0 8px rgba(244, 63, 94, 0.3);
+  border-color: #fb7185;
+}
+
 /* Multi-Order Active Positions List */
 .multi-orders-wrap {
   margin-top: 8px;
