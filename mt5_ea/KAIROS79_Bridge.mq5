@@ -327,13 +327,13 @@ void ExecuteOpenOrder(const string action_json)
       {
          ok = m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment);
          fill_p = m_trade.ResultPrice();
-         slip_pts = (fill_p > 0 && tick.ask > 0 && pt > 0) ? (fill_p - tick.ask) / pt : 0.0;
+         slip_pts = (fill_p > 0.0 && tick.ask > 0.0 && pt > 0.0) ? (fill_p - tick.ask) / pt : 0.0;
       }
       else
       {
          ok = m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
          fill_p = m_trade.ResultPrice();
-         slip_pts = (fill_p > 0 && tick.bid > 0 && pt > 0) ? (tick.bid - fill_p) / pt : 0.0;
+         slip_pts = (fill_p > 0.0 && tick.bid > 0.0 && pt > 0.0) ? (tick.bid - fill_p) / pt : 0.0;
       }
    }
    // 2. Pending Limit Order Execution
@@ -528,8 +528,8 @@ void UpdateChartHUD()
    string conn_text = g_server_online ? "🟢 CONNECTED (Online)" : "🔴 DISCONNECTED (Check Server / URL)";
    string auto_text = g_auto_trading_enabled ? "🟢 AUTO-TRADING: ON" : "⏸️ AUTO-TRADING: OFF";
 
-   bool terminal_trade_allowed = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
-   bool ea_trade_allowed = (bool)MqlInfoInteger(MQL_TRADE_ALLOWED);
+   bool terminal_trade_allowed = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
+   bool ea_trade_allowed = (MQLInfoInteger(MQL_TRADE_ALLOWED) != 0);
    string trade_btn_status = (terminal_trade_allowed && ea_trade_allowed)
                               ? "✅ MT5 Algo Trading: ALLOWED"
                               : "⚠️ MT5 Algo Trading: DISABLED (Click Algo Trading button!)";
