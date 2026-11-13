@@ -38,6 +38,158 @@ except Exception:
     else:
         SSL_CTX = ssl.create_default_context()
 
+try:
+    import MetaTrader5 as _mt5
+    HAS_MT5_LIB = True
+except Exception:
+    _mt5 = None
+    HAS_MT5_LIB = False
+
+_MT5_TF_MAP = {
+    "M1": getattr(_mt5, "TIMEFRAME_M1", 1) if _mt5 else 1,
+    "M5": getattr(_mt5, "TIMEFRAME_M5", 5) if _mt5 else 5,
+    "M15": getattr(_mt5, "TIMEFRAME_M15", 15) if _mt5 else 15,
+    "M30": getattr(_mt5, "TIMEFRAME_M30", 30) if _mt5 else 30,
+    "H1": getattr(_mt5, "TIMEFRAME_H1", 16385) if _mt5 else 16385,
+    "H4": getattr(_mt5, "TIMEFRAME_H4", 16388) if _mt5 else 16388,
+    "D1": getattr(_mt5, "TIMEFRAME_D1", 16408) if _mt5 else 16408,
+}
+
+_mt5_initialized = False
+
+def init_mt5_client() -> bool:
+    global _mt5_initialized
+    if not HAS_MT5_LIB or _mt5 is None:
+        return False
+    if _mt5_initialized:
+        return True
+    try:
+        ok = _mt5.initialize()
+        _mt5_initialized = bool(ok)
+        return _mt5_initialized
+    except Exception:
+        _mt5_initialized = False
+        return False
+
+def resolve_mt5_gold_symbol(preferred_symbol: Optional[str] = None) -> Optional[str]:
+    """Find the active gold symbol in MT5 (e.g. XAUUSD, XAUUSDm, XAUUSD., GOLD)."""
+    if not init_mt5_client() or _mt5 is None:
+        return None
+    try:
+        # 1. Test preferred symbol if provided
+        if preferred_symbol:
+            s_info = _mt5.symbol_info(preferred_symbol)
+            if s_info:
+                if not s_info.visible:
+                    _mt5.symbol_select(preferred_symbol, True)
+                return preferred_symbol
+
+        # 2. Check common broker gold symbol names
+        candidates = ["XAUUSD", "XAUUSDm", "XAUUSD.", "GOLD", "XAUUSDc", "XAUUSD_i", "XAUUSD-", "XAUUSDb"]
+        for sym in candidates:
+            s_info = _mt5.symbol_info(sym)
+            if s_info:
+                if not s_info.visible:
+                    _mt5.symbol_select(sym, True)
+                return sym
+
+        # 3. Search all symbols in terminal
+        all_syms = _mt5.symbols_get()
+        if all_syms:
+            for s in all_syms:
+                name_upper = s.name.upper()
+                if "XAUUSD" in name_upper or ("GOLD" in name_upper and "MAR" not in name_upper):
+                    if not s.visible:
+                        _mt5.symbol_select(s.name, True)
+                    return s.name
+    except Exception:
+        pass
+    return None
+
+def fetch_mt5_broker_bars(
+    timeframe: str = "M5",
+    preferred_symbol: Optional[str] = None,
+    limit: int = 15000,
+) -> Optional[Dict[str, Any]]:
+    """Fetch live multi-bar history and current tick directly from the running MT5 broker."""
+    if not init_mt5_client() or _mt5 is None:
+        return None
+
+    try:
+        sym = resolve_mt5_gold_symbol(preferred_symbol)
+        if not sym:
+            return None
+
+        mt5_tf = _MT5_TF_MAP.get(timeframe.upper(), getattr(_mt5, "TIMEFRAME_M5", 5))
+        # Fetch rates from MT5 terminal in RAM
+        rates = _mt5.copy_rates_from_pos(sym, mt5_tf, 0, min(limit, 15000))
+        if rates is None or len(rates) == 0:
+            return None
+
+        bars = []
+        for r in rates:
+            bars.append({
+                "t": int(r["time"]),
+                "o": round(float(r["open"]), 2),
+                "h": round(float(r["high"]), 2),
+                "l": round(float(r["low"]), 2),
+                "c": round(float(r["close"]), 2),
+                "v": float(r["tick_volume"]),
+            })
+
+        # Fetch live tick for realtime bid/ask
+        tick = _mt5.symbol_info_tick(sym)
+        last_c = bars[-1]["c"]
+        bid = float(tick.bid) if (tick and tick.bid > 0) else last_c
+        ask = float(tick.ask) if (tick and tick.ask > 0) else last_c
+        quote = {
+            "price": bid,
+            "bid": bid,
+            "ask": ask,
+            "ts": int(tick.time) if tick else bars[-1]["t"],
+            "source": f"mt5_broker ({sym})",
+            "spread_points": round((ask - bid) / 0.01, 1) if (ask > bid) else 20.0,
+            "symbol": sym,
+        }
+
+        term_info = _mt5.terminal_info()
+        broker_name = term_info.name if term_info else "MT5"
+
+        return {
+            "bars": bars,
+            "source": f"mt5_broker ({broker_name} : {sym})",
+            "timeframe": timeframe.upper(),
+            "quote": quote,
+            "symbol": sym,
+        }
+    except Exception:
+        return None
+
+def fetch_mt5_live_tick(preferred_symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Fetch realtime spot tick (Bid/Ask) from MT5 broker terminal."""
+    if not init_mt5_client() or _mt5 is None:
+        return None
+    try:
+        sym = resolve_mt5_gold_symbol(preferred_symbol)
+        if not sym:
+            return None
+        tick = _mt5.symbol_info_tick(sym)
+        if not tick or tick.bid <= 0:
+            return None
+        ask = float(tick.ask) if tick.ask > 0 else float(tick.bid)
+        bid = float(tick.bid)
+        return {
+            "price": bid,
+            "bid": bid,
+            "ask": ask,
+            "ts": int(tick.time or time.time()),
+            "source": f"mt5_broker ({sym})",
+            "spread_points": round((ask - bid) / 0.01, 1) if (ask > bid) else 20.0,
+            "symbol": sym,
+        }
+    except Exception:
+        return None
+
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 SWISSQUOTE_XAU_URL = "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD"
@@ -624,11 +776,18 @@ class MarketDataHub:
         self.basis_shift: float = 0.0
         self.last_macro_ts: float = 0.0
         self.cached_macro: Optional[Dict[str, Any]] = None
+        self.preferred_symbol: Optional[str] = None
         self._rng = random.Random(99)
 
     @property
     def latest_spot(self) -> Dict[str, Any]:
         """Convenience property returning latest spot quote dictionary, or empty dict if none."""
+        # If MT5 broker is connected, prefer realtime broker tick
+        if HAS_MT5_LIB and _mt5_initialized:
+            b_tick = fetch_mt5_live_tick(self.preferred_symbol)
+            if b_tick:
+                self.latest_spot_quote = b_tick
+                return b_tick
         return self.latest_spot_quote or {}
 
     @latest_spot.setter
@@ -643,7 +802,25 @@ class MarketDataHub:
             cached = self.cached_bars_by_tf.get(tf)
             tf_last_ts = self.last_fetch_ts_by_tf.get(tf, 0.0)
             if force_refresh or not cached or (now - tf_last_ts > ttl_seconds):
-                # Tier 1 (Primary): Direct TradingView WebSocket (`OANDA:XAUUSD` / `FOREXCOM:XAUUSD`)
+                # Tier 0 (Native Broker Feed): Direct MetaTrader 5 Terminal Ingestion (Windows)
+                mt5_res = fetch_mt5_broker_bars(tf, preferred_symbol=self.preferred_symbol, limit=DEFAULT_BARS_LIMIT)
+                if mt5_res and mt5_res.get("bars"):
+                    live_bars = mt5_res["bars"]
+                    self.latest_spot_quote = mt5_res.get("quote") or self.latest_spot_quote
+                    self.basis_shift = 0.0
+                    self.source = mt5_res["source"]
+                    self.last_fetch_ts = now
+                    self.last_fetch_ts_by_tf[tf] = now
+                    self.cached_bars_by_tf[tf] = live_bars
+                    return {
+                        "bars": [dict(b) for b in live_bars],
+                        "source": self.source,
+                        "timeframe": tf,
+                        "live_quote": self.latest_spot_quote,
+                        "symbol": mt5_res.get("symbol"),
+                    }
+
+                # Tier 1 (Primary Fallback): Direct TradingView WebSocket (`OANDA:XAUUSD` / `FOREXCOM:XAUUSD`)
                 tv_res = fetch_tradingview_gold_bars(tf, symbol=TV_DEFAULT_SYMBOL, limit=DEFAULT_BARS_LIMIT)
                 if not tv_res:
                     tv_res = fetch_tradingview_gold_bars(tf, symbol="FOREXCOM:XAUUSD", limit=DEFAULT_BARS_LIMIT)

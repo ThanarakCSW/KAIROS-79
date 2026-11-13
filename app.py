@@ -32,6 +32,7 @@ from advisor.ai_evaluator import (
 from engine.data_feed import (
     MarketDataHub,
     fetch_live_spot_xauusd,
+    fetch_mt5_live_tick,
     stream_binance_gold_ws,
     stream_tradingview_gold_ws,
 )
@@ -760,10 +761,16 @@ class AssistantServer:
                     await self.broadcast(state)
                 continue
 
-            spot = await asyncio.to_thread(fetch_live_spot_xauusd)
+            spot = None
+            if str(self.core.hub.source).startswith("mt5_broker"):
+                spot = await asyncio.to_thread(fetch_mt5_live_tick, self.core.hub.preferred_symbol)
+            if not spot:
+                spot = await asyncio.to_thread(fetch_live_spot_xauusd)
+
             if spot:
                 self.core.hub.latest_spot_quote = spot
-                offset = float(self.core.config.get("broker_price_offset") or 0.0)
+                is_mt5_feed = str(spot.get("source", "")).startswith("mt5_broker")
+                offset = 0.0 if is_mt5_feed else float(self.core.config.get("broker_price_offset") or 0.0)
                 ingested = self.core.hub.ingest_live_price(
                     timeframe=self.core.timeframe,
                     price=spot["price"],
@@ -1184,6 +1191,8 @@ class AssistantServer:
             # Sync balance / equity to core config if non-zero
             if info.get("equity") and float(info["equity"]) > 0:
                 self.core.config["account_balance"] = float(info["equity"])
+            if info.get("symbol"):
+                self.core.hub.preferred_symbol = str(info["symbol"]).strip()
             # Broadcast state so web UI sees live MT5 status immediately
             state = self.core.last_state or {}
             if state:

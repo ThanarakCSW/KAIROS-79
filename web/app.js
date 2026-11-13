@@ -1112,36 +1112,38 @@
     el("barWin").style.width = `${Math.max(5, probs.win_pct || 0)}%`;
     el("barSweep").style.width = `${Math.max(3, probs.sweep_risk_pct || 0)}%`;
     el("barStop").style.width = `${Math.max(5, probs.stop_pct || 0)}%`;
-    el("simVerdictText").textContent = sim.verdict || "";
+    if (el("simVerdictText")) el("simVerdictText").textContent = sim.verdict || "";
 
-    // Gate Checklist
-    const gateItems = [];
-    (tk.reject_reasons || []).forEach((r) => gateItems.push(`<div class="gate-item gate-reject">❌ ${r}</div>`));
-    (tk.caution_warnings || []).forEach((w) => gateItems.push(`<div class="gate-item gate-warn">⚠️ ${w}</div>`));
-    (tk.passed_checks || []).forEach((p) => gateItems.push(`<div class="gate-item gate-pass">✅ ${p}</div>`));
-    el("gateChecklist").innerHTML = gateItems.join("");
+    // Gate Checklist (if present)
+    if (el("gateChecklist")) {
+      const gateItems = [];
+      (tk.reject_reasons || []).forEach((r) => gateItems.push(`<div class="gate-item gate-reject">❌ ${r}</div>`));
+      (tk.caution_warnings || []).forEach((w) => gateItems.push(`<div class="gate-item gate-warn">⚠️ ${w}</div>`));
+      (tk.passed_checks || []).forEach((p) => gateItems.push(`<div class="gate-item gate-pass">✅ ${p}</div>`));
+      el("gateChecklist").innerHTML = gateItems.join("");
+    }
 
-    // AI 3-Scenario Advisor
-    el("aiTimestamp").textContent = `${ai.provider || "AI"} • ${ai.generated_at_bkk || ""}`;
-    el("aiHeadline").textContent = ai.headline || "-";
-    el("aiSummary").textContent = ai.confluence_summary || "-";
-    el("aiBlindSpots").innerHTML = (ai.blind_spots || []).map((b) => `<li>${b}</li>`).join("");
+    // AI 3-Scenario Advisor (if present)
+    if (el("aiTimestamp")) el("aiTimestamp").textContent = `${ai.provider || "AI"} • ${ai.generated_at_bkk || ""}`;
+    if (el("aiHeadline")) el("aiHeadline").textContent = ai.headline || "-";
+    if (el("aiSummary")) el("aiSummary").textContent = ai.confluence_summary || "-";
+    if (el("aiBlindSpots")) el("aiBlindSpots").innerHTML = (ai.blind_spots || []).map((b) => `<li>${b}</li>`).join("");
 
     const sc = ai.scenarios || {};
-    if (sc.scenario_a) {
+    if (sc.scenario_a && el("scenATitle")) {
       el("scenATitle").textContent = `🟢 ${sc.scenario_a.title}`;
-      el("scenAProb").textContent = `${sc.scenario_a.probability_pct}%`;
-      el("scenADetail").textContent = sc.scenario_a.detail;
+      if (el("scenAProb")) el("scenAProb").textContent = `${sc.scenario_a.probability_pct}%`;
+      if (el("scenADetail")) el("scenADetail").textContent = sc.scenario_a.detail;
     }
-    if (sc.scenario_b) {
+    if (sc.scenario_b && el("scenBTitle")) {
       el("scenBTitle").textContent = `🟡 ${sc.scenario_b.title}`;
-      el("scenBProb").textContent = `${sc.scenario_b.probability_pct}%`;
-      el("scenBDetail").textContent = sc.scenario_b.detail;
+      if (el("scenBProb")) el("scenBProb").textContent = `${sc.scenario_b.probability_pct}%`;
+      if (el("scenBDetail")) el("scenBDetail").textContent = sc.scenario_b.detail;
     }
-    if (sc.scenario_c) {
+    if (sc.scenario_c && el("scenCTitle")) {
       el("scenCTitle").textContent = `🔴 ${sc.scenario_c.title}`;
-      el("scenCProb").textContent = `${sc.scenario_c.probability_pct}%`;
-      el("scenCDetail").textContent = sc.scenario_c.detail;
+      if (el("scenCProb")) el("scenCProb").textContent = `${sc.scenario_c.probability_pct}%`;
+      if (el("scenCDetail")) el("scenCDetail").textContent = sc.scenario_c.detail;
     }
 
     // Only populate modal settings if modal is closed, to avoid overwriting user edits

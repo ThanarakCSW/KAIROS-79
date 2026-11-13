@@ -177,13 +177,13 @@
             <span id="statusSub" class="lifecycle-sub-note">⏳ กำลังสแกน</span>
           </div>
 
-          <!-- Action Buttons -->
+          <!-- Action Buttons (Compact & Sleek) -->
           <div class="lifecycle-actions" id="orderActionButtons">
-            <button id="btnSendOrderToMT5" class="btn-order-action btn-send-mt5" title="ส่งคำสั่งซื้อขายนี้ตรงไปยัง MetaTrader 5 ทันที">🚀 ส่งเข้า MT5 ทันที</button>
-            <button id="btnOrderFillNow" class="btn-order-action btn-fill" title="กดเมื่อราคาใน MT5 เกี่ยวเปิดออเดอร์แล้ว">⚡ เปิดออเดอร์แล้ว</button>
-            <button id="btnAddSubOrder" class="btn-order-action btn-add" style="display:none;" title="เปิดไม้เพิ่มทันทีที่ราคาปัจจุบัน (แก้ไม้เมื่อติดลบ หรือทำกำไรเพิ่มเมื่อบวก)">➕ เปิดไม้เพิ่ม (แก้ไม้/สเกล)</button>
-            <button id="btnOrderBreakeven" class="btn-order-action btn-be" style="display:none;" title="กดเมื่อเลื่อน SL มาบังทุนแล้ว">🛡️ บังทุนแล้ว</button>
-            <button id="btnOrderCloseManual" class="btn-order-action btn-close" style="display:none;" title="กดเมื่อปิดทำกำไร/ตัดจบออเดอร์นี้">✓ จบการเทรดไม้นี้</button>
+            <button id="btnSendOrderToMT5" class="btn-order-action btn-send-mt5" title="ส่งคำสั่งซื้อขายนี้ตรงไปยัง MetaTrader 5 ทันที">🚀 ส่งเข้า MT5</button>
+            <button id="btnOrderFillNow" class="btn-order-action btn-fill" title="กดเมื่อราคาใน MT5 เกี่ยวเปิดออเดอร์แล้ว">⚡ เปิดไม้แล้ว</button>
+            <button id="btnAddSubOrder" class="btn-order-action btn-add" style="display:none;" title="เปิดไม้เพิ่มทันทีที่ราคาปัจจุบัน (แก้ไม้เมื่อติดลบ หรือทำกำไรเพิ่มเมื่อบวก)">➕ เปิดไม้เพิ่ม</button>
+            <button id="btnOrderBreakeven" class="btn-order-action btn-be" style="display:none;" title="กดเมื่อเลื่อน SL มาบังทุนแล้ว">🛡️ บังทุน</button>
+            <button id="btnOrderCloseManual" class="btn-order-action btn-close" style="display:none;" title="กดเมื่อปิดทำกำไร/ตัดจบออเดอร์นี้">✓ ปิดไม้</button>
             <button id="btnOrderCancel" class="btn-order-action btn-cancel" title="ยกเลิกคำสั่งนี้และสแกนหาจังหวะใหม่">✕ ยกเลิก</button>
             <button id="btnScanNewSetup" class="btn-order-action btn-scan" title="รีเซ็ตและสั่ง AI สแกนแผนใหม่">🔄 สแกนใหม่</button>
           </div>
@@ -259,113 +259,6 @@
             <span>🟢 ชนะแตะ TP: <strong id="valWinPct">54%</strong></span>
             <span>🟡 กวาดหาง: <strong id="valSweepPct">10%</strong></span>
             <span>🔴 ชน SL: <strong id="valStopPct">36%</strong></span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 2. Collapsible AI Strategy & Risk Panels (ย่อหุบได้) -->
-      <div class="advisor-accordion">
-        <!-- Section 1: Scenarios (Collapsible) -->
-        <div class="acc-card active" id="accScenarios">
-          <button class="acc-head" type="button" data-acc="accScenarios" title="คลิกเพื่อย่อ/ขยาย แผนกลยุทธ์">
-            <div class="acc-title-left">
-              <span class="acc-icon">🎯</span>
-              <span class="acc-title-text">แผนกลยุทธ์ (Scenarios)</span>
-              <span id="aiTimestamp" class="acc-pill">Gemini AI</span>
-            </div>
-            <span class="acc-indicator">▾</span>
-          </button>
-
-          <div class="acc-body" id="accBodyScenarios">
-            <div id="aiHeadline" class="ai-callout">—</div>
-
-            <div class="scenario-cards">
-              <!-- Scenario A: Primary plan full width -->
-              <div class="sc-card sc-primary">
-                <div class="sc-header">
-                  <strong id="scenATitle">🟢 Scenario A (แผนหลัก)</strong>
-                  <span id="scenAProb" class="sc-badge">54%</span>
-                </div>
-                <p id="scenADetail">—</p>
-              </div>
-
-              <!-- Scenarios B & C in compact side-by-side grid -->
-              <div class="sc-grid-secondary">
-                <div class="sc-card sc-sweep">
-                  <div class="sc-header">
-                    <strong id="scenBTitle">🟡 Scenario B (ดัก Sweep)</strong>
-                    <span id="scenBProb" class="sc-badge">10%</span>
-                  </div>
-                  <p id="scenBDetail">—</p>
-                </div>
-
-                <div class="sc-card sc-invalid">
-                  <div class="sc-header">
-                    <strong id="scenCTitle">🔴 Scenario C (จุดยกเลิก)</strong>
-                    <span id="scenCProb" class="sc-badge">15%</span>
-                  </div>
-                  <p id="scenCDetail">—</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Section 2: Blind Spots, Risk Gate & Confluence Deep Analysis (Collapsible) -->
-        <div class="acc-card" id="accRisks">
-          <button class="acc-head" type="button" data-acc="accRisks" title="คลิกเพื่อย่อ/ขยาย ด่านตรวจความเสี่ยงและบทวิเคราะห์">
-            <div class="acc-title-left">
-              <span class="acc-icon">🛡️</span>
-              <span class="acc-title-text">ตรวจความเสี่ยง &amp; บทวิเคราะห์</span>
-            </div>
-            <span class="acc-indicator">▸</span>
-          </button>
-
-          <div class="acc-body" id="accBodyRisks" style="display: none;">
-            <div class="pane-section">
-              <h4>⚠️ จุดบอดที่ต้องระวังก่อนกดออเดอร์</h4>
-              <ul id="aiBlindSpots" class="clean-list warn-list"></ul>
-            </div>
-            <div class="pane-section">
-              <h4>✅ ผลตรวจด่านความเสี่ยง (Deterministic Risk Gate)</h4>
-              <div id="gateChecklist" class="gate-stack"></div>
-            </div>
-            <div class="pane-section">
-              <h4>🔍 บทวิเคราะห์จุดร่วมและโครงสร้าง SMC</h4>
-              <p id="aiSummary" class="deep-prose">—</p>
-            </div>
-            <div class="pane-section">
-              <h4>📈 ข้อสรุปทางสถิติ (Monte Carlo Verdict)</h4>
-              <p id="simVerdictText" class="sim-verdict-box">—</p>
-            </div>
-          </div>
-        </div>
-
-        <!-- Section 3: Historical Chart Patterns (Collapsible) -->
-        <div class="acc-card" id="accPatterns">
-          <button class="acc-head" type="button" data-acc="accPatterns" title="คลิกเพื่อย่อ/ขยาย รูปแบบกราฟในอดีต (Chart Patterns)">
-            <div class="acc-title-left">
-              <span class="acc-icon">📐</span>
-              <span class="acc-title-text">รูปแบบกราฟในอดีต (Chart Patterns)</span>
-              <span id="patternsHeaderBadge" class="acc-pill">15,000 แท่ง</span>
-            </div>
-            <span class="acc-indicator">▸</span>
-          </button>
-
-          <div class="acc-body" id="accBodyPatterns" style="display: none;">
-            <div class="pane-section">
-              <h4>🎯 รูปแบบกราฟล่าสุดที่กำลังส่งผล</h4>
-              <div id="patternActiveCard" class="pattern-active-card">
-                <div class="pattern-active-empty">กำลังสแกนหารูปแบบกราฟ...</div>
-              </div>
-            </div>
-            <div class="pane-section">
-              <div class="pattern-section-head">
-                <h4>📜 ประวัติการตรวจพบรูปแบบย้อนหลัง</h4>
-                <span id="patternStatsSummary" class="pattern-stats-pill">—</span>
-              </div>
-              <div id="recentPatternsList" class="patterns-history-list"></div>
-            </div>
           </div>
         </div>
       </div>

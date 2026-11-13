@@ -1052,7 +1052,7 @@ body {
 .lifecycle-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
   padding-top: 4px;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
@@ -1060,8 +1060,9 @@ body {
 .btn-order-action {
   font-size: 11px;
   font-weight: 600;
-  padding: 5px 9px;
-  border-radius: 6px;
+  padding: 4px 8px;
+  height: 26px;
+  border-radius: 5px;
   border: 1px solid var(--border-subtle);
   background: rgba(255, 255, 255, 0.04);
   color: var(--text-primary);
@@ -1070,6 +1071,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
 }
 
 .btn-order-action:hover {
@@ -1081,11 +1083,13 @@ body {
   border-color: rgba(245, 184, 65, 0.6);
   color: #fbbf24;
   font-weight: 700;
-  box-shadow: 0 0 8px rgba(245, 184, 65, 0.15);
+  padding: 4px 10px;
+  height: 26px;
+  box-shadow: 0 0 6px rgba(245, 184, 65, 0.15);
 }
 .btn-order-action.btn-send-mt5:hover {
   background: linear-gradient(135deg, rgba(245, 184, 65, 0.4), rgba(56, 189, 248, 0.35));
-  box-shadow: 0 0 12px rgba(245, 184, 65, 0.35);
+  box-shadow: 0 0 10px rgba(245, 184, 65, 0.3);
   border-color: #fbbf24;
 }
 
