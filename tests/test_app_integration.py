@@ -201,6 +201,8 @@ class TestAppIntegration(unittest.TestCase):
             self.assertEqual(ws_json["symbol"], "XAUUSD")
 
             # 3. Test POST /api/order/action
+            # Disable auto multi-order scanner for this isolated manual action roundtrip test
+            srv.core.config.setdefault("multi_order", {})["auto_mode_enabled"] = False
             # Register a dummy active order first
             srv.core.order_manager.register_trade_setup(
                 risk_ticket={

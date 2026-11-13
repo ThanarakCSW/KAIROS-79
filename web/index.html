@@ -151,6 +151,7 @@
             </div>
 
             <div class="lifecycle-badge-cluster">
+              <span id="autoMultiOrderPill" class="auto-multi-pill" title="ระบบสแกนหาโอกาสแก้ไม้และทำกำไรเพิ่มให้อัตโนมัติโดยไม่ต้องปิดไม้เก่า">🤖 AUTO MULTI</span>
               <span id="verdictBadge" class="verdict-pill pass">PASS</span>
               <div class="confluence-mini-pill" title="คะแนนความแม่นยำจากจุดร่วม SMC + EMA">
                 <span class="conf-lbl">CONF</span>
@@ -384,6 +385,13 @@
             <span>ค่า Spread โบรกเกอร์ (Points)</span>
             <input type="number" step="1" id="cfgSpread" value="25" />
             <small>เช่น 25 points = $0.25 นำไปเผื่อในระยะ SL</small>
+          </label>
+          <label style="display: flex; flex-direction: column; justify-content: center;">
+            <span style="margin-bottom: 6px;">ระบบเพิ่มไม้อัตโนมัติ (Multi-Order)</span>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="cfgAutoMultiOrder" checked style="width: 18px; height: 18px; accent-color: var(--gold); cursor: pointer;" />
+              <span style="font-size: 11.5px; color: var(--text-secondary);">เปิดไม้แก้ (DCA) / สเกลกำไรอัตโนมัติ</span>
+            </div>
           </label>
         </div>
 

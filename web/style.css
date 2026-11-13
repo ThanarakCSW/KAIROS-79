@@ -769,6 +769,20 @@ body {
   gap: 6px;
 }
 
+.auto-multi-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(168, 85, 247, 0.12);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
 .verdict-pill {
   font-family: var(--font-mono);
   font-size: 10.5px;

@@ -254,6 +254,111 @@ class TestOrderLifecycle(unittest.TestCase):
         self.assertFalse(self.manager.has_active_order())
         self.assertEqual(len(self.manager.order_history), 3)
 
+    def test_autonomous_multi_order_scanner_recovery_and_scale_in(self):
+        """Verify autonomous multi-order scanner detects DCA recovery and scale-in without manual clicking."""
+        risk_ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2640.00,
+            "tp1_mt5": 2658.00,
+            "target_mt5": 2665.00,
+            "lot_size": 0.10,
+            "actual_risk_usd": 100.0,
+            "reward_risk": 1.5,
+            "order_type": "BUY NOW (Market)",
+            "execution_type": "MARKET",
+            "scenario_b_reentry_mt5": 2645.00,
+        }
+        smc_setup = {"side": "BUY", "execution_type": "MARKET", "confluence_score": 80}
+
+        # 1. Register primary market order at 2650.00
+        o1 = self.manager.register_trade_setup(risk_ticket, smc_setup, 2650.00)
+        self.assertEqual(o1["status"], "FILLED")
+        self.assertEqual(len(self.manager.active_orders), 1)
+
+        cfg = {
+            "multi_order": {
+                "auto_mode_enabled": True,
+                "max_concurrent_orders": 3,
+                "min_spacing_usd": 3.0,
+                "cooldown_seconds": 0,
+                "recovery_enabled": True,
+                "scale_in_enabled": True,
+            }
+        }
+
+        # 2. Price drops to 2645.00 (Scenario B sweep touch + RSI oversold = 28.0)
+        ev_rec = self.manager.check_and_apply_auto_multi_order(
+            current_price=2645.00,
+            high=2646.00,
+            low=2644.50,
+            atr=3.50,
+            structure={"rsi": {"rsi14": 28.0}},
+            config=cfg,
+            ts=1700000000,
+        )
+        self.assertIsNotNone(ev_rec)
+        self.assertEqual(ev_rec["type"], "AUTO_ORDER_ADDED")
+        self.assertEqual(ev_rec["purpose"], "RECOVERY")
+        self.assertEqual(ev_rec["side"], "BUY")
+        self.assertEqual(ev_rec["entry_price"], 2645.00)
+        # Crucial check: Original order is still active, now there are 2 active orders!
+        self.assertEqual(len(self.manager.active_orders), 2)
+        self.assertEqual(self.manager.active_orders[0]["order_id"], o1["order_id"])
+
+        # 3. Spacing protection: within 3.00 USD spacing (2646.00 is too close to 2645.00)
+        ev_blocked = self.manager.check_and_apply_auto_multi_order(
+            current_price=2646.00,
+            atr=3.50,
+            config=cfg,
+            ts=1700000010,
+        )
+        self.assertIsNone(ev_blocked)
+        self.assertEqual(len(self.manager.active_orders), 2)
+
+        # 4. Price rallies strongly to 2657.00 (+7.00 above primary entry)
+        # Update tick so floating PnL is refreshed
+        self.manager.update_price_tick(current_price=2657.00, high=2657.50, low=2650.00)
+        self.assertGreaterEqual(self.manager.active_orders[0]["floating_pnl_r"], 0.60)
+
+        # Scanner finds scale-in opportunity with Bullish trend and above EMA20 (2652.00)
+        st_bull = {
+            "trend": {"bias": "BULLISH"},
+            "ema": {"ema20": 2652.00},
+        }
+        ev_scale = self.manager.check_and_apply_auto_multi_order(
+            current_price=2657.00,
+            high=2657.50,
+            low=2656.00,
+            atr=3.50,
+            structure=st_bull,
+            config=cfg,
+            ts=1700000050,
+        )
+        self.assertIsNotNone(ev_scale)
+        self.assertEqual(ev_scale["type"], "AUTO_ORDER_ADDED")
+        self.assertEqual(ev_scale["purpose"], "SCALE_IN")
+        self.assertEqual(ev_scale["entry_price"], 2657.00)
+        self.assertEqual(len(self.manager.active_orders), 3)
+
+        # 5. Max concurrent orders limit reached (3/3) -> No more orders added
+        ev_max = self.manager.check_and_apply_auto_multi_order(
+            current_price=2663.00,
+            atr=3.50,
+            structure=st_bull,
+            config=cfg,
+            ts=1700000100,
+        )
+        self.assertIsNone(ev_max)
+        self.assertEqual(len(self.manager.active_orders), 3)
+
+        # 6. Verify combined stats
+        stats = self.manager.get_active_order_dict(current_price=2658.00)
+        self.assertEqual(stats["total_orders_count"], 3)
+        self.assertAlmostEqual(stats["total_lot_size"], 0.30, places=2)
+        # Avg entry = (2650 + 2645 + 2657) / 3 = 2650.666...
+        self.assertAlmostEqual(stats["avg_entry_price"], 2650.67, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

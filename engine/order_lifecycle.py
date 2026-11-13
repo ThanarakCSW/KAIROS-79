@@ -49,6 +49,7 @@ class OrderLifecycleManager:
         self.active_order: Optional[Dict[str, Any]] = None
         self.order_history: List[Dict[str, Any]] = []
         self.last_event: Optional[Dict[str, Any]] = None
+        self.last_order_add_ts: int = 0
         self.load_from_disk()
 
     def _sync_primary(self) -> None:
@@ -304,6 +305,190 @@ class OrderLifecycleManager:
         }
         self.save_to_disk()
         return sub_order
+
+    def check_and_apply_auto_multi_order(
+        self,
+        current_price: float,
+        high: Optional[float] = None,
+        low: Optional[float] = None,
+        atr: float = 2.5,
+        structure: Optional[Dict[str, Any]] = None,
+        smc: Optional[Dict[str, Any]] = None,
+        risk_ticket: Optional[Dict[str, Any]] = None,
+        config: Optional[Dict[str, Any]] = None,
+        ts: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Autonomously scan for recovery/DCA (แก้ไม้) or scale-in (ทำกำไรเพิ่ม) opportunities
+        and automatically register additional orders without closing existing active orders."""
+        if not self.has_active_order():
+            return None
+
+        cfg = (config or {}).get("multi_order") or {}
+        if not cfg.get("auto_mode_enabled", True):
+            return None
+
+        max_orders = int(cfg.get("max_concurrent_orders") or 3)
+        if len(self.active_orders) >= max_orders:
+            return None
+
+        now_ts = int(ts or time.time())
+        cooldown = int(cfg.get("cooldown_seconds") or 30)
+        if (now_ts - getattr(self, "last_order_add_ts", 0)) < cooldown:
+            return None
+
+        primary = self.active_orders[0]
+        side = primary["side"]
+        primary_entry = float(primary.get("filled_price") or primary.get("entry_mt5") or current_price)
+        stop_p = float(primary.get("stop_mt5") or 0.0)
+        target_p = float(primary.get("target_mt5") or 0.0)
+        min_spacing = float(cfg.get("min_spacing_usd") or max(2.50, 0.8 * atr))
+
+        # Check distance from all existing active orders to prevent clustering
+        for o in self.active_orders:
+            o_entry = float(o.get("filled_price") or o.get("entry_mt5") or current_price)
+            if abs(current_price - o_entry) < min_spacing:
+                return None
+
+        st = structure or {}
+        st_smc = smc or {}
+        bar_hi = high if high is not None else current_price
+        bar_lo = low if low is not None else current_price
+
+        # ---------------- 1. Recovery Opportunity (แก้ไม้ DCA) ----------------
+        if cfg.get("recovery_enabled", True):
+            in_drawdown = False
+            safe_above_sl = False
+
+            if side == "BUY":
+                in_drawdown = current_price <= (primary_entry - min_spacing)
+                safe_above_sl = current_price >= (stop_p + 0.35 * atr)
+            else:
+                in_drawdown = current_price >= (primary_entry + min_spacing)
+                safe_above_sl = current_price <= (stop_p - 0.35 * atr)
+
+            if in_drawdown and safe_above_sl:
+                trigger_reason = None
+
+                # Trigger A: Scenario B Liquidity Sweep zone
+                scen_b = float(primary.get("scenario_b_reentry_mt5") or 0.0)
+                if scen_b > 0 and abs(current_price - scen_b) <= (0.6 * atr):
+                    trigger_reason = f"แตะโซนดัก Liquidity Sweep ({scen_b:.2f})"
+
+                # Trigger B: Deep Historical S&R level
+                if not trigger_reason:
+                    hist_sr = (st.get("historical_sr") or {}).get("levels") or []
+                    for sr in hist_sr:
+                        sr_price = float(sr.get("price") or 0.0)
+                        if abs(current_price - sr_price) <= (0.45 * atr) and sr.get("touches", 0) >= 2:
+                            trigger_reason = f"แตะแนวรับประวัติศาสตร์ ({sr_price:.2f}, ทดสอบ {sr['touches']} ครั้ง)"
+                            break
+
+                # Trigger C: Unmitigated Order Block / FVG
+                if not trigger_reason:
+                    obs = st_smc.get("order_blocks") or []
+                    for ob in obs:
+                        ob_hi = float(ob.get("high") or 0.0)
+                        ob_lo = float(ob.get("low") or 0.0)
+                        if ob_lo <= current_price <= ob_hi:
+                            trigger_reason = f"แตะโซน Order Block ({ob.get('type', 'OB')})"
+                            break
+
+                # Trigger D: RSI Oversold / Overbought Rebound
+                if not trigger_reason:
+                    rsi_val = float((st.get("rsi") or {}).get("rsi14") or 50.0)
+                    scalp_info = st.get("scalping") or {}
+                    stoch_k = float(scalp_info.get("stoch_rsi_k") or 50.0)
+                    if side == "BUY" and (rsi_val <= 34.0 or stoch_k <= 22.0):
+                        trigger_reason = f"RSI อยู่ในโซนขายมากเกินไป (Oversold {rsi_val:.1f})"
+                    elif side == "SELL" and (rsi_val >= 66.0 or stoch_k >= 78.0):
+                        trigger_reason = f"RSI อยู่ในโซนซื้อมากเกินไป (Overbought {rsi_val:.1f})"
+
+                # Trigger E: Lower / Upper shadow rejection
+                if not trigger_reason and abs(bar_hi - bar_lo) > 0.05:
+                    candle_rng = abs(bar_hi - bar_lo)
+                    if side == "BUY" and (min(current_price, bar_hi) - bar_lo) / candle_rng >= 0.40:
+                        trigger_reason = "เกิดไส้เทียนล่างปฏิเสธราคา (Wick Rejection)"
+                    elif side == "SELL" and (bar_hi - max(current_price, bar_lo)) / candle_rng >= 0.40:
+                        trigger_reason = "เกิดไส้เทียนบนปฏิเสธราคา (Wick Rejection)"
+
+                if trigger_reason:
+                    lot = float(primary.get("lot_size") or 0.10)
+                    sub = self.add_sub_order(
+                        purpose="RECOVERY",
+                        execution_type="MARKET",
+                        current_price=current_price,
+                        lot_size=lot,
+                    )
+                    if sub:
+                        sub["trigger_reason"] = trigger_reason
+                        sub["management_note_th"] = f"🤖 AI เปิดไม้แก้ (DCA) อัตโนมัติ @ {current_price:.2f} — {trigger_reason}"
+                        self.last_order_add_ts = now_ts
+                        self.last_event = {
+                            "type": "AUTO_ORDER_ADDED",
+                            "order_id": sub["order_id"],
+                            "purpose": "RECOVERY",
+                            "purpose_th": "ไม้แก้ (DCA)",
+                            "side": side,
+                            "entry_price": current_price,
+                            "trigger_reason": trigger_reason,
+                            "message": f"🤖 AI เปิดไม้แก้ (DCA) อัตโนมัติ: {side} @ {current_price:.2f} ({trigger_reason})",
+                        }
+                        self.save_to_disk()
+                        return self.last_event
+
+        # ---------------- 2. Scale-in Opportunity (ทำกำไรเพิ่ม) ----------------
+        if cfg.get("scale_in_enabled", True):
+            primary_flt_r = float(primary.get("floating_pnl_r") or 0.0)
+            in_profit = primary_flt_r >= 0.60 or primary.get("tp1_hit") or primary.get("sl_moved_breakeven")
+
+            aligned_direction = False
+            if side == "BUY" and current_price >= (primary_entry + min_spacing):
+                aligned_direction = True
+            elif side == "SELL" and current_price <= (primary_entry - min_spacing):
+                aligned_direction = True
+
+            if in_profit and aligned_direction:
+                trend_bias = (st.get("trend") or {}).get("bias")
+                is_trend_aligned = (side == "BUY" and trend_bias == "BULLISH") or (side == "SELL" and trend_bias == "BEARISH")
+
+                trigger_reason = None
+                ema_info = st.get("ema") or {}
+                ema20 = float(ema_info.get("ema20") or 0.0)
+
+                if is_trend_aligned:
+                    if side == "BUY" and ema20 > 0 and current_price >= ema20:
+                        trigger_reason = "เทรนด์แข็งแกร่ง ยืนเหนือ EMA20 พร้อมขยายกำไร"
+                    elif side == "SELL" and ema20 > 0 and current_price <= ema20:
+                        trigger_reason = "เทรนด์แข็งแกร่ง อยู่ใต้ EMA20 พร้อมขยายกำไร"
+                    else:
+                        trigger_reason = "กำไรทะลุ +0.6R และโมเมนตัมขยายตัวตามแนวโน้ม"
+
+                if trigger_reason:
+                    lot = float(primary.get("lot_size") or 0.10)
+                    sub = self.add_sub_order(
+                        purpose="SCALE_IN",
+                        execution_type="MARKET",
+                        current_price=current_price,
+                        lot_size=lot,
+                    )
+                    if sub:
+                        sub["trigger_reason"] = trigger_reason
+                        sub["management_note_th"] = f"🤖 AI เปิดไม้ทำกำไร (Scale) อัตโนมัติ @ {current_price:.2f} — {trigger_reason}"
+                        self.last_order_add_ts = now_ts
+                        self.last_event = {
+                            "type": "AUTO_ORDER_ADDED",
+                            "order_id": sub["order_id"],
+                            "purpose": "SCALE_IN",
+                            "purpose_th": "ไม้เพิ่มกำไร (Scale)",
+                            "side": side,
+                            "entry_price": current_price,
+                            "trigger_reason": trigger_reason,
+                            "message": f"🤖 AI เปิดไม้เพิ่มกำไรอัตโนมัติ: {side} @ {current_price:.2f} ({trigger_reason})",
+                        }
+                        self.save_to_disk()
+                        return self.last_event
+
+        return None
 
     def update_price_tick(
         self,

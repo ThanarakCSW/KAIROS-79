@@ -830,10 +830,27 @@
     }
     const styleTag = state.trading_style === "scalping" ? "⚡ SCALP" : "🎯 INTRADAY";
 
+    const multiCfg = (state.config && state.config.multi_order) || {};
+    const autoMultiPill = el("autoMultiOrderPill");
+    if (autoMultiPill) {
+      const isAuto = multiCfg.auto_mode_enabled !== false;
+      autoMultiPill.textContent = isAuto ? "🤖 AUTO MULTI" : "MANUAL MULTI";
+      autoMultiPill.style.opacity = isAuto ? "1" : "0.5";
+      autoMultiPill.title = isAuto
+        ? "ระบบกำลังสแกนหาโอกาสแก้ไม้ (DCA) และทำกำไรเพิ่ม (Scale) อัตโนมัติ"
+        : "โหมดแมนนวล: ผู้ใช้กดปุ่มเปิดไม้เพิ่มเอง";
+    }
+
     if (activeOrd && activeOrd.status === "FILLED") {
-      el("ticketSideTitle").textContent = `${activeOrd.side} XAUUSD (FILLED)`;
+      const ordersCnt = (activeOrd.orders && activeOrd.orders.length) || 1;
+      if (ordersCnt > 1) {
+        el("ticketSideTitle").textContent = `${activeOrd.side} (${ordersCnt} ไม้)`;
+        el("statusSub").textContent = `🚀 ถือครอง ${ordersCnt} ไม้ • ทุนเฉลี่ย ${Number(activeOrd.avg_entry_price || activeOrd.entry_mt5).toFixed(2)}`;
+      } else {
+        el("ticketSideTitle").textContent = `${activeOrd.side} XAUUSD (FILLED)`;
+        el("statusSub").textContent = `🚀 ถือครอง @ ${Number(activeOrd.entry_mt5).toFixed(2)}`;
+      }
       el("ticketSideTitle").style.color = activeOrd.side === "SELL" ? "var(--bear)" : "var(--bull)";
-      el("statusSub").textContent = `🚀 ถือครอง @ ${Number(activeOrd.entry_mt5).toFixed(2)}`;
     } else if (activeOrd && activeOrd.status === "PENDING") {
       const isMarket = activeOrd.execution_type === "MARKET";
       el("ticketSideTitle").textContent = isMarket ? `${activeOrd.side} NOW` : `${activeOrd.side} LIMIT`;
@@ -869,14 +886,28 @@
       (!winProbPassed ? "caution" : (tk.verdict === "PASS" || (activeOrd && activeOrd.status === "FILLED")) ? "pass" : tk.verdict === "CAUTION" ? "caution" : "reject");
 
     el("confluenceBadge").textContent = `${setup.confluence_score || 0}%`;
-    el("valLot").textContent = Number(tk.lot_size || 0).toFixed(2);
+
+    const activeLot = (activeOrd && activeOrd.orders && activeOrd.orders.length > 1)
+      ? Number(activeOrd.total_lot_size || activeOrd.lot_size || 0).toFixed(2)
+      : Number(tk.lot_size || 0).toFixed(2);
+    el("valLot").textContent = activeLot;
+
     const lev = tk.leverage || (state.config && state.config.leverage) || 100;
     const marginInfo = tk.margin_required_usd ? ` • Margin $${Number(tk.margin_required_usd).toFixed(2)} (1:${Math.round(lev)})` : "";
     el("riskUsdSub").textContent = `เสี่ยง $${Number(tk.actual_risk_usd || 0).toFixed(2)} (${tk.risk_pct_configured || 1}%)${marginInfo}`;
-    el("valEntry").textContent = Number(tk.entry_mt5 || 0).toFixed(2);
+
+    const activeEntry = (activeOrd && activeOrd.orders && activeOrd.orders.length > 1)
+      ? Number(activeOrd.avg_entry_price || activeOrd.entry_mt5 || 0).toFixed(2)
+      : Number(tk.entry_mt5 || 0).toFixed(2);
+    el("valEntry").textContent = activeEntry;
+
     if (el("entryHeadLabel")) {
       const isMarket = (activeOrd && activeOrd.execution_type === "MARKET") || tk.execution_type === "MARKET";
-      el("entryHeadLabel").textContent = isMarket ? "ENTRY (MARKET)" : `ENTRY (${tk.order_type || (tk.side || "BUY") + " LIMIT"})`;
+      if (activeOrd && activeOrd.orders && activeOrd.orders.length > 1) {
+        el("entryHeadLabel").textContent = `ENTRY (ทุนเฉลี่ย ${activeOrd.orders.length} ไม้)`;
+      } else {
+        el("entryHeadLabel").textContent = isMarket ? "ENTRY (MARKET)" : `ENTRY (${tk.order_type || (tk.side || "BUY") + " LIMIT"})`;
+      }
     }
     if (el("entryDistSub")) {
       const isMarket = (activeOrd && activeOrd.execution_type === "MARKET") || tk.execution_type === "MARKET";
@@ -950,6 +981,10 @@
     if (document.activeElement !== el("cfgRiskPct")) el("cfgRiskPct").value = cfg.risk_per_trade_pct ?? 1.0;
     if (document.activeElement !== el("cfgOffset")) el("cfgOffset").value = cfg.broker_price_offset ?? 0.0;
     if (document.activeElement !== el("cfgSpread")) el("cfgSpread").value = cfg.broker_spread_points ?? 25;
+    if (el("cfgAutoMultiOrder")) {
+      const multiCfg = cfg.multi_order || {};
+      el("cfgAutoMultiOrder").checked = multiCfg.auto_mode_enabled !== false;
+    }
 
     if (state.is_new_signal_alert) {
       playAlertBeep(tk.verdict);
@@ -1231,6 +1266,9 @@
         risk_per_trade_pct: parseFloat(el("cfgRiskPct").value),
         broker_price_offset: parseFloat(el("cfgOffset").value),
         broker_spread_points: parseFloat(el("cfgSpread").value),
+        multi_order: {
+          auto_mode_enabled: el("cfgAutoMultiOrder") ? el("cfgAutoMultiOrder").checked : true,
+        },
       };
       const keyVal = el("cfgGeminiKey").value.trim();
       if (keyVal) body.gemini_api_key = keyVal;

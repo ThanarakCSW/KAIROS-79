@@ -30,6 +30,14 @@
     "auto_trigger_min_confluence": 65,
     "api_key": ""
   },
+  "multi_order": {
+    "auto_mode_enabled": true,
+    "max_concurrent_orders": 3,
+    "min_spacing_usd": 3.0,
+    "recovery_enabled": true,
+    "scale_in_enabled": true,
+    "cooldown_seconds": 30
+  },
   "data_feed": {
     "mode": "live_or_replay",
     "yahoo_symbol": "GC=F",

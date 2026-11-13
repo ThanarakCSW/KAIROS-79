@@ -202,6 +202,7 @@ class TradingAssistantCore:
         cur_hi = float(last_b.get("h", cur_p))
         cur_lo = float(last_b.get("l", cur_p))
         cur_ts = int(last_b.get("t", time.time()))
+        atr_val = float(structure.get("atr14") or 3.50)
 
         order_event = self.order_manager.update_price_tick(
             current_price=cur_p,
@@ -212,6 +213,21 @@ class TradingAssistantCore:
 
         min_conf = int((self.config.get("ai") or {}).get("auto_trigger_min_confluence") or 55)
         if self.order_manager.has_active_order():
+            # Autonomously scan and execute recovery (แก้ไม้) or scale-in (ทำกำไรเพิ่ม)
+            auto_event = self.order_manager.check_and_apply_auto_multi_order(
+                current_price=cur_p,
+                high=cur_hi,
+                low=cur_lo,
+                atr=atr_val,
+                structure=structure,
+                smc=smc,
+                risk_ticket=risk_ticket,
+                config=self.config,
+                ts=cur_ts,
+            )
+            if auto_event and not order_event:
+                order_event = auto_event
+
             active_ord = self.order_manager.get_active_order_dict(cur_p)
             if active_ord:
                 risk_ticket["side"] = active_ord["side"]
@@ -233,10 +249,17 @@ class TradingAssistantCore:
                 risk_ticket["management_note_th"] = active_ord.get("management_note_th", "")
                 risk_ticket["active_order"] = active_ord
                 risk_ticket["verdict"] = "ACTIVE_ORDER" if active_ord["status"] == "FILLED" else "PENDING_ORDER"
+                orders_cnt = active_ord.get("total_orders_count", 1)
+                tot_lot = active_ord.get("total_lot_size", active_ord["lot_size"])
+                avg_e = active_ord.get("avg_entry_price", active_ord["entry_mt5"])
                 risk_ticket["badge_th"] = (
-                    f"🚀 ถือครองออเดอร์ใน MT5 ({active_ord['side']} @ {active_ord['entry_mt5']:.2f})"
-                    if active_ord["status"] == "FILLED"
-                    else f"⏳ รอเกี่ยวคำสั่ง {active_ord['order_type']} @ {active_ord['entry_mt5']:.2f}"
+                    f"🚀 ถือครอง {orders_cnt} ไม้ (รวม {tot_lot:.2f} Lot • ทุนเฉลี่ย {avg_e:.2f})"
+                    if orders_cnt > 1
+                    else (
+                        f"🚀 ถือครองออเดอร์ ({active_ord['side']} @ {active_ord['entry_mt5']:.2f})"
+                        if active_ord["status"] == "FILLED"
+                        else f"⏳ รอเกี่ยวคำสั่ง {active_ord['order_type']} @ {active_ord['entry_mt5']:.2f}"
+                    )
                 )
         else:
             if (
@@ -358,6 +381,8 @@ class TradingAssistantCore:
         self.config["simulation_replays"] = max(
             15000, int(self.config.get("simulation_replays") or 15000)
         )
+        if "multi_order" in payload and isinstance(payload["multi_order"], dict):
+            self.config.setdefault("multi_order", {}).update(payload["multi_order"])
         if "gemini_api_key" in payload:
             raw_key = str(payload["gemini_api_key"]).strip()
             if " " not in raw_key and not raw_key.startswith("[MT5"):
