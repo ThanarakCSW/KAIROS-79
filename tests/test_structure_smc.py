@@ -233,6 +233,114 @@ class TestStructureAndSMC(unittest.TestCase):
         has_sr_factor = any("15,000 แท่ง" in f or "SR_FLIP" in f or "S&R" in f for f in setup["confluence_factors"])
         self.assertTrue(has_sr_factor, "Expected 15,000 bars historical S&R in confluence factors")
 
+    def test_session_liquidity_sweep_detection_and_trade_setup(self):
+        """Verify Asian High/Low Liquidity Sweep (Judas Swing) triggers high-conviction SESSION_SWEEP setup."""
+        from engine.smc import build_trade_setup
+
+        mock_structure_bearish = {
+            "current_price": 2658.00,
+            "atr14": 3.0,
+            "trend": {"bias": "BULLISH", "regime": "TRENDING", "ema_alignment": "BULLISH"},
+            "swings": {"all": [{"price": 2650.0, "type": "LOW"}]},
+            "institutional_levels": {
+                "asian_high": 2660.00,
+                "asian_low": 2645.00,
+                "post_high": 2663.50,
+                "post_low": 2647.00,
+                "asian_mid": 2652.50,
+                "asian_status": "ASIAN_HIGH_SWEPT_BEARISH",
+            },
+            "scalping": {"triggers": [], "ribbon_state": "BULL_RIBBON"},
+        }
+        setup = build_trade_setup(
+            structure_res=mock_structure_bearish,
+            obs=[],
+            fvgs=[],
+            breaks=[],
+            sweeps=[],
+            liquidity_pools=[],
+            spread_usd=0.25,
+            trading_style="intraday",
+        )
+        self.assertEqual(setup["setup_archetype"], "SESSION_SWEEP")
+        self.assertEqual(setup["side"], "SELL")
+        self.assertEqual(setup["bias"], "BEARISH")
+        self.assertGreater(setup["stop"], 2663.50)
+        self.assertLess(setup["tp1"], 2658.00)
+        self.assertLess(setup["target"], setup["tp1"])
+        self.assertGreaterEqual(setup["confluence_score"], 80)
+        self.assertIn("Judas Swing", setup["archetype_label_th"])
+
+        mock_structure_bullish = {
+            "current_price": 2647.00,
+            "atr14": 3.0,
+            "trend": {"bias": "BEARISH", "regime": "TRENDING", "ema_alignment": "BEARISH"},
+            "swings": {"all": [{"price": 2660.0, "type": "HIGH"}]},
+            "institutional_levels": {
+                "asian_high": 2662.00,
+                "asian_low": 2648.00,
+                "post_high": 2658.00,
+                "post_low": 2643.50,
+                "asian_mid": 2655.00,
+                "asian_status": "ASIAN_LOW_SWEPT_BULLISH",
+            },
+            "scalping": {"triggers": [], "ribbon_state": "BEAR_RIBBON"},
+        }
+        setup_bull = build_trade_setup(
+            structure_res=mock_structure_bullish,
+            obs=[],
+            fvgs=[],
+            breaks=[],
+            sweeps=[],
+            liquidity_pools=[],
+            spread_usd=0.25,
+            trading_style="intraday",
+        )
+        self.assertEqual(setup_bull["setup_archetype"], "SESSION_SWEEP")
+        self.assertEqual(setup_bull["side"], "BUY")
+        self.assertEqual(setup_bull["bias"], "BULLISH")
+        self.assertLess(setup_bull["stop"], 2643.50)
+        self.assertGreater(setup_bull["tp1"], 2647.00)
+        self.assertGreater(setup_bull["target"], setup_bull["tp1"])
+
+    def test_htf_aligned_micro_pullback_setup(self):
+        """Verify M5 Micro-Pullback trigger builds an actionable setup in the direction of HTF trend."""
+        from engine.smc import build_trade_setup
+
+        mock_structure_htf_bull = {
+            "current_price": 2655.00,
+            "atr14": 2.5,
+            "trend": {"bias": "BULLISH", "regime": "TRENDING", "ema_alignment": "BULLISH"},
+            "swings": {"all": []},
+            "institutional_levels": {
+                "asian_status": "INSIDE_ASIAN_RANGE",
+            },
+            "scalping": {
+                "scalp_bias": "BULLISH",
+                "ribbon_state": "BULL_RIBBON",
+                "ema9": 2654.50,
+                "ema21": 2652.00,
+                "triggers": ["EMA9/21 Pullback Bounce (BUY)"],
+            },
+        }
+        setup_mp = build_trade_setup(
+            structure_res=mock_structure_htf_bull,
+            obs=[],
+            fvgs=[],
+            breaks=[],
+            sweeps=[],
+            liquidity_pools=[],
+            spread_usd=0.25,
+            mtf_res={"overall_bias": "BULLISH"},
+            trading_style="intraday",
+        )
+        self.assertEqual(setup_mp["setup_archetype"], "MICRO_PULLBACK")
+        self.assertEqual(setup_mp["side"], "BUY")
+        self.assertEqual(setup_mp["bias"], "BULLISH")
+        self.assertLess(setup_mp["stop"], 2652.00)
+        self.assertGreater(setup_mp["target"], setup_mp["entry"])
+        self.assertIn("Micro-Pullback", setup_mp["archetype_label_th"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -156,6 +156,8 @@ class OrderLifecycleManager:
             "status": initial_status,
             "timeframe": timeframe,
             "trading_style": trading_style,
+            "setup_archetype": setup.get("setup_archetype") or risk_ticket.get("setup_archetype") or "ORDER_BLOCK_PULLBACK",
+            "archetype_label_th": setup.get("archetype_label_th") or risk_ticket.get("archetype_label_th") or "🏛️ SMC Order Block Pullback",
             "entry_mt5": entry_mt5,
             "stop_mt5": stop_mt5,
             "initial_stop_mt5": stop_mt5,
@@ -647,26 +649,48 @@ class OrderLifecycleManager:
                 else:
                     invalidated = False
                     reason = ""
+                    note_th = "คำสั่งถูกยกเลิกเนื่องจากราคาเลยจุดเข้าหรือชนเป้าก่อน"
+
+                    ms_cfg = (config or {}).get("multi_strategy") or {}
+                    expiry_mins = float(ms_cfg.get("pending_expiry_minutes") or 180.0)
+                    created_ts = int(order.get("created_ts") or order.get("registered_ts") or now_ts)
+                    pending_mins = max(0.0, (now_ts - created_ts) / 60.0)
+                    sl_dist = float(order.get("initial_sl_dist") or abs(entry - stop) or 3.0)
+                    max_adverse_atr = float(ms_cfg.get("max_adverse_distance_atr") or 2.5)
+                    runaway_dist = max(7.0, max_adverse_atr * sl_dist)
+
                     if (side == "BUY" and bar_lo <= invalidation) or (side == "SELL" and bar_hi >= invalidation):
                         invalidated = True
                         reason = "INVALIDATED_BEFORE_FILL"
+                        note_th = "คำสั่งถูกยกเลิกเนื่องจากราคาหลุดแนวต้าน/รับก่อนเกี่ยวออเดอร์"
                     elif (side == "BUY" and bar_hi >= target) or (side == "SELL" and bar_lo <= target):
                         invalidated = True
                         reason = "MISSED_TARGET"
+                        note_th = "คำสั่งถูกยกเลิกเนื่องจากราคาวิ่งชนเป้าหมายทำกำไรไปก่อนแล้วโดยไม่ย่อมารับ"
+                    elif expiry_mins > 0 and pending_mins >= expiry_mins:
+                        invalidated = True
+                        reason = "EXPIRED_TIMEOUT"
+                        note_th = f"คำสั่งถูกยกเลิกอัตโนมัติเนื่องจากรอเกี่ยวเกิน {pending_mins:.0f} นาที เพื่อคืน Margin และปลดล็อกรอบใหม่"
+                    elif (side == "BUY" and (current_price - entry) >= runaway_dist) or (side == "SELL" and (entry - current_price) >= runaway_dist):
+                        invalidated = True
+                        reason = "EXPIRED_STRUCTURE_RUNAWAY"
+                        note_th = f"คำสั่งถูกยกเลิกอัตโนมัติเนื่องจากราคาฉีกหนีโซนไปไกล ({dist:.2f} USD) เพื่อรอโครงสร้างรอบใหม่ที่สดกว่า"
 
                     if invalidated:
                         order["status"] = "CANCELLED"
                         order["closed_ts"] = now_ts
                         order["close_price"] = current_price
                         order["close_reason"] = reason
-                        order["management_note_th"] = "คำสั่งถูกยกเลิกเนื่องจากราคาเลยจุดเข้าหรือชนเป้าก่อน"
+                        order["management_note_th"] = note_th
                         self.order_history.append(dict(order))
                         last_event = {
                             "type": "ORDER_CANCELLED",
                             "order_id": order["order_id"],
                             "side": side,
                             "reason": reason,
-                            "message": f"คำสั่ง {order['order_id']} ถูกยกเลิก ({reason})",
+                            "broker_ticket": order.get("broker_ticket"),
+                            "symbol": order.get("symbol", "XAUUSD"),
+                            "message": f"คำสั่ง {order['order_id']} ถูกยกเลิก ({reason}): {note_th}",
                         }
                     else:
                         remaining_orders.append(order)

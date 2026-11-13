@@ -218,6 +218,9 @@ class TradingAssistantCore:
             config=cfg_for_risk,
         )
         risk_ticket["broker_offset_usd"] = round(offset, 2)
+        risk_ticket["setup_archetype"] = smc.get("trade_setup", {}).get("setup_archetype", "ORDER_BLOCK_PULLBACK")
+        risk_ticket["archetype_label_th"] = smc.get("trade_setup", {}).get("archetype_label_th", "🏛️ SMC Order Block Pullback")
+        risk_ticket["available_setups"] = smc.get("available_setups", [])
 
         cur_p = float(structure["current_price"])
         last_b = chart_bars[-1] if chart_bars else {}
@@ -543,7 +546,9 @@ class TradingAssistantCore:
             ):
                 ord_obj = order_event.get("order") or {}
                 tickets_to_close = []
-                if ord_obj.get("broker_ticket"):
+                if order_event.get("broker_ticket"):
+                    tickets_to_close.append(order_event.get("broker_ticket"))
+                if ord_obj.get("broker_ticket") and ord_obj.get("broker_ticket") not in tickets_to_close:
                     tickets_to_close.append(ord_obj.get("broker_ticket"))
                 for sub_o in ord_obj.get("orders") or []:
                     bt = sub_o.get("broker_ticket")

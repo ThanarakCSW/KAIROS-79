@@ -67,6 +67,12 @@
       }
     ]
   },
+  "multi_strategy": {
+    "enable_session_sweep": true,
+    "enable_micro_pullback": true,
+    "pending_expiry_minutes": 180,
+    "max_adverse_distance_atr": 2.5
+  },
   "data_feed": {
     "mode": "live_or_replay",
     "yahoo_symbol": "GC=F",

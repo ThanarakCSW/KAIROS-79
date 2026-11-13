@@ -1312,13 +1312,17 @@ def compute_institutional_levels(
     post_asian_bars = curr_day_bars[len(asian_bars) :] or curr_day_bars[-10:]
     post_high = max(float(b["h"]) for b in post_asian_bars)
     post_low = min(float(b["l"]) for b in post_asian_bars)
+    asian_mid = (asian_high + asian_low) / 2.0
+    asian_range_usd = asian_high - asian_low
+    sweep_high_depth = max(0.0, post_high - asian_high)
+    sweep_low_depth = max(0.0, asian_low - post_low)
 
     if post_high > asian_high and current_price < asian_high:
         asian_status = "ASIAN_HIGH_SWEPT_BEARISH"
-        asian_th = f"กวาดหัวกรอบเอเชีย ({asian_high:.2f}) แล้วดึงกลับ (ระวังแรงเทขายย้อนกลับ)"
+        asian_th = f"กวาดหัวกรอบเอเชีย ({asian_high:.2f}, ล้นไป {sweep_high_depth:.2f} USD) แล้วดึงกลับเข้ากรอบ (ระวังแรงเทขายย้อนกลับ/Judas Swing)"
     elif post_low < asian_low and current_price > asian_low:
         asian_status = "ASIAN_LOW_SWEPT_BULLISH"
-        asian_th = f"กวาดหางกรอบเอเชีย ({asian_low:.2f}) แล้วดึงกลับ (หนุนแรงซื้อดีดขึ้น)"
+        asian_th = f"กวาดหางกรอบเอเชีย ({asian_low:.2f}, หลุดไป {sweep_low_depth:.2f} USD) แล้วดึงกลับเข้ากรอบ (หนุนแรงซื้อดีดขึ้น/Judas Swing)"
     elif current_price > asian_high:
         asian_status = "BREAKOUT_ABOVE_ASIAN"
         asian_th = f"ยืนเหนือกรอบเอเชีย ({asian_low:.2f}–{asian_high:.2f})"
@@ -1385,6 +1389,12 @@ def compute_institutional_levels(
         "pdl_swept": pdl_swept,
         "asian_high": r2(asian_high),
         "asian_low": r2(asian_low),
+        "post_high": r2(post_high),
+        "post_low": r2(post_low),
+        "asian_mid": r2(asian_mid),
+        "asian_range_usd": r2(asian_range_usd),
+        "asian_sweep_high_depth": r2(sweep_high_depth),
+        "asian_sweep_low_depth": r2(sweep_low_depth),
         "asian_status": asian_status,
         "asian_summary_th": asian_th,
         "vwap": r2(vwap),

@@ -4,6 +4,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from engine.order_lifecycle import OrderLifecycleManager
 from engine.risk_gate import evaluate_risk_and_size
@@ -513,6 +514,61 @@ class TestOrderLifecycle(unittest.TestCase):
         self.assertAlmostEqual(closed_item["swap_usd"], -3.50, places=2)
         self.assertAlmostEqual(closed_item["commission_usd"], -6.00, places=2)
         self.assertAlmostEqual(closed_item["realized_pnl_r"], 1.41, places=2)
+
+    def test_pending_order_recycling_timeout_and_runaway(self):
+        """Verify pending limit orders are automatically recycled (cancelled) when expired or runaway."""
+        risk_ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2640.00,
+            "tp1_mt5": 2675.00,
+            "target_mt5": 2690.00,
+            "lot_size": 0.10,
+            "actual_risk_usd": 100.00,
+            "execution_type": "LIMIT",
+            "order_type": "BUY LIMIT",
+        }
+        smc_setup = {"side": "BUY", "confluence_score": 75}
+        order = self.manager.register_trade_setup(risk_ticket, smc_setup, current_price=2655.00)
+        self.assertEqual(order["status"], "PENDING")
+
+        # Test Case 1: Runaway price (price rockets away to 2678 without filling)
+        config = {
+            "multi_strategy": {
+                "pending_expiry_minutes": 180,
+                "max_adverse_distance_atr": 2.5,
+            }
+        }
+        ev = self.manager.update_price_tick(
+            current_price=2678.00,
+            high=2678.50,
+            low=2677.00,
+            ts=int(time.time()),
+            config=config,
+        )
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["type"], "ORDER_CANCELLED")
+        self.assertEqual(ev["reason"], "EXPIRED_STRUCTURE_RUNAWAY")
+        self.assertFalse(self.manager.has_active_order())
+
+        # Test Case 2: Time-based expiry (stale limit order after 200 minutes)
+        order2 = self.manager.register_trade_setup(risk_ticket, smc_setup, current_price=2653.00, force_replace=True)
+        self.assertEqual(order2["status"], "PENDING")
+        past_ts = int(time.time()) - (200 * 60)
+        order2["created_ts"] = past_ts
+        self.manager.save_to_disk()
+
+        ev2 = self.manager.update_price_tick(
+            current_price=2654.00,
+            high=2655.00,
+            low=2652.00,
+            ts=int(time.time()),
+            config=config,
+        )
+        self.assertIsNotNone(ev2)
+        self.assertEqual(ev2["type"], "ORDER_CANCELLED")
+        self.assertEqual(ev2["reason"], "EXPIRED_TIMEOUT")
+        self.assertFalse(self.manager.has_active_order())
 
 
 if __name__ == "__main__":

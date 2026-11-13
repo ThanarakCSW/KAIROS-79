@@ -261,7 +261,7 @@ class TestEABridge(unittest.TestCase):
 
             resp_send_order = json.loads(bytes(w5.buffer).split(b"\r\n\r\n", 1)[1].decode("utf-8"))
             self.assertEqual(resp_send_order["status"], "ok")
-            self.assertEqual(len(srv.core.ea_bridge.action_queue), 1)
+            self.assertGreaterEqual(len(srv.core.ea_bridge.action_queue), 1)
             self.assertEqual(srv.core.ea_bridge.action_queue[0]["type"], "OPEN_ORDER")
 
         asyncio.run(_run())

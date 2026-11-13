@@ -480,8 +480,167 @@ def build_trade_setup(
     )
 
     chosen_ob = candidate_obs[0] if candidate_obs else None
-    if is_scalp and scalp_info:
+
+    # 1. Detect Session Sweep (Judas Swing) Setup:
+    inst = structure_res.get("institutional_levels") or {}
+    asian_status = str(inst.get("asian_status") or "")
+    ash = inst.get("asian_high")
+    asl = inst.get("asian_low")
+    post_h = inst.get("post_high", ash)
+    post_l = inst.get("post_low", asl)
+    asian_mid = inst.get("asian_mid", round((ash + asl) / 2.0, 2) if (ash is not None and asl is not None) else None)
+
+    session_sweep_setup: Optional[Dict[str, Any]] = None
+    if ash is not None and asl is not None and (ash - asl) >= max(1.5, atr_val * 0.8):
+        if asian_status == "ASIAN_HIGH_SWEPT_BEARISH" and current_price <= (ash + atr_val * 0.35) and current_price >= (asl - atr_val * 0.2):
+            sw_hi = float(post_h or ash)
+            sw_sl = r2(sw_hi + max(0.60, atr_val * 0.20, spread_usd * 2.0))
+            is_close_to_ash = abs(current_price - ash) <= atr_val * 0.45
+            sw_exec = "MARKET" if is_close_to_ash else "LIMIT"
+            sw_entry = r2(current_price if sw_exec == "MARKET" else ash)
+            sw_risk = max(0.35, abs(sw_sl - sw_entry))
+            sw_tp1 = r2(asian_mid) if asian_mid else r2(sw_entry - sw_risk)
+            cand_tp2 = r2(asl + max(0.40, (ash - asl) * 0.15))
+            sw_tp2 = cand_tp2 if (sw_entry - cand_tp2) >= sw_risk * 1.55 else r2(sw_entry - sw_risk * 1.85)
+            sw_score = 84
+            sw_factors = [
+                f"🎯 กวาดสภาพคล่องหัวตลาดเอเชีย (Asian High {ash:.2f} Swept by +{max(0.0, sw_hi - ash):.2f} USD)",
+                "⚡ สถาบัน London/NY ทุบราคากลับเข้ากรอบ (Judas Swing Reversal)",
+                f"เป้าหมายทดสอบดุลยภาพกรอบเอเชีย ({sw_tp1:.2f}) และขอบล่าง ({sw_tp2:.2f})",
+            ]
+            session_sweep_setup = {
+                "setup_archetype": "SESSION_SWEEP",
+                "archetype_label_th": "🎯 Asian High Liquidity Sweep (Judas Swing)",
+                "bias": "BEARISH",
+                "side": "SELL",
+                "entry": sw_entry,
+                "stop": sw_sl,
+                "tp1": sw_tp1,
+                "target": sw_tp2,
+                "zone_low": r2(ash - atr_val * 0.15),
+                "zone_high": r2(sw_hi),
+                "confluence_score": sw_score,
+                "confluence_factors": sw_factors,
+                "execution_type": sw_exec,
+            }
+        elif asian_status == "ASIAN_LOW_SWEPT_BULLISH" and current_price >= (asl - atr_val * 0.35) and current_price <= (ash + atr_val * 0.2):
+            sw_lo = float(post_l or asl)
+            sw_sl = r2(sw_lo - max(0.60, atr_val * 0.20, spread_usd * 2.0))
+            is_close_to_asl = abs(current_price - asl) <= atr_val * 0.45
+            sw_exec = "MARKET" if is_close_to_asl else "LIMIT"
+            sw_entry = r2(current_price if sw_exec == "MARKET" else asl)
+            sw_risk = max(0.35, abs(sw_entry - sw_sl))
+            sw_tp1 = r2(asian_mid) if asian_mid else r2(sw_entry + sw_risk)
+            cand_tp2 = r2(ash - max(0.40, (ash - asl) * 0.15))
+            sw_tp2 = cand_tp2 if (cand_tp2 - sw_entry) >= sw_risk * 1.55 else r2(sw_entry + sw_risk * 1.85)
+            sw_score = 84
+            sw_factors = [
+                f"🎯 กวาดสภาพคล่องหางตลาดเอเชีย (Asian Low {asl:.2f} Swept by -{max(0.0, asl - sw_lo):.2f} USD)",
+                "⚡ สถาบัน London/NY ดันราคากลับเข้ากรอบ (Judas Swing Reversal)",
+                f"เป้าหมายทดสอบดุลยภาพกรอบเอเชีย ({sw_tp1:.2f}) และขอบบน ({sw_tp2:.2f})",
+            ]
+            session_sweep_setup = {
+                "setup_archetype": "SESSION_SWEEP",
+                "archetype_label_th": "🎯 Asian Low Liquidity Sweep (Judas Swing)",
+                "bias": "BULLISH",
+                "side": "BUY",
+                "entry": sw_entry,
+                "stop": sw_sl,
+                "tp1": sw_tp1,
+                "target": sw_tp2,
+                "zone_low": r2(sw_lo),
+                "zone_high": r2(asl + atr_val * 0.15),
+                "confluence_score": sw_score,
+                "confluence_factors": sw_factors,
+                "execution_type": sw_exec,
+            }
+
+    # 2. Detect HTF-Aligned M5 Micro-Pullback Setup:
+    htf_bias = (mtf_res or {}).get("overall_bias") or trend.get("bias")
+    micro_pullback_setup: Optional[Dict[str, Any]] = None
+    if htf_bias in ("BULLISH", "BEARISH") and scalp_info:
+        r_state = scalp_info.get("ribbon_state")
+        s_triggers = list(scalp_info.get("triggers") or [])
+        e9 = float(scalp_info.get("ema9") or current_price)
+        e21 = float(scalp_info.get("ema21") or (current_price - (atr_val * 0.5 if htf_bias == "BULLISH" else -atr_val * 0.5)))
+        has_bounce = any("Pullback" in t or "Hook" in t or "Squeeze" in t for t in s_triggers)
+
+        if htf_bias == "BULLISH" and (r_state == "BULL_RIBBON" or has_bounce):
+            mp_entry = r2(current_price)
+            mp_sl = r2(min(e21 - max(0.40, atr_val * 0.25), mp_entry - max(atr_val * 0.85, spread_usd * 2.5)))
+            mp_risk = max(0.35, mp_entry - mp_sl)
+            micro_pullback_setup = {
+                "setup_archetype": "MICRO_PULLBACK",
+                "archetype_label_th": "⚡ M5 Micro-Pullback ตามเทรนด์ใหญ่ H1/H4 (Bullish)",
+                "bias": "BULLISH",
+                "side": "BUY",
+                "entry": mp_entry,
+                "stop": mp_sl,
+                "tp1": r2(mp_entry + mp_risk * 1.05),
+                "target": r2(mp_entry + mp_risk * 2.10),
+                "zone_low": r2(min(e9, e21) - atr_val * 0.15),
+                "zone_high": r2(max(e9, e21) + atr_val * 0.15),
+                "confluence_score": 78,
+                "confluence_factors": [
+                    f"📈 สอดคล้องเทรนด์ใหญ่ H1/H4 ({htf_bias})",
+                    f"⚡ EMA9/21 Ribbon ({r_state}) @ {e9:.2f}",
+                    *(s_triggers[:2] if s_triggers else []),
+                ],
+                "execution_type": "MARKET" if abs(current_price - e9) <= atr_val * 0.35 else "LIMIT",
+            }
+        elif htf_bias == "BEARISH" and (r_state == "BEAR_RIBBON" or has_bounce):
+            mp_entry = r2(current_price)
+            mp_sl = r2(max(e21 + max(0.40, atr_val * 0.25), mp_entry + max(atr_val * 0.85, spread_usd * 2.5)))
+            mp_risk = max(0.35, mp_sl - mp_entry)
+            micro_pullback_setup = {
+                "setup_archetype": "MICRO_PULLBACK",
+                "archetype_label_th": "⚡ M5 Micro-Pullback ตามเทรนด์ใหญ่ H1/H4 (Bearish)",
+                "bias": "BEARISH",
+                "side": "SELL",
+                "entry": mp_entry,
+                "stop": mp_sl,
+                "tp1": r2(mp_entry - mp_risk * 1.05),
+                "target": r2(mp_entry - mp_risk * 2.10),
+                "zone_low": r2(min(e9, e21) - atr_val * 0.15),
+                "zone_high": r2(max(e9, e21) + atr_val * 0.15),
+                "confluence_score": 78,
+                "confluence_factors": [
+                    f"📈 สอดคล้องเทรนด์ใหญ่ H1/H4 ({htf_bias})",
+                    f"⚡ EMA9/21 Ribbon ({r_state}) @ {e9:.2f}",
+                    *(s_triggers[:2] if s_triggers else []),
+                ],
+                "execution_type": "MARKET" if abs(current_price - e9) <= atr_val * 0.35 else "LIMIT",
+            }
+
+    # Archetype Selection Hierarchy:
+    # 1. Session Liquidity Sweep (Judas Swing) - real-time high conviction
+    # 2. Scalping mode (if is_scalp)
+    # 3. Order Block within reachable distance
+    # 4. Micro-Pullback in direction of HTF trend
+    # 5. Order Block / S&R fallback
+    setup_archetype = "ORDER_BLOCK_PULLBACK"
+    archetype_label_th = "🏛️ SMC Order Block Pullback"
+    preset_stop: Optional[float] = None
+    preset_tp1: Optional[float] = None
+    preset_target: Optional[float] = None
+
+    if session_sweep_setup is not None:
+        setup_archetype = session_sweep_setup["setup_archetype"]
+        archetype_label_th = session_sweep_setup["archetype_label_th"]
+        bias = session_sweep_setup["bias"]
+        side = session_sweep_setup["side"]
+        entry = session_sweep_setup["entry"]
+        preset_stop = session_sweep_setup["stop"]
+        preset_tp1 = session_sweep_setup["tp1"]
+        preset_target = session_sweep_setup["target"]
+        zone_low = session_sweep_setup["zone_low"]
+        zone_high = session_sweep_setup["zone_high"]
+        confluence_score = session_sweep_setup["confluence_score"]
+        confluence_factors = list(session_sweep_setup["confluence_factors"])
+    elif is_scalp and scalp_info:
         # In Scalping mode, prioritize fast momentum and tight EMA 9/21 pullbacks
+        setup_archetype = "SCALPING_MOMENTUM"
+        archetype_label_th = "⚡ สัญญาณสเกลป์ความเร็วสูง (Fast Scalp)"
         bias = scalp_info.get("scalp_bias", "BULLISH")
         side = "BUY" if bias == "BULLISH" else "SELL"
         e9 = float(scalp_info.get("ema9") or current_price)
@@ -513,22 +672,51 @@ def build_trade_setup(
             f"⚡ EMA9/21 Scalp Ribbon ({scalp_info.get('ribbon_state', '-')})",
             *list(scalp_info.get("triggers") or []),
         ]
-    elif chosen_ob:
+    elif chosen_ob and chosen_ob["distance_usd"] <= atr_val * 1.6:
+        setup_archetype = "ORDER_BLOCK_PULLBACK"
+        archetype_label_th = "🏛️ SMC Order Block Pullback"
         bias = chosen_ob["bias"]
         side = "BUY" if bias == "BULLISH" else "SELL"
         zone_low, zone_high = chosen_ob["low"], chosen_ob["high"]
         if side == "BUY":
-            # Always give entry strictly in advance below current_price (BUY LIMIT at fresh zone)
             target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price <= zone_high else zone_high
             entry = min(round(current_price - max(0.25, atr_val * 0.15), 2), target_lvl)
         else:
-            # Always give entry strictly in advance above current_price (SELL LIMIT at fresh zone)
+            target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price >= zone_low else zone_low
+            entry = max(round(current_price + max(0.25, atr_val * 0.15), 2), target_lvl)
+        confluence_score = chosen_ob["confluence_score"]
+        confluence_factors = list(chosen_ob["confluence_factors"])
+    elif micro_pullback_setup is not None and any("Pullback" in t or "Hook" in t for t in list(scalp_info.get("triggers") or [])):
+        setup_archetype = micro_pullback_setup["setup_archetype"]
+        archetype_label_th = micro_pullback_setup["archetype_label_th"]
+        bias = micro_pullback_setup["bias"]
+        side = micro_pullback_setup["side"]
+        entry = micro_pullback_setup["entry"]
+        preset_stop = micro_pullback_setup["stop"]
+        preset_tp1 = micro_pullback_setup["tp1"]
+        preset_target = micro_pullback_setup["target"]
+        zone_low = micro_pullback_setup["zone_low"]
+        zone_high = micro_pullback_setup["zone_high"]
+        confluence_score = micro_pullback_setup["confluence_score"]
+        confluence_factors = list(micro_pullback_setup["confluence_factors"])
+    elif chosen_ob:
+        setup_archetype = "ORDER_BLOCK_PULLBACK"
+        archetype_label_th = "🏛️ SMC Order Block Pullback"
+        bias = chosen_ob["bias"]
+        side = "BUY" if bias == "BULLISH" else "SELL"
+        zone_low, zone_high = chosen_ob["low"], chosen_ob["high"]
+        if side == "BUY":
+            target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price <= zone_high else zone_high
+            entry = min(round(current_price - max(0.25, atr_val * 0.15), 2), target_lvl)
+        else:
             target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price >= zone_low else zone_low
             entry = max(round(current_price + max(0.25, atr_val * 0.15), 2), target_lvl)
         confluence_score = chosen_ob["confluence_score"]
         confluence_factors = list(chosen_ob["confluence_factors"])
     else:
         # Fallback when no clean OB is nearby: plan a Pending Limit at nearest S&R / FVG ahead of price
+        setup_archetype = "SR_LEVEL"
+        archetype_label_th = "📊 แนวรับต้านสำคัญ (Key S&R)"
         mtf_bias = (mtf_res or {}).get("overall_bias")
         bias = (
             trend["bias"]
@@ -683,7 +871,18 @@ def build_trade_setup(
     min_target_rr = 1.25 if is_scalp else 1.60
     default_target_rr = 1.45 if is_scalp else 2.20
     combined_sr = sr_zones + htf_zones + hist_sr
-    if side == "BUY":
+    if preset_stop is not None and preset_target is not None:
+        stop = preset_stop
+        tp1 = preset_tp1 if preset_tp1 is not None else r2(entry + (entry - stop) if side == "BUY" else entry - (stop - entry))
+        target = preset_target
+        risk = max(0.35, abs(entry - stop))
+        if side == "BUY":
+            sweep_zone_price = r2(stop - atr_val * 0.7)
+            invalidation_price = r2(stop - atr_val * 0.45)
+        else:
+            sweep_zone_price = r2(stop + atr_val * 0.7)
+            invalidation_price = r2(stop + atr_val * 0.45)
+    elif side == "BUY":
         raw_stop = min(zone_low - sl_buffer, entry - max(atr_val * min_sl_atr, spread_usd * 2.5))
         if is_scalp and scalp_info.get("ema21"):
             e21 = float(scalp_info["ema21"])
@@ -764,10 +963,15 @@ def build_trade_setup(
     dist_to_entry = abs(current_price - entry)
     is_advance_entry = True if execution_type == "MARKET" else ((entry <= current_price) if side == "BUY" else (entry >= current_price))
 
+    available_setups = [s for s in [session_sweep_setup, micro_pullback_setup] if s is not None]
+
     return {
         "symbol": "XAUUSD",
         "trading_style": "scalping" if is_scalp else "intraday",
         "style_label_th": "⚡ โหมดเทรดสั้น (Gold Scalping)" if is_scalp else "🎯 โหมดเทรดรอบปกติ (Intraday SMC)",
+        "setup_archetype": setup_archetype,
+        "archetype_label_th": archetype_label_th,
+        "available_setups": available_setups,
         "side": side,
         "execution_type": execution_type,
         "order_type": order_type,
@@ -836,6 +1040,7 @@ def analyze_smc(
         "fvgs": fvgs,
         "liquidity_pools": pools,
         "trade_setup": setup,
+        "available_setups": setup.get("available_setups", []),
         "chart_patterns": st.get("chart_patterns"),
     }
 
