@@ -106,25 +106,27 @@ class OrderLifecycleManager:
     def register_trade_setup(
         self,
         risk_ticket: Dict[str, Any],
-        smc_setup: Dict[str, Any],
-        current_price: float,
+        smc_setup: Optional[Dict[str, Any]] = None,
+        current_price: float = 0.0,
         timeframe: str = "M5",
         trading_style: str = "intraday",
         force_replace: bool = False,
+        **kwargs,
     ) -> Optional[Dict[str, Any]]:
         """Register a new trade setup into active tracking.
         If an order is already active (PENDING or FILLED), keeps the existing order unless force_replace=True."""
+        setup = smc_setup or kwargs.get("trade_setup") or kwargs.get("smc") or {}
         if self.has_active_order() and not force_replace:
             return self.active_order
 
         # Only accept setups that passed risk gate and have a valid direction
-        side = str(risk_ticket.get("side") or smc_setup.get("side") or "").upper()
+        side = str(risk_ticket.get("side") or setup.get("side") or "").upper()
         if side not in ("BUY", "SELL"):
             return None
 
         # Check if setup is market execution or pending limit
-        exec_type = str(smc_setup.get("execution_type") or "LIMIT").upper()
-        if "NOW" in str(smc_setup.get("order_type") or "") or "NOW" in str(risk_ticket.get("order_type") or ""):
+        exec_type = str(setup.get("execution_type") or risk_ticket.get("execution_type") or "LIMIT").upper()
+        if "NOW" in str(setup.get("order_type") or "") or "NOW" in str(risk_ticket.get("order_type") or ""):
             exec_type = "MARKET"
 
         entry_mt5 = r2(risk_ticket.get("entry_mt5") or current_price)
@@ -165,8 +167,8 @@ class OrderLifecycleManager:
             "actual_risk_usd": actual_risk_usd,
             "potential_profit_usd": float(risk_ticket.get("potential_profit_usd") or 100.0),
             "reward_risk": reward_risk,
-            "confluence_score": int(smc_setup.get("confluence_score") or 70),
-            "confluence_factors": list(smc_setup.get("confluence_factors") or []),
+            "confluence_score": int(setup.get("confluence_score") or 70),
+            "confluence_factors": list(setup.get("confluence_factors") or []),
             "created_ts": now_ts,
             "created_bkk": _now_bkk_str(now_ts),
             "filled_ts": now_ts if is_filled else None,

@@ -626,6 +626,15 @@ class MarketDataHub:
         self.cached_macro: Optional[Dict[str, Any]] = None
         self._rng = random.Random(99)
 
+    @property
+    def latest_spot(self) -> Dict[str, Any]:
+        """Convenience property returning latest spot quote dictionary, or empty dict if none."""
+        return self.latest_spot_quote or {}
+
+    @latest_spot.setter
+    def latest_spot(self, val: Optional[Dict[str, Any]]) -> None:
+        self.latest_spot_quote = val
+
     def get_bars(self, timeframe: str = "M5", force_refresh: bool = False, ttl_seconds: float = 12.0) -> Dict[str, Any]:
         tf = timeframe.upper()
         now = time.time()

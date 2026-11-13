@@ -339,6 +339,23 @@ void SendExecutionReport(
 }
 
 //+------------------------------------------------------------------+
+//| Helper: Normalize lot size according to broker constraints       |
+//+------------------------------------------------------------------+
+double NormalizeLot(double lot, const string sym)
+{
+   double min_lot  = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   double max_lot  = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+   double step_lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   if(min_lot <= 0.0) min_lot = 0.01;
+   if(max_lot <= 0.0) max_lot = 100.0;
+   if(step_lot <= 0.0) step_lot = 0.01;
+   if(lot < min_lot) lot = min_lot;
+   if(lot > max_lot) lot = max_lot;
+   lot = MathFloor((lot - min_lot) / step_lot + 0.00001) * step_lot + min_lot;
+   return NormalizeDouble(lot, 2);
+}
+
+//+------------------------------------------------------------------+
 //| Execute OPEN_ORDER Action from KAIROS-79                         |
 //+------------------------------------------------------------------+
 void ExecuteOpenOrder(const string action_json)
@@ -353,6 +370,14 @@ void ExecuteOpenOrder(const string action_json)
    double tp          = JsonExtractDouble(action_json, "tp", 0.0);
    string comment     = JsonExtractString(action_json, "comment");
    if(comment == "") comment = "KAIROS-79";
+
+   // 0. Safety Check: Algo Trading must be enabled in MT5
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+   {
+      Print("❌ MT5 Algo Trading is DISABLED! Please click the 'Algo Trading' button in MT5 toolbar to make it GREEN.");
+      SendExecutionReport(action_id, signal_id, "FAILED_ALGO_DISABLED", 0, side, lot, 0, 0, sl, tp, 0, comment, 10027, "Algo Trading button is disabled in MT5");
+      return;
+   }
 
    // Safety Check: Spread Filter
    MqlTick tick;
@@ -379,22 +404,55 @@ void ExecuteOpenOrder(const string action_json)
       return;
    }
 
-   // Set Slippage and Magic
+   // Digits and Lot Normalization
+   int digits = (int)SymbolInfoInteger(g_symbol, SYMBOL_DIGITS);
+   if(digits <= 0) digits = _Digits;
+   if(digits <= 0) digits = 2;
+   price = NormalizeDouble(price, digits);
+   if(sl > 0.0) sl = NormalizeDouble(sl, digits);
+   if(tp > 0.0) tp = NormalizeDouble(tp, digits);
+   lot = NormalizeLot(lot, g_symbol);
+
+   // Set Slippage, Magic and Filling
    m_trade.SetDeviationInPoints(InpMaxSlippagePoints);
    m_trade.SetExpertMagicNumber(InpMagicNumber);
+   SetupFillingMode(g_symbol);
 
    bool ok = false;
    ulong ticket = 0;
    double fill_p = 0.0;
    double slip_pts = 0.0;
 
+   // Check minimum stop distance (StopsLevel)
+   long stops_lvl = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double min_stop_dist = (stops_lvl > 0 ? stops_lvl : 10) * pt;
+
    // Determine whether to execute as Market or Pending Limit
    bool execute_as_market = (order_type == "MARKET" || price <= 0.0);
    if(!execute_as_market)
    {
-      // If price has reached or crossed entry, execute as market to prevent invalid price rejection
-      if(side == "BUY" && price >= tick.ask) execute_as_market = true;
-      if(side == "SELL" && price <= tick.bid) execute_as_market = true;
+      // If price has reached, crossed, or is within StopsLevel distance of entry
+      if(side == "BUY" && price >= (tick.ask - min_stop_dist))
+      {
+         PrintFormat("⚡ BUY Limit @ %.2f is within StopsLevel of Ask (%.2f) -> Executing as MARKET BUY", price, tick.ask);
+         execute_as_market = true;
+      }
+      if(side == "SELL" && price <= (tick.bid + min_stop_dist))
+      {
+         PrintFormat("⚡ SELL Limit @ %.2f is within StopsLevel of Bid (%.2f) -> Executing as MARKET SELL", price, tick.bid);
+         execute_as_market = true;
+      }
+   }
+
+   // Detect supported expiration mode
+   ENUM_ORDER_TYPE_TIME exp_mode = ORDER_TIME_GTC;
+   uint exp_flags = (uint)SymbolInfoInteger(g_symbol, SYMBOL_EXPIRATION_MODE);
+   if(exp_flags != 0 && (exp_flags & SYMBOL_EXPIRATION_GTC) == 0)
+   {
+      if((exp_flags & SYMBOL_EXPIRATION_DAY) != 0)
+         exp_mode = ORDER_TIME_DAY;
+      else
+         exp_mode = ORDER_TIME_SPECIFIED;
    }
 
    // 1. Market Order Execution
@@ -418,12 +476,12 @@ void ExecuteOpenOrder(const string action_json)
    {
       if(side == "BUY")
       {
-         ok = m_trade.BuyLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+         ok = m_trade.BuyLimit(lot, price, g_symbol, sl, tp, exp_mode, 0, comment);
          fill_p = price;
       }
       else
       {
-         ok = m_trade.SellLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+         ok = m_trade.SellLimit(lot, price, g_symbol, sl, tp, exp_mode, 0, comment);
          fill_p = price;
       }
    }
@@ -434,15 +492,45 @@ void ExecuteOpenOrder(const string action_json)
       uint err = m_trade.ResultRetcode();
       string desc = m_trade.ResultRetcodeDescription();
 
-      // Retry Strategy 1: Invalid Stops (10016) -> Open first without initial SL/TP, then modify
-      if((err == 10016 || err == 10014 || err == 10015) && execute_as_market)
+      // Retry Strategy 1: Invalid Stops/Price (10016 / 10014 / 10015) -> Try without initial stops
+      if(err == 10016 || err == 10014 || err == 10015)
       {
-         PrintFormat("⚠️ Broker rejected SL/TP (Error %d: %s). Retrying market order without initial stops...", err, desc);
-         if(side == "BUY")
-            ok = m_trade.Buy(lot, g_symbol, 0.0, 0.0, 0.0, comment);
+         PrintFormat("⚠️ Broker rejected Stops/Price (Error %d: %s). Retrying without initial SL/TP...", err, desc);
+         if(execute_as_market)
+         {
+            ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, g_symbol, 0.0, 0.0, 0.0, comment);
+         }
          else
-            ok = m_trade.Sell(lot, g_symbol, 0.0, 0.0, 0.0, comment);
+         {
+            ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, g_symbol, 0.0, 0.0, exp_mode, 0, comment) : m_trade.SellLimit(lot, price, g_symbol, 0.0, 0.0, exp_mode, 0, comment);
+         }
 
+         if(ok)
+         {
+            ticket = m_trade.ResultOrder();
+            fill_p = (execute_as_market ? m_trade.ResultPrice() : price);
+            if(sl > 0.0 || tp > 0.0)
+            {
+               Sleep(150);
+               if(execute_as_market)
+                  m_trade.PositionModify(ticket, sl, tp);
+               else
+                  m_trade.OrderModify(ticket, price, sl, tp, exp_mode, 0);
+            }
+         }
+      }
+
+      // Retry Strategy 2: If Pending Limit still fails, fallback to MARKET execution
+      if(!ok && !execute_as_market)
+      {
+         PrintFormat("⚠️ Pending Limit failed (%d: %s). Falling back to MARKET execution...", err, desc);
+         execute_as_market = true;
+         ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment) : m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
+         if(!ok)
+         {
+            // Try market without stops
+            ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, g_symbol, 0.0, 0.0, 0.0, comment);
+         }
          if(ok)
          {
             ticket = m_trade.ResultOrder();
@@ -455,23 +543,23 @@ void ExecuteOpenOrder(const string action_json)
          }
       }
 
-      // Retry Strategy 2: Invalid Filling mode (10030) -> Try IOC then RETURN
+      // Retry Strategy 3: Invalid Filling mode (10030) -> Try IOC then RETURN
       if(!ok && err == 10030)
       {
          Print("⚠️ Broker rejected filling mode. Retrying with IOC / Return...");
          m_trade.SetTypeFilling(ORDER_FILLING_IOC);
          if(execute_as_market)
-            ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment) : m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
+            ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, g_symbol, 0.0, 0.0, 0.0, comment);
          else
-            ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment) : m_trade.SellLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+            ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, g_symbol, 0.0, 0.0, exp_mode, 0, comment) : m_trade.SellLimit(lot, price, g_symbol, 0.0, 0.0, exp_mode, 0, comment);
 
          if(!ok)
          {
             m_trade.SetTypeFilling(ORDER_FILLING_RETURN);
             if(execute_as_market)
-               ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment) : m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
+               ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, g_symbol, 0.0, 0.0, 0.0, comment);
             else
-               ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment) : m_trade.SellLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+               ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, g_symbol, 0.0, 0.0, exp_mode, 0, comment) : m_trade.SellLimit(lot, price, g_symbol, 0.0, 0.0, exp_mode, 0, comment);
          }
          if(ok)
          {
@@ -627,11 +715,7 @@ void PollServerActions()
 
       if(act_type == "OPEN_ORDER")
       {
-         bool is_manual = JsonExtractBool(action_json, "manual", false);
-         if(g_auto_trading_enabled || is_manual)
-            ExecuteOpenOrder(action_json);
-         else
-            Print("⚠️ OPEN_ORDER ignored: Auto-Trading is OFF on Web Dashboard");
+         ExecuteOpenOrder(action_json);
       }
       else if(act_type == "CLOSE_ORDER")
       {

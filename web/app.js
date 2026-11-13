@@ -991,7 +991,10 @@
       if (el("orderStatusMsg")) {
         el("orderStatusMsg").textContent = `โอกาสชนะตามสถิติ ${probs.win_pct || 0}% ยังไม่เกิน 50% — กำลังเฝ้ารอโซน ${watchPrice} และรอความได้เปรียบ`;
       }
-      if (el("btnSendOrderToMT5")) el("btnSendOrderToMT5").style.display = "none";
+      if (el("btnSendOrderToMT5")) {
+        const hasTicket = activeOrd && activeOrd.broker_ticket;
+        el("btnSendOrderToMT5").style.display = (!hasTicket && activeOrd) ? "inline-flex" : "none";
+      }
       if (el("btnOrderFillNow")) el("btnOrderFillNow").style.display = "none";
       if (el("btnOrderCancel")) el("btnOrderCancel").style.display = "none";
     } else {
@@ -1035,8 +1038,8 @@
         }
       }
       if (el("btnSendOrderToMT5")) {
-        const isAlreadyFilled = activeOrd && activeOrd.status === "FILLED";
-        el("btnSendOrderToMT5").style.display = (!isAlreadyFilled && winProbPassed && tk.verdict !== "REJECT") ? "inline-flex" : "none";
+        const hasTicket = activeOrd && activeOrd.broker_ticket;
+        el("btnSendOrderToMT5").style.display = (!hasTicket && tk.verdict !== "REJECT") ? "inline-flex" : "none";
       }
       if (el("btnOrderFillNow")) el("btnOrderFillNow").style.display = "inline-flex";
       if (el("btnOrderCancel")) el("btnOrderCancel").style.display = "inline-flex";
@@ -1543,8 +1546,17 @@
     };
 
     if (el("btnSendOrderToMT5")) {
-      el("btnSendOrderToMT5").addEventListener("click", () => {
+      el("btnSendOrderToMT5").addEventListener("click", async () => {
         sendWs({ action: "send_order_to_mt5" });
+        try {
+          await fetch("/api/ea/send_order", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+        } catch (e) {
+          console.warn("send_order HTTP fallback:", e);
+        }
         showToast("🚀 ส่งคำสั่งซื้อขายไปยัง MetaTrader 5 เรียบร้อย!");
       });
     }

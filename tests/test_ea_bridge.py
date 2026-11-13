@@ -245,6 +245,25 @@ class TestEABridge(unittest.TestCase):
             self.assertEqual(resp_exec["status"], "ok")
             self.assertEqual(resp_exec["execution"]["ticket"], 778899)
 
+            # 5. Test POST /api/ea/send_order (manual dispatch endpoint)
+            srv.core.ea_bridge.action_queue.clear()
+            req_send_order = (
+                b"POST /api/ea/send_order HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Content-Length: 2\r\n"
+                b"Content-Type: application/json\r\n\r\n{}"
+            )
+            r5 = asyncio.StreamReader()
+            r5.feed_data(req_send_order)
+            r5.feed_eof()
+            w5 = _MemoryWriter()
+            await srv.handle_client(r5, w5)
+
+            resp_send_order = json.loads(bytes(w5.buffer).split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertEqual(resp_send_order["status"], "ok")
+            self.assertEqual(len(srv.core.ea_bridge.action_queue), 1)
+            self.assertEqual(srv.core.ea_bridge.action_queue[0]["type"], "OPEN_ORDER")
+
         asyncio.run(_run())
 
     def test_polling_activity_records_keepalive(self):

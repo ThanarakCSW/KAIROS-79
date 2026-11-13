@@ -303,29 +303,28 @@ class TradingAssistantCore:
         if self.ea_bridge.auto_trading_enabled:
             # Case 1: Primary active order needing dispatch
             act_ord = self.order_manager.active_order
-            if (
-                act_ord
-                and act_ord.get("status") in ("PENDING", "FILLED")
-                and act_ord.get("order_id")
-                and act_ord.get("order_id") not in self.ea_bridge.executed_signal_ids
-            ):
+            if act_ord and act_ord.get("status") in ("PENDING", "FILLED") and act_ord.get("order_id"):
                 sig_id = act_ord["order_id"]
-                self.ea_bridge.enqueue_action(
-                    action_type="OPEN_ORDER",
-                    payload={
-                        "side": act_ord["side"],
-                        "order_type": act_ord.get("execution_type", "LIMIT"),
-                        "symbol": act_ord.get("symbol", "XAUUSD"),
-                        "lot": float(act_ord.get("lot_size") or risk_ticket.get("lot_size") or 0.10),
-                        "price": float(act_ord.get("entry_mt5") or cur_p),
-                        "sl": float(act_ord.get("stop_mt5") or 0.0),
-                        "tp": float(act_ord.get("target_mt5") or 0.0),
-                        "tp1": float(act_ord.get("tp1_mt5") or 0.0),
-                        "magic": 797979,
-                        "comment": f"K79-{act_ord['side']}",
-                    },
-                    signal_id=sig_id,
-                )
+                has_ticket = bool(act_ord.get("broker_ticket"))
+                is_in_queue = any(a.get("signal_id") == sig_id for a in self.ea_bridge.action_queue)
+                if not has_ticket and not is_in_queue:
+                    self.ea_bridge.executed_signal_ids.discard(sig_id)
+                    self.ea_bridge.enqueue_action(
+                        action_type="OPEN_ORDER",
+                        payload={
+                            "side": act_ord["side"],
+                            "order_type": act_ord.get("execution_type", "LIMIT"),
+                            "symbol": act_ord.get("symbol", "XAUUSD"),
+                            "lot": float(act_ord.get("lot_size") or risk_ticket.get("lot_size") or 0.10),
+                            "price": float(act_ord.get("entry_mt5") or cur_p),
+                            "sl": float(act_ord.get("stop_mt5") or 0.0),
+                            "tp": float(act_ord.get("target_mt5") or 0.0),
+                            "tp1": float(act_ord.get("tp1_mt5") or 0.0),
+                            "magic": 797979,
+                            "comment": f"K79-{act_ord['side']}",
+                        },
+                        signal_id=sig_id,
+                    )
             elif (
                 order_event
                 and order_event.get("type") == "NEW_ORDER_REGISTERED"
@@ -875,6 +874,70 @@ class AssistantServer:
             except Exception:
                 pass
 
+    def dispatch_order_to_mt5(self) -> Dict[str, Any]:
+        """Manually or explicitly dispatch the current setup / active order into MT5 EA queue."""
+        act = self.core.order_manager.active_order
+        last_st = self.core.last_state or {}
+        rt = last_st.get("risk_ticket") or {}
+        cur_p = float(
+            (self.core.hub.latest_spot or {}).get("price")
+            or (act.get("entry_mt5") if act else 0.0)
+            or (rt.get("entry_mt5") or 0.0)
+            or (self.core.hub.fixture_bars[-1]["c"] if self.core.hub.fixture_bars else 2650.0)
+        )
+        side = (act.get("side") if act else None) or rt.get("side") or "BUY"
+
+        # If no active order exists, register one so Web UI tracks it and displays PnL
+        if not act:
+            stop_p = float(rt.get("stop_mt5") or (cur_p - 5.0 if side == "BUY" else cur_p + 5.0))
+            target_p = float(rt.get("target_mt5") or (cur_p + 10.0 if side == "BUY" else cur_p - 10.0))
+            tp1_p = float(rt.get("tp1_mt5") or (cur_p + 5.0 if side == "BUY" else cur_p - 5.0))
+            lot = float(rt.get("lot_size") or 0.10)
+            self.core.order_manager.register_trade_setup(
+                risk_ticket={
+                    "side": side,
+                    "entry_mt5": cur_p,
+                    "stop_mt5": stop_p,
+                    "tp1_mt5": tp1_p,
+                    "target_mt5": target_p,
+                    "lot_size": lot,
+                    "actual_risk_usd": float(rt.get("actual_risk_usd") or 50.0),
+                    "potential_profit_usd": float(rt.get("potential_profit_usd") or 100.0),
+                    "reward_risk": 2.0,
+                    "order_type": f"{side} NOW (Market)",
+                    "execution_type": "MARKET",
+                },
+                trade_setup=last_st.get("smc", {}).get("trade_setup") or {},
+                current_price=cur_p,
+                timeframe=self.core.timeframe,
+                trading_style=self.core.trading_style,
+                force_replace=True,
+            )
+            act = self.core.order_manager.active_order
+
+        sig_id = (act.get("order_id") if act else None) or rt.get("fingerprint") or f"manual_{int(time.time())}"
+        # Discard so manual dispatch can re-queue even if already queued
+        self.core.ea_bridge.executed_signal_ids.discard(sig_id)
+
+        action = self.core.ea_bridge.enqueue_action(
+            action_type="OPEN_ORDER",
+            payload={
+                "side": side,
+                "order_type": "MARKET",
+                "symbol": "XAUUSD",
+                "lot": float((act.get("lot_size") if act else None) or rt.get("lot_size") or 0.10),
+                "price": float((act.get("entry_mt5") if act else None) or cur_p),
+                "sl": float((act.get("stop_mt5") if act else None) or rt.get("stop_mt5") or 0.0),
+                "tp": float((act.get("target_mt5") if act else None) or rt.get("target_mt5") or 0.0),
+                "tp1": float((act.get("tp1_mt5") if act else None) or rt.get("tp1_mt5") or 0.0),
+                "magic": 797979,
+                "comment": f"K79-{side}-MANUAL",
+                "manual": True,
+            },
+            signal_id=sig_id,
+        )
+        return {"status": "ok", "action": action, "active_order": act}
+
     async def handle_ws_command(self, client: WebSocketClient, cmd: Dict[str, Any]) -> None:
         action = str(cmd.get("action") or "")
         if action == "change_tf":
@@ -955,60 +1018,7 @@ class AssistantServer:
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
             await self.broadcast(state)
         elif action == "send_order_to_mt5":
-            act = self.core.order_manager.active_order
-            last_st = self.core.last_state or {}
-            rt = last_st.get("risk_ticket") or {}
-            cur_p = float(self.core.hub.latest_spot.get("price") or (act.get("entry_mt5") if act else 0.0) or (rt.get("entry_mt5") or 0.0))
-            side = (act.get("side") if act else None) or rt.get("side") or "BUY"
-            sig_id = (act.get("order_id") if act else None) or rt.get("fingerprint") or f"manual_{int(time.time())}"
-            # Discard so manual dispatch can re-queue even if already queued
-            self.core.ea_bridge.executed_signal_ids.discard(sig_id)
-
-            # If no active order exists, register one so Web UI tracks it and displays PnL
-            if not act:
-                stop_p = float(rt.get("stop_mt5") or (cur_p - 5.0 if side == "BUY" else cur_p + 5.0))
-                target_p = float(rt.get("target_mt5") or (cur_p + 10.0 if side == "BUY" else cur_p - 10.0))
-                tp1_p = float(rt.get("tp1_mt5") or (cur_p + 5.0 if side == "BUY" else cur_p - 5.0))
-                lot = float(rt.get("lot_size") or 0.10)
-                self.core.order_manager.register_trade_setup(
-                    risk_ticket={
-                        "side": side,
-                        "entry_mt5": cur_p,
-                        "stop_mt5": stop_p,
-                        "tp1_mt5": tp1_p,
-                        "target_mt5": target_p,
-                        "lot_size": lot,
-                        "actual_risk_usd": float(rt.get("actual_risk_usd") or 50.0),
-                        "potential_profit_usd": float(rt.get("potential_profit_usd") or 100.0),
-                        "reward_risk": 2.0,
-                        "order_type": f"{side} NOW (Market)",
-                        "execution_type": "MARKET",
-                    },
-                    trade_setup=last_st.get("smc", {}).get("trade_setup") or {},
-                    current_price=cur_p,
-                    timeframe=self.core.timeframe,
-                    trading_style=self.core.trading_style,
-                    force_replace=True,
-                )
-                act = self.core.order_manager.active_order
-
-            self.core.ea_bridge.enqueue_action(
-                action_type="OPEN_ORDER",
-                payload={
-                    "side": side,
-                    "order_type": "MARKET",
-                    "symbol": "XAUUSD",
-                    "lot": float((act.get("lot_size") if act else None) or rt.get("lot_size") or 0.10),
-                    "price": float((act.get("entry_mt5") if act else None) or cur_p),
-                    "sl": float((act.get("stop_mt5") if act else None) or rt.get("stop_mt5") or 0.0),
-                    "tp": float((act.get("target_mt5") if act else None) or rt.get("target_mt5") or 0.0),
-                    "tp1": float((act.get("tp1_mt5") if act else None) or rt.get("tp1_mt5") or 0.0),
-                    "magic": 797979,
-                    "comment": f"K79-{side}-MANUAL",
-                    "manual": True,
-                },
-                signal_id=sig_id,
-            )
+            self.dispatch_order_to_mt5()
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
             await self.broadcast(state)
         elif action == "scan_new_setup":
@@ -1227,6 +1237,13 @@ class AssistantServer:
                     "ea_bridge": self.core.ea_bridge.get_status_dict(),
                 },
             )
+            return
+
+        if path == "/api/ea/send_order" and method == "POST":
+            res = self.dispatch_order_to_mt5()
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+            await self.send_http_json(writer, 200, res)
             return
 
         if path == "/api/ea/status" and method == "GET":
