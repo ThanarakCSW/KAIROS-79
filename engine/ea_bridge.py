@@ -197,6 +197,11 @@ class EABridgeManager:
         for act in pending:
             act["status"] = "IN_FLIGHT"
             act["dispatched_at"] = int(time.time())
+            # Merge payload keys to top level for ultra-simple EA parsing
+            if isinstance(act.get("payload"), dict):
+                for k, v in act["payload"].items():
+                    if k not in act:
+                        act[k] = v
         # Clear active queue so they are not sent twice
         self.action_history.extend(pending)
         self.action_history = self.action_history[-100:]

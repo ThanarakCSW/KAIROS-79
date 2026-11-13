@@ -699,13 +699,30 @@ void PollServerActions()
    int act_pos = StringFind(resp, "\"actions\":[");
    if(act_pos < 0) return;
 
-   // Find individual action objects
+   // Find individual action objects with proper brace depth tracking
    int search_pos = act_pos + 10;
-   while(search_pos < StringLen(resp))
+   int resp_len = StringLen(resp);
+   while(search_pos < resp_len)
    {
       int start_obj = StringFind(resp, "{", search_pos);
       if(start_obj < 0) break;
-      int end_obj = StringFind(resp, "}", start_obj);
+
+      int depth = 0;
+      int end_obj = -1;
+      for(int i = start_obj; i < resp_len; i++)
+      {
+         ushort ch = StringGetCharacter(resp, i);
+         if(ch == '{') depth++;
+         else if(ch == '}')
+         {
+            depth--;
+            if(depth == 0)
+            {
+               end_obj = i;
+               break;
+            }
+         }
+      }
       if(end_obj < 0) break;
 
       string action_json = StringSubstr(resp, start_obj, end_obj - start_obj + 1);
