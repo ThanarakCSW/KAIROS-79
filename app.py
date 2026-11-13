@@ -776,6 +776,8 @@ class AssistantServer:
                 }
             elif not spot and str(self.core.hub.source).startswith("mt5_broker"):
                 spot = await asyncio.to_thread(fetch_mt5_live_tick, self.core.hub.preferred_symbol)
+            if not spot:
+                spot = await asyncio.to_thread(fetch_live_spot_xauusd)
 
             if spot:
                 self.core.hub.latest_spot_quote = spot
