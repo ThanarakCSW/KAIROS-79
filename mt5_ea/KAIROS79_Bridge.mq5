@@ -24,7 +24,7 @@ input int      InpHeartbeatIntervalSec = 2;                    // Heartbeat Inte
 input group "=== Trading Safety & Execution ==="
 input ulong    InpMagicNumber       = 797979;                  // Magic Number for KAIROS-79
 input ulong    InpMaxSlippagePoints = 35;                      // Max Allowed Slippage (points)
-input double   InpMaxSpreadPoints   = 50.0;                    // Max Allowed Spread (points)
+input double   InpMaxSpreadPoints   = 150.0;                   // Max Allowed Spread (points or $1.50)
 input string   InpSymbolOverride    = "";                      // Symbol (blank = Chart Symbol)
 input bool     InpAutoDetectFilling = true;                    // Auto detect FOK/IOC/Return
 
@@ -155,7 +155,7 @@ bool SendHttpRequest(const string method, const string endpoint, const string po
    int timeout_ms = 2500;
 
    if(StringLen(post_data) > 0)
-      StringToCharArray(post_data, post_bytes, 0, WHOLE_ARRAY, CP_UTF8);
+      StringToCharArray(post_data, post_bytes, 0, StringLen(post_data), CP_UTF8);
 
    string headers = "Content-Type: application/json; charset=utf-8\r\n";
    ResetLastError();
@@ -365,9 +365,16 @@ void ExecuteOpenOrder(const string action_json)
    if(pt <= 0.0) pt = _Point;
    if(pt <= 0.0) pt = 0.01;
    double current_spread_pts = (tick.ask > tick.bid && pt > 0.0) ? (tick.ask - tick.bid) / pt : 0.0;
-   if(current_spread_pts > InpMaxSpreadPoints)
+   double spread_usd = tick.ask - tick.bid;
+   double max_allowed_pts = InpMaxSpreadPoints;
+   // Handle 3-digit gold broker (point = 0.001) where 50 pts is only $0.05
+   if(_Digits >= 3 && max_allowed_pts < 500.0)
+      max_allowed_pts = max_allowed_pts * 10.0;
+   if(max_allowed_pts < 150.0) max_allowed_pts = 150.0; // Allow at least $1.50 spread for gold
+
+   if(current_spread_pts > max_allowed_pts)
    {
-      PrintFormat("🛡️ Order rejected: Spread %.1f points exceeds max allowed %.1f points", current_spread_pts, InpMaxSpreadPoints);
+      PrintFormat("🛡️ Order rejected: Spread %.1f points ($%.2f) exceeds max allowed %.1f points", current_spread_pts, spread_usd, max_allowed_pts);
       SendExecutionReport(action_id, signal_id, "REJECTED_SPREAD", 0, side, lot, 0, 0, sl, tp, 0, comment, 10002, "Spread exceeded limit");
       return;
    }
@@ -418,6 +425,59 @@ void ExecuteOpenOrder(const string action_json)
       {
          ok = m_trade.SellLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
          fill_p = price;
+      }
+   }
+
+   // Fallback Retry Strategies if rejected by broker rules
+   if(!ok)
+   {
+      uint err = m_trade.ResultRetcode();
+      string desc = m_trade.ResultRetcodeDescription();
+
+      // Retry Strategy 1: Invalid Stops (10016) -> Open first without initial SL/TP, then modify
+      if((err == 10016 || err == 10014 || err == 10015) && execute_as_market)
+      {
+         PrintFormat("⚠️ Broker rejected SL/TP (Error %d: %s). Retrying market order without initial stops...", err, desc);
+         if(side == "BUY")
+            ok = m_trade.Buy(lot, g_symbol, 0.0, 0.0, 0.0, comment);
+         else
+            ok = m_trade.Sell(lot, g_symbol, 0.0, 0.0, 0.0, comment);
+
+         if(ok)
+         {
+            ticket = m_trade.ResultOrder();
+            fill_p = m_trade.ResultPrice();
+            if(sl > 0.0 || tp > 0.0)
+            {
+               Sleep(150);
+               m_trade.PositionModify(ticket, sl, tp);
+            }
+         }
+      }
+
+      // Retry Strategy 2: Invalid Filling mode (10030) -> Try IOC then RETURN
+      if(!ok && err == 10030)
+      {
+         Print("⚠️ Broker rejected filling mode. Retrying with IOC / Return...");
+         m_trade.SetTypeFilling(ORDER_FILLING_IOC);
+         if(execute_as_market)
+            ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment) : m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
+         else
+            ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment) : m_trade.SellLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+
+         if(!ok)
+         {
+            m_trade.SetTypeFilling(ORDER_FILLING_RETURN);
+            if(execute_as_market)
+               ok = (side == "BUY") ? m_trade.Buy(lot, g_symbol, 0.0, sl, tp, comment) : m_trade.Sell(lot, g_symbol, 0.0, sl, tp, comment);
+            else
+               ok = (side == "BUY") ? m_trade.BuyLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment) : m_trade.SellLimit(lot, price, g_symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+         }
+         if(ok)
+         {
+            ticket = m_trade.ResultOrder();
+            fill_p = (execute_as_market ? m_trade.ResultPrice() : price);
+         }
       }
    }
 

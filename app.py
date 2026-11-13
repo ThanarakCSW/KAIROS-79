@@ -561,6 +561,26 @@ async def read_ws_frame(reader: asyncio.StreamReader) -> Optional[str]:
     return payload.decode("utf-8", "replace")
 
 
+def safe_json_loads(data: bytes) -> Dict[str, Any]:
+    """Robustly parse JSON bytes from HTTP clients, stripping null bytes and trailing noise."""
+    text = data.decode("utf-8", "replace").strip("\x00 \r\n\t")
+    if not text:
+        return {}
+    try:
+        res = json.loads(text)
+        return res if isinstance(res, dict) else {}
+    except Exception:
+        # Strip potential null byte truncation from MT5 WebRequest
+        clean = text.split("\x00")[0].strip()
+        if clean:
+            try:
+                res = json.loads(clean)
+                return res if isinstance(res, dict) else {}
+            except Exception:
+                pass
+        return {}
+
+
 class AssistantServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 8000) -> None:
         self.host = host
@@ -918,14 +938,43 @@ class AssistantServer:
             sig_id = (act.get("order_id") if act else None) or rt.get("fingerprint") or f"manual_{int(time.time())}"
             # Discard so manual dispatch can re-queue even if already queued
             self.core.ea_bridge.executed_signal_ids.discard(sig_id)
+
+            # If no active order exists, register one so Web UI tracks it and displays PnL
+            if not act:
+                stop_p = float(rt.get("stop_mt5") or (cur_p - 5.0 if side == "BUY" else cur_p + 5.0))
+                target_p = float(rt.get("target_mt5") or (cur_p + 10.0 if side == "BUY" else cur_p - 10.0))
+                tp1_p = float(rt.get("tp1_mt5") or (cur_p + 5.0 if side == "BUY" else cur_p - 5.0))
+                lot = float(rt.get("lot_size") or 0.10)
+                self.core.order_manager.register_trade_setup(
+                    risk_ticket={
+                        "side": side,
+                        "entry_mt5": cur_p,
+                        "stop_mt5": stop_p,
+                        "tp1_mt5": tp1_p,
+                        "target_mt5": target_p,
+                        "lot_size": lot,
+                        "actual_risk_usd": float(rt.get("actual_risk_usd") or 50.0),
+                        "potential_profit_usd": float(rt.get("potential_profit_usd") or 100.0),
+                        "reward_risk": 2.0,
+                        "order_type": f"{side} NOW (Market)",
+                        "execution_type": "MARKET",
+                    },
+                    trade_setup=last_st.get("smc", {}).get("trade_setup") or {},
+                    current_price=cur_p,
+                    timeframe=self.core.timeframe,
+                    trading_style=self.core.trading_style,
+                    force_replace=True,
+                )
+                act = self.core.order_manager.active_order
+
             self.core.ea_bridge.enqueue_action(
                 action_type="OPEN_ORDER",
                 payload={
                     "side": side,
-                    "order_type": (act.get("execution_type") if act else None) or rt.get("execution_type") or "LIMIT",
+                    "order_type": "MARKET",
                     "symbol": "XAUUSD",
                     "lot": float((act.get("lot_size") if act else None) or rt.get("lot_size") or 0.10),
-                    "price": float((act.get("entry_mt5") if act else None) or rt.get("entry_mt5") or cur_p),
+                    "price": float((act.get("entry_mt5") if act else None) or cur_p),
                     "sl": float((act.get("stop_mt5") if act else None) or rt.get("stop_mt5") or 0.0),
                     "tp": float((act.get("target_mt5") if act else None) or rt.get("target_mt5") or 0.0),
                     "tp1": float((act.get("tp1_mt5") if act else None) or rt.get("tp1_mt5") or 0.0),
@@ -987,14 +1036,14 @@ class AssistantServer:
             return
 
         if path == "/api/config" and method == "POST":
-            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            payload = safe_json_loads(body_bytes)
             state = self.core.update_settings(payload)
             await self.broadcast(state)
             await self.send_http_json(writer, 200, state)
             return
 
         if path == "/api/replay" and method == "POST":
-            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            payload = safe_json_loads(body_bytes)
             mode = payload.get("mode", "step")
             if mode == "reset":
                 self.auto_replay = False
@@ -1017,7 +1066,7 @@ class AssistantServer:
             return
 
         if path == "/api/order/action" and method == "POST":
-            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            payload = safe_json_loads(body_bytes)
             action = str(payload.get("action") or "")
             cp = float(payload.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
             if action == "cancel":
@@ -1095,7 +1144,7 @@ class AssistantServer:
             return
 
         if path == "/api/ea/heartbeat" and method == "POST":
-            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            payload = safe_json_loads(body_bytes)
             info = self.core.ea_bridge.record_heartbeat(payload)
             # Sync balance / equity to core config if non-zero
             if info.get("equity") and float(info["equity"]) > 0:
@@ -1117,7 +1166,7 @@ class AssistantServer:
             return
 
         if path == "/api/ea/execution" and method == "POST":
-            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            payload = safe_json_loads(body_bytes)
             rec = self.core.ea_bridge.record_execution(payload)
             # If an order was opened, map ticket to active order
             if rec.get("status") in ("FILLED", "OPENED") and rec.get("ticket"):
@@ -1136,7 +1185,7 @@ class AssistantServer:
             return
 
         if path == "/api/ea/toggle_auto" and method == "POST":
-            payload = json.loads(body_bytes.decode("utf-8", "replace") or "{}")
+            payload = safe_json_loads(body_bytes)
             req_enable = payload.get("enabled")
             if req_enable is None:
                 new_val = self.core.ea_bridge.toggle_auto_trading()

@@ -341,6 +341,71 @@ class TestEABridge(unittest.TestCase):
         asyncio.run(_test_ws())
         tmp_dir.cleanup()
 
+    def test_null_terminated_body_from_mt5_webrequest(self):
+        """Verify server parses MT5 StringToCharArray bodies containing trailing null bytes."""
+        from app import AssistantServer
+
+        class _MemWriter:
+            def __init__(self):
+                self.buffer = bytearray()
+                self.closed = False
+
+            def write(self, data: bytes):
+                self.buffer.extend(data)
+
+            async def drain(self):
+                return None
+
+            def close(self):
+                self.closed = True
+
+        async def _run():
+            srv = AssistantServer(host="127.0.0.1", port=8080)
+            srv.core.compute_full_state()
+
+            # Simulate MQL5 WebRequest payload with terminating \x00
+            raw_json = json.dumps({
+                "account_id": 888777,
+                "broker": "Exness-Real",
+                "server": "Exness-Real10",
+                "currency": "USD",
+                "balance": 2500.0,
+                "equity": 2500.0,
+                "margin": 0.0,
+                "free_margin": 2500.0,
+                "spread_points": 15.0,
+                "symbol": "XAUUSD",
+                "open_positions": [],
+            }).encode("utf-8") + b"\x00"
+
+            req_bytes = (
+                f"POST /api/ea/heartbeat HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:8000\r\n"
+                f"Content-Type: application/json; charset=utf-8\r\n"
+                f"Content-Length: {len(raw_json)}\r\n\r\n"
+            ).encode("utf-8") + raw_json
+
+            reader = asyncio.StreamReader()
+            reader.feed_data(req_bytes)
+            reader.feed_eof()
+            writer = _MemWriter()
+            await srv.handle_client(reader, writer)
+
+            resp = bytes(writer.buffer)
+            self.assertIn(b"200 OK", resp)
+            body = json.loads(resp.split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertEqual(body["status"], "ok")
+
+            # Verify that account telemetry was successfully recorded into ea_bridge
+            acc = srv.core.ea_bridge.account_info
+            self.assertEqual(acc.get("account_id"), 888777)
+            self.assertEqual(acc.get("broker"), "Exness-Real")
+            self.assertEqual(acc.get("balance"), 2500.0)
+            self.assertEqual(acc.get("equity"), 2500.0)
+            self.assertTrue(srv.core.ea_bridge.is_connected)
+
+        asyncio.run(_run())
+
 
 if __name__ == "__main__":
     unittest.main()

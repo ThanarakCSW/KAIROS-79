@@ -600,11 +600,15 @@
     const mt5Pill = el("mt5StatusPill");
     const mt5Text = el("mt5StatusText");
     if (mt5Pill && mt5Text) {
-      if (ea.is_connected) {
+      if (ea.is_connected && ea.account_id) {
         mt5Pill.className = "meta-pill pill-mt5-online";
         const eqStr = ea.equity ? `$${Number(ea.equity).toLocaleString()}` : "";
-        mt5Text.textContent = `MT5: #${ea.account_id || ""} (${ea.broker || "Live"}) ${eqStr ? `• Eq ${eqStr}` : ""}`;
+        mt5Text.textContent = `MT5: #${ea.account_id} (${ea.broker || "Live"}) ${eqStr ? `• Eq ${eqStr}` : ""}`;
         mt5Pill.title = `MetaTrader 5 เชื่อมต่อแล้ว (Balance: $${ea.balance}, Margin: $${ea.margin}, Spread: ${ea.spread_points} pts)`;
+      } else if (ea.is_connected && !ea.account_id) {
+        mt5Pill.className = "meta-pill pill-neutral";
+        mt5Text.textContent = "MT5: กำลังรอ Telemetry...";
+        mt5Pill.title = "EA กำลัง Poll คำสั่ง แต่ยังไม่ได้ส่งข้อมูลบัญชี (ตรวจสอบว่าได้ Recompile EA v1.02 แล้ว)";
       } else {
         mt5Pill.className = "meta-pill pill-mt5-offline";
         mt5Text.textContent = "MT5: Offline";
