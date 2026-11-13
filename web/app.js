@@ -211,7 +211,11 @@
       clearPriceLines();
       const tk = state.risk_ticket;
       if (tk) {
-        addHorizontalLine(tk.entry_mt5, `ดัก ${tk.order_type || tk.side + " LIMIT"} ล่วงหน้า`, "#f5b841", 0);
+        const isMarket = tk.execution_type === "MARKET" || (tk.order_type && tk.order_type.includes("NOW"));
+        const entryLabel = isMarket
+          ? `⚡ เข้าทันที: ${tk.side || "BUY"} NOW`
+          : `⏳ ดักเข้าล่วงหน้า: ${tk.side || "BUY"} LIMIT`;
+        addHorizontalLine(tk.entry_mt5, entryLabel, isMarket ? "#38bdf8" : "#f5b841", 0);
         addHorizontalLine(tk.stop_mt5, `SL`, "#f43f5e", 2);
         if (tk.tp1_mt5) {
           addHorizontalLine(tk.tp1_mt5, `TP1 (1R บังทุน)`, "#38bdf8", 2);
@@ -372,8 +376,10 @@
       ctx.setLineDash([]);
     }
 
+    const isMarket = tk.execution_type === "MARKET" || (tk.order_type && tk.order_type.includes("NOW"));
+    const entryCanvasLbl = isMarket ? "ENTRY (NOW)" : "ENTRY (LIMIT)";
     [
-      { p: tk.entry_mt5, c: "#f5b841", lbl: "ENTRY" },
+      { p: tk.entry_mt5, c: isMarket ? "#38bdf8" : "#f5b841", lbl: entryCanvasLbl },
       { p: tk.stop_mt5, c: "#f43f5e", lbl: "SL" },
       { p: tk.target_mt5, c: "#10b981", lbl: "TP" },
     ].forEach((ln) => {
@@ -414,7 +420,10 @@
       card.className = "order-lifecycle-bar status-idle";
       statusPill.className = "order-status-pill pill-idle";
       statusPill.textContent = "🔍 SCANNING";
-      if (execPill) execPill.textContent = "รอเงื่อนไข >50%";
+      if (execPill) {
+        execPill.className = "order-exec-pill exec-waiting";
+        execPill.textContent = "รอเงื่อนไข >50%";
+      }
       if (pnlBadge) pnlBadge.style.display = "none";
       if (msg) msg.textContent = "กำลังติดตามโครงสร้างตลาด SMC เมื่อ Confluence และโอกาสถึง TP > 50% ระบบจะล็อคแผนเข้าทันที";
       if (btnFill) btnFill.style.display = "none";
@@ -483,7 +492,10 @@
       card.className = "order-lifecycle-bar status-filled";
       statusPill.className = "order-status-pill pill-filled";
       statusPill.textContent = hasMulti ? `🚀 FILLED (${side} • ${ord.orders.length} ไม้)` : `🚀 FILLED (${side})`;
-      if (execPill) execPill.textContent = isMarket ? "⚡ Market" : "🎯 Limit";
+      if (execPill) {
+        execPill.className = "order-exec-pill exec-holding";
+        execPill.textContent = `🚀 ถือครอง (${ord.execution_type || "MARKET"})`;
+      }
 
       const fltUsd = ord.floating_pnl_usd !== undefined ? Number(ord.floating_pnl_usd) : 0.0;
       const fltR = ord.floating_pnl_r !== undefined ? Number(ord.floating_pnl_r) : 0.0;
@@ -522,14 +534,17 @@
     } else if (status === "PENDING") {
       card.className = "order-lifecycle-bar status-pending";
       statusPill.className = "order-status-pill pill-pending";
-      statusPill.textContent = `⏳ PENDING (${side})`;
-      if (execPill) execPill.textContent = isMarket ? "⚡ ทันที" : "ดัก LIMIT";
+      statusPill.textContent = `⏳ รอดักเข้า (${side} LIMIT)`;
+      if (execPill) {
+        execPill.className = "order-exec-pill exec-limit";
+        execPill.textContent = "⏳ ดัก LIMIT (Pending)";
+      }
       if (pnlBadge) pnlBadge.style.display = "none";
 
       const dist = Math.abs(curPrice - entry);
       const dir = side === "SELL" ? "รอเด้งอีก" : "รอย่ออีก";
       if (msg) {
-        msg.textContent = ord.management_note_th || `ตั้งคำสั่งใน MT5 แล้ว ${dir} $${dist.toFixed(2)} (จุดเข้าล็อคถาวร)`;
+        msg.textContent = ord.management_note_th || `ตั้งคำสั่ง ${side} LIMIT ใน MT5 แล้ว ${dir} $${dist.toFixed(2)} (จุดเข้าล็อคถาวร)`;
       }
 
       if (btnFill) btnFill.style.display = "inline-flex";
@@ -841,38 +856,94 @@
         : "โหมดแมนนวล: ผู้ใช้กดปุ่มเปิดไม้เพิ่มเอง";
     }
 
+    const isMarketTk = tk.execution_type === "MARKET" || (tk.order_type && tk.order_type.includes("NOW"));
+    const sideTk = tk.side || "BUY";
+    const entryTk = Number(tk.entry_mt5 || 0).toFixed(2);
+
     if (activeOrd && activeOrd.status === "FILLED") {
       const ordersCnt = (activeOrd.orders && activeOrd.orders.length) || 1;
       if (ordersCnt > 1) {
-        el("ticketSideTitle").textContent = `${activeOrd.side} (${ordersCnt} ไม้)`;
+        el("ticketSideTitle").textContent = `🚀 ${activeOrd.side} (${ordersCnt} ไม้)`;
         el("statusSub").textContent = `🚀 ถือครอง ${ordersCnt} ไม้ • ทุนเฉลี่ย ${Number(activeOrd.avg_entry_price || activeOrd.entry_mt5).toFixed(2)}`;
       } else {
-        el("ticketSideTitle").textContent = `${activeOrd.side} XAUUSD (FILLED)`;
+        el("ticketSideTitle").textContent = `🚀 ${activeOrd.side} XAUUSD (เปิดออเดอร์แล้ว)`;
         el("statusSub").textContent = `🚀 ถือครอง @ ${Number(activeOrd.entry_mt5).toFixed(2)}`;
       }
       el("ticketSideTitle").style.color = activeOrd.side === "SELL" ? "var(--bear)" : "var(--bull)";
+      if (el("orderExecTypePill")) {
+        el("orderExecTypePill").className = "order-exec-pill exec-holding";
+        el("orderExecTypePill").textContent = `🚀 ถือครอง (${activeOrd.execution_type || "MARKET"})`;
+      }
     } else if (activeOrd && activeOrd.status === "PENDING") {
-      const isMarket = activeOrd.execution_type === "MARKET";
-      el("ticketSideTitle").textContent = isMarket ? `${activeOrd.side} NOW` : `${activeOrd.side} LIMIT`;
+      el("ticketSideTitle").textContent = `⏳ ${activeOrd.side} LIMIT (ดักเข้า)`;
       el("ticketSideTitle").style.color = activeOrd.side === "SELL" ? "var(--bear)" : "var(--bull)";
-      el("statusSub").textContent = isMarket
-        ? `⚡ ตลาด @ ${Number(activeOrd.entry_mt5).toFixed(2)}`
-        : `⏳ ดักเข้า @ ${Number(activeOrd.entry_mt5).toFixed(2)}`;
+      el("statusSub").textContent = `⏳ ดักเข้า @ ${Number(activeOrd.entry_mt5).toFixed(2)}`;
+      if (el("orderExecTypePill")) {
+        el("orderExecTypePill").className = "order-exec-pill exec-limit";
+        el("orderExecTypePill").textContent = "⏳ ดัก LIMIT (Pending)";
+      }
     } else if (!winProbPassed) {
-      el("ticketSideTitle").textContent = `⏳ WAIT`;
+      el("ticketSideTitle").textContent = `⏳ WAIT (รอจังหวะ)`;
       el("ticketSideTitle").style.color = "var(--warn)";
       const wz = tk.next_watch_zone;
       const rawWatchPrice = wz && typeof wz === "object" ? wz.watch_entry : wz;
       const watchPrice = rawWatchPrice ? Number(rawWatchPrice).toFixed(2) : Number(tk.entry_mt5 || 0).toFixed(2);
       el("statusSub").textContent = `[${styleTag}] โอกาสชนะ ${probs.win_pct || 0}% (<50%)`;
+      if (el("orderExecTypePill")) {
+        el("orderExecTypePill").className = "order-exec-pill exec-waiting";
+        el("orderExecTypePill").textContent = "🔍 เฝ้าระวัง";
+      }
+      if (el("orderStatusPill")) {
+        el("orderStatusPill").className = "order-status-pill pill-idle";
+        el("orderStatusPill").textContent = "🔍 SCANNING";
+      }
+      if (el("orderStatusMsg")) {
+        el("orderStatusMsg").textContent = `โอกาสชนะตามสถิติ ${probs.win_pct || 0}% ยังไม่เกิน 50% — กำลังเฝ้ารอโซน ${watchPrice} และรอความได้เปรียบ`;
+      }
+      if (el("btnOrderFillNow")) el("btnOrderFillNow").style.display = "none";
+      if (el("btnOrderCancel")) el("btnOrderCancel").style.display = "none";
     } else {
-      const isMarket = tk.execution_type === "MARKET";
-      el("ticketSideTitle").textContent = isMarket ? `${tk.side || "BUY"} NOW` : `${tk.side || "BUY"} XAUUSD`;
-      el("ticketSideTitle").style.color = tk.side === "SELL" ? "var(--bear)" : "var(--bull)";
-      el("statusSub").textContent =
-        tk.status === "ACTIVE_IN_ZONE" || isMarket
-          ? `🟢 [${styleTag}] พร้อมเข้าทันที`
-          : `⏳ [${styleTag}] รอแตะจุดเข้า`;
+      if (isMarketTk) {
+        el("ticketSideTitle").textContent = `⚡ ${sideTk} NOW (เข้าทันที)`;
+        el("ticketSideTitle").style.color = sideTk === "SELL" ? "var(--bear)" : "var(--bull)";
+        el("statusSub").textContent = `⚡ [${styleTag}] เข้าทันทีที่ราคาตลาด @ ${entryTk}`;
+        if (el("orderExecTypePill")) {
+          el("orderExecTypePill").className = "order-exec-pill exec-market";
+          el("orderExecTypePill").textContent = "⚡ เข้าทันที (MARKET)";
+        }
+        if (el("orderStatusPill")) {
+          el("orderStatusPill").className = "order-status-pill pill-market-ready";
+          el("orderStatusPill").textContent = "⚡ สัญญาณเข้าทันที";
+        }
+        if (el("orderStatusMsg")) {
+          el("orderStatusMsg").textContent = `⚡ สัญญาณยืนยันในโซนแล้ว — เปิดออเดอร์ใน MT5 ทันทีที่ราคาตลาด @ ${entryTk} (ไม่ต้องตั้งรอดัก)`;
+        }
+        if (el("orderLifecycleCard")) {
+          el("orderLifecycleCard").className = "order-lifecycle-bar status-market-ready";
+        }
+      } else {
+        el("ticketSideTitle").textContent = `⏳ ${sideTk} LIMIT (ดักล่วงหน้า)`;
+        el("ticketSideTitle").style.color = sideTk === "SELL" ? "var(--bear)" : "var(--bull)";
+        el("statusSub").textContent = `⏳ [${styleTag}] ดักเข้าล่วงหน้า @ ${entryTk}`;
+        if (el("orderExecTypePill")) {
+          el("orderExecTypePill").className = "order-exec-pill exec-limit";
+          el("orderExecTypePill").textContent = "⏳ ดัก LIMIT (Pending)";
+        }
+        if (el("orderStatusPill")) {
+          el("orderStatusPill").className = "order-status-pill pill-pending";
+          el("orderStatusPill").textContent = "⏳ รอดักเข้า";
+        }
+        const dist = Number(tk.distance_to_entry_usd || Math.abs((st.current_price || 0) - (tk.entry_mt5 || 0)));
+        const dirWord = sideTk === "SELL" ? "รอเด้งอีก" : "รอย่ออีก";
+        if (el("orderStatusMsg")) {
+          el("orderStatusMsg").textContent = `⏳ ราคายังไม่ถึงโซน — ตั้งคำสั่ง ${sideTk} LIMIT รอเกี่ยวใน MT5 ที่ ${entryTk} (${dirWord} $${dist.toFixed(2)})`;
+        }
+        if (el("orderLifecycleCard")) {
+          el("orderLifecycleCard").className = "order-lifecycle-bar status-pending";
+        }
+      }
+      if (el("btnOrderFillNow")) el("btnOrderFillNow").style.display = "inline-flex";
+      if (el("btnOrderCancel")) el("btnOrderCancel").style.display = "inline-flex";
     }
 
     const vBadge = el("verdictBadge");
@@ -902,21 +973,27 @@
     el("valEntry").textContent = activeEntry;
 
     if (el("entryHeadLabel")) {
-      const isMarket = (activeOrd && activeOrd.execution_type === "MARKET") || tk.execution_type === "MARKET";
+      const isMarket = (activeOrd && activeOrd.execution_type === "MARKET") || isMarketTk;
       if (activeOrd && activeOrd.orders && activeOrd.orders.length > 1) {
         el("entryHeadLabel").textContent = `ENTRY (ทุนเฉลี่ย ${activeOrd.orders.length} ไม้)`;
+      } else if (activeOrd && activeOrd.status === "FILLED") {
+        el("entryHeadLabel").textContent = `ENTRY (เปิดสำเร็จ @ ${activeEntry})`;
+      } else if (isMarket) {
+        el("entryHeadLabel").textContent = "ENTRY (เข้าทันที MARKET)";
       } else {
-        el("entryHeadLabel").textContent = isMarket ? "ENTRY (MARKET)" : `ENTRY (${tk.order_type || (tk.side || "BUY") + " LIMIT"})`;
+        el("entryHeadLabel").textContent = `ENTRY (ดัก ${tk.side || "BUY"} LIMIT)`;
       }
     }
     if (el("entryDistSub")) {
-      const isMarket = (activeOrd && activeOrd.execution_type === "MARKET") || tk.execution_type === "MARKET";
-      if (isMarket) {
-        el("entryDistSub").textContent = "⚡ เข้าทันทีที่ราคาตลาด";
+      const isMarket = (activeOrd && activeOrd.execution_type === "MARKET") || isMarketTk;
+      if (activeOrd && activeOrd.status === "FILLED") {
+        el("entryDistSub").textContent = "🚀 ออเดอร์กำลังทำงานในตลาด";
+      } else if (isMarket) {
+        el("entryDistSub").textContent = "⚡ เข้าทันทีที่ราคาตลาดปัจจุบัน";
       } else {
         const dist = Number(tk.distance_to_entry_usd || Math.abs((st.current_price || 0) - (tk.entry_mt5 || 0)));
         const dirWord = tk.side === "SELL" ? "รอเด้งอีก" : "รอย่ออีก";
-        el("entryDistSub").textContent = dist > 0.05 ? `${dirWord} $${dist.toFixed(2)}` : `แตะโซนเข้าแล้ว`;
+        el("entryDistSub").textContent = dist > 0.05 ? `⏳ ${dirWord} $${dist.toFixed(2)} (ดักล่วงหน้า)` : `แตะโซนเข้าแล้ว`;
       }
     }
     el("valSL").textContent = Number(tk.stop_mt5 || 0).toFixed(2);
@@ -1235,8 +1312,10 @@
       if (!currentState || !currentState.risk_ticket) return;
       const tk = currentState.risk_ticket;
       const sim = currentState.simulation || {};
+      const isMarket = tk.execution_type === "MARKET" || (tk.order_type && tk.order_type.includes("NOW"));
+      const actionType = isMarket ? "เข้าทันทีที่ราคาตลาด (MARKET)" : "ตั้งคำสั่งดักล่วงหน้า (PENDING LIMIT)";
       const text = [
-        `[MT5 Trade Ticket] ${tk.side} XAUUSD (${tk.verdict})`,
+        `[MT5 Trade Ticket] ${tk.side} XAUUSD — ${actionType} (${tk.verdict})`,
         `Volume: ${Number(tk.lot_size).toFixed(2)} Lot (Risk $${Number(tk.actual_risk_usd).toFixed(2)}) • Margin $${Number(tk.margin_required_usd || 0).toFixed(2)} (Leverage 1:${Math.round(tk.leverage || 100)})`,
         `Entry: ${Number(tk.entry_mt5).toFixed(2)}`,
         `Stop Loss: ${Number(tk.stop_mt5).toFixed(2)}`,

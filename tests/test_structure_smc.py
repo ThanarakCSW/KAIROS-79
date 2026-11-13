@@ -120,6 +120,45 @@ class TestStructureAndSMC(unittest.TestCase):
         if st["nearest_historical_resistance"]:
             self.assertGreaterEqual(st["nearest_historical_resistance"]["mid"], cur_p - 0.5)
 
+    def test_signal_tracker_market_now_vs_pending_limit_label_separation(self):
+        """Verify market NOW vs pending LIMIT are clearly separated without mixing text."""
+        from engine.signal_tracker import evaluate_signal_performance
+
+        # 1. Market NOW setup
+        mkt_ticket = {
+            "side": "BUY",
+            "entry_mt5": 2652.00,
+            "stop_mt5": 2647.00,
+            "target_mt5": 2662.00,
+            "execution_type": "MARKET",
+            "order_type": "BUY NOW (Market)",
+            "verdict": "PASS",
+            "win_prob_passed": True,
+        }
+        res_mkt = evaluate_signal_performance(self.bars, "M5", mkt_ticket, {})
+        sig_mkt = res_mkt["recent_signals"][0]
+        self.assertIn("⚡ เข้าทันที", sig_mkt["outcome_label_th"])
+        self.assertIn("BUY NOW", sig_mkt["outcome_label_th"])
+        self.assertNotIn("ดัก", sig_mkt["outcome_label_th"])
+
+        # 2. Pending LIMIT setup
+        lmt_ticket = {
+            "side": "BUY",
+            "entry_mt5": 2645.00,
+            "stop_mt5": 2640.00,
+            "target_mt5": 2655.00,
+            "execution_type": "LIMIT",
+            "order_type": "BUY LIMIT",
+            "verdict": "PASS",
+            "win_prob_passed": True,
+        }
+        res_lmt = evaluate_signal_performance(self.bars, "M5", lmt_ticket, {})
+        sig_lmt = res_lmt["recent_signals"][0]
+        self.assertIn("⏳ ดักเข้าล่วงหน้า", sig_lmt["outcome_label_th"])
+        self.assertIn("BUY LIMIT", sig_lmt["outcome_label_th"])
+        self.assertNotIn("NOW", sig_lmt["outcome_label_th"])
+        self.assertNotIn("ทันที", sig_lmt["outcome_label_th"])
+
 
 if __name__ == "__main__":
     unittest.main()

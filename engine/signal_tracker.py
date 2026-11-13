@@ -211,11 +211,18 @@ def evaluate_signal_performance(
     curr_setup = current_smc.get("trade_setup") or {}
     if current_ticket and bars:
         win_passed = current_ticket.get("win_prob_passed", True)
-        status_lbl = (
-            f"🟢 ดัก {current_ticket.get('order_type', 'LIMIT')} ล่วงหน้า ({current_ticket.get('verdict', 'PASS')})"
-            if win_passed
-            else "⏳ รอจังหวะ (โอกาสชนะตามสถิติจริงยังไม่ถึง 50%)"
+        is_market = (
+            current_ticket.get("execution_type") == "MARKET"
+            or "NOW" in str(current_ticket.get("order_type") or "")
         )
+        side = current_ticket.get("side", "BUY")
+        verdict = current_ticket.get("verdict", "PASS")
+        if not win_passed:
+            status_lbl = "⏳ รอจังหวะ (โอกาสชนะตามสถิติจริงยังไม่ถึง 50%)"
+        elif is_market:
+            status_lbl = f"⚡ เข้าทันที: {side} NOW ({verdict})"
+        else:
+            status_lbl = f"⏳ ดักเข้าล่วงหน้า: {side} LIMIT ({verdict})"
         signals.append({
             "bar_time": int(bars[-1]["t"]),
             "time_bkk": _format_bkk_ts(int(bars[-1]["t"])) + " (แผนปัจจุบัน)",

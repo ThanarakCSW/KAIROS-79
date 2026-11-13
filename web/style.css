@@ -731,6 +731,12 @@ body {
   box-shadow: 0 0 16px rgba(16, 185, 129, 0.12);
 }
 
+.order-lifecycle-bar.status-market-ready {
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.08);
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.12);
+}
+
 .order-lifecycle-bar.status-pending {
   border-color: rgba(245, 158, 11, 0.4);
   background: rgba(245, 158, 11, 0.06);
@@ -874,6 +880,13 @@ body {
   animation: pulseGreen 2.2s infinite ease-in-out;
 }
 
+.order-status-pill.pill-market-ready {
+  background: rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  animation: pulseCyan 2.2s infinite ease-in-out;
+}
+
 .order-status-pill.pill-pending {
   background: rgba(245, 158, 11, 0.2);
   color: #fbbf24;
@@ -891,14 +904,45 @@ body {
   50% { box-shadow: 0 0 10px 2px rgba(16, 185, 129, 0.45); }
 }
 
+@keyframes pulseCyan {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.35); }
+  50% { box-shadow: 0 0 10px 2px rgba(56, 189, 248, 0.45); }
+}
+
 .order-exec-pill {
   font-size: 10.5px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border-subtle);
+  font-weight: 700;
   padding: 2px 7px;
   border-radius: 5px;
+  letter-spacing: 0.2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: all 0.2s ease;
+}
+
+.order-exec-pill.exec-market {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.18);
+  border: 1px solid rgba(56, 189, 248, 0.5);
+}
+
+.order-exec-pill.exec-limit {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+}
+
+.order-exec-pill.exec-holding {
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.18);
+  border: 1px solid rgba(16, 185, 129, 0.45);
+}
+
+.order-exec-pill.exec-waiting {
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
 }
 
 .order-pnl-badge {

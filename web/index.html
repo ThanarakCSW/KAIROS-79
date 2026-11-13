@@ -142,11 +142,11 @@
       <!-- 1. Hero MT5 Execution Ticket -->
       <div class="ticket-hero" id="ticketCard">
         <!-- Integrated Order Lifecycle Header -->
-        <div id="orderLifecycleCard" class="order-lifecycle-bar status-pending">
+        <div id="orderLifecycleCard" class="order-lifecycle-bar status-idle">
           <div class="lifecycle-top-row">
             <div class="lifecycle-title-group">
-              <h2 id="ticketSideTitle">BUY XAUUSD</h2>
-              <span id="orderStatusPill" class="order-status-pill pill-pending">⏳ PENDING</span>
+              <h2 id="ticketSideTitle">รอสัญญาณ XAUUSD</h2>
+              <span id="orderStatusPill" class="order-status-pill pill-idle">🔍 SCANNING</span>
               <span id="orderPnlBadge" class="order-pnl-badge" style="display:none;">PnL: $0.00 (+0.00R)</span>
             </div>
 
@@ -157,14 +157,14 @@
                 <span class="conf-lbl">CONF</span>
                 <strong id="confluenceBadge">85%</strong>
               </div>
-              <span id="orderExecTypePill" class="order-exec-pill">ดัก LIMIT</span>
+              <span id="orderExecTypePill" class="order-exec-pill exec-waiting">รอสัญญาณ</span>
             </div>
           </div>
 
           <!-- Concise Status & Context Row -->
           <div class="lifecycle-note-row">
-            <div id="orderStatusMsg" class="lifecycle-msg">ตั้งคำสั่งรอราคาลงมาเกี่ยวที่โซนเข้า (จุดเข้าล็อคคงที่)</div>
-            <span id="statusSub" class="lifecycle-sub-note">🟢 พร้อมเข้าในโซน</span>
+            <div id="orderStatusMsg" class="lifecycle-msg">กำลังติดตามโครงสร้างตลาด SMC เมื่อ Confluence และโอกาสถึง TP > 50% ระบบจะล็อคแผนเข้าทันที</div>
+            <span id="statusSub" class="lifecycle-sub-note">⏳ กำลังสแกน</span>
           </div>
 
           <!-- Action Buttons -->
@@ -200,11 +200,11 @@
 
           <button class="mt5-tile tile-entry copy-trigger" data-copy-target="valEntry" title="คลิกเพื่อคัดลอกราคา Entry">
             <div class="tile-head">
-              <span id="entryHeadLabel">ENTRY (LIMIT)</span>
+              <span id="entryHeadLabel">ENTRY PRICE</span>
               <span class="copy-hint">คัดลอก</span>
             </div>
             <div class="tile-val"><strong id="valEntry">2657.75</strong></div>
-            <div class="tile-sub" id="entryDistSub">จุดดักเข้าล่วงหน้า</div>
+            <div class="tile-sub" id="entryDistSub">รอการยืนยันราคา</div>
           </button>
 
           <button class="mt5-tile tile-sl copy-trigger" data-copy-target="valSL" title="คลิกเพื่อคัดลอกราคา Stop Loss">
