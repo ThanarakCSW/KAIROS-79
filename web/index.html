@@ -382,17 +382,17 @@
         <button id="btnCloseSettings" class="btn-close">✕</button>
       </div>
 
-      <form id="settingsForm" class="modal-form">
+      <form id="settingsForm" class="modal-form" novalidate>
         <div class="form-row">
           <label>
             <span>ขนาดพอร์ต Equity ($)</span>
-            <input type="number" step="10" id="cfgBalance" value="5000" />
+            <input type="number" step="any" min="1" id="cfgBalance" value="5000" />
             <small>ใช้คำนวณ Lot Size ทองคำอัตโนมัติ</small>
           </label>
           <div class="form-field">
             <label for="cfgLeverage">อัตราทด Leverage (1:X)</label>
             <div class="input-with-presets">
-              <input type="number" step="10" min="1" max="5000" id="cfgLeverage" value="100" />
+              <input type="number" step="any" min="1" max="5000" id="cfgLeverage" value="100" />
               <div class="leverage-presets">
                 <button type="button" class="btn-lev-chip" data-lev="100">1:100</button>
                 <button type="button" class="btn-lev-chip" data-lev="200">1:200</button>
@@ -408,12 +408,12 @@
         <div class="form-row">
           <label>
             <span>ความเสี่ยงต่อไม้ (% Risk)</span>
-            <input type="number" step="0.1" id="cfgRiskPct" value="1.0" />
+            <input type="number" step="any" min="0.01" max="100" id="cfgRiskPct" value="1.0" />
             <small>แนะนำ 0.5% – 2.0% ต่อออเดอร์ (คุม Drawdown)</small>
           </label>
           <label>
             <span>ส่วนต่างราคาโบรกเกอร์ Offset ($)</span>
-            <input type="number" step="0.1" id="cfgOffset" value="0.0" />
+            <input type="number" step="any" id="cfgOffset" value="0.0" />
             <small>เช่น +0.50 หรือ -1.20 เพื่อให้ตรงจอ MT5</small>
           </label>
         </div>
@@ -421,7 +421,7 @@
         <div class="form-row">
           <label>
             <span>ค่า Spread โบรกเกอร์ (Points)</span>
-            <input type="number" step="1" id="cfgSpread" value="25" />
+            <input type="number" step="any" min="0" id="cfgSpread" value="25" />
             <small>เช่น 25 points = $0.25 นำไปเผื่อในระยะ SL</small>
           </label>
           <label style="display: flex; flex-direction: column; justify-content: center;">

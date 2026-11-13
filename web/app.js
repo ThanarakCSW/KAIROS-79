@@ -1628,12 +1628,14 @@
     // Save Settings Form
     el("settingsForm").addEventListener("submit", async (e) => {
       e.preventDefault();
+      const rawLev = parseFloat(el("cfgLeverage") ? el("cfgLeverage").value : 100);
+      const lev = Math.max(1, Math.min(5000, isNaN(rawLev) ? 100 : rawLev));
       const body = {
-        account_balance: parseFloat(el("cfgBalance").value),
-        leverage: parseFloat(el("cfgLeverage") ? el("cfgLeverage").value : 100) || 100,
-        risk_per_trade_pct: parseFloat(el("cfgRiskPct").value),
-        broker_price_offset: parseFloat(el("cfgOffset").value),
-        broker_spread_points: parseFloat(el("cfgSpread").value),
+        account_balance: parseFloat(el("cfgBalance").value) || 5000,
+        leverage: lev,
+        risk_per_trade_pct: parseFloat(el("cfgRiskPct").value) || 1.0,
+        broker_price_offset: parseFloat(el("cfgOffset").value) || 0.0,
+        broker_spread_points: parseFloat(el("cfgSpread").value) || 25,
         multi_order: {
           auto_mode_enabled: el("cfgAutoMultiOrder") ? el("cfgAutoMultiOrder").checked : true,
         },
