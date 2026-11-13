@@ -746,6 +746,32 @@ class AssistantServer:
             self.core.order_manager.cancel_active_order(reason="SCAN_NEW_SETUP")
             state = await asyncio.to_thread(self.core.compute_full_state, None, True, True)
             await self.broadcast(state)
+        elif action == "add_sub_order":
+            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            purpose = str(cmd.get("purpose") or "AUTO")
+            exec_type = str(cmd.get("execution_type") or "MARKET")
+            entry_p = float(cmd.get("entry_price") or cp)
+            lot = float(cmd.get("lot_size")) if cmd.get("lot_size") else None
+            self.core.order_manager.add_sub_order(
+                purpose=purpose,
+                execution_type=exec_type,
+                current_price=cp,
+                entry_price=entry_p,
+                lot_size=lot,
+            )
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+        elif action == "close_order_by_id":
+            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            oid = str(cmd.get("order_id") or "")
+            self.core.order_manager.close_order_by_id(order_id=oid, current_price=cp)
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
+        elif action == "close_all_active_orders":
+            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            self.core.order_manager.close_all_orders(current_price=cp)
+            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
+            await self.broadcast(state)
 
     async def handle_http_request(
         self,
@@ -805,6 +831,23 @@ class AssistantServer:
                 self.core.order_manager.set_breakeven()
             elif action == "scan_new_setup":
                 self.core.order_manager.cancel_active_order(reason="SCAN_NEW_SETUP")
+            elif action == "add_sub_order":
+                purpose = str(payload.get("purpose") or "AUTO")
+                exec_type = str(payload.get("execution_type") or "MARKET")
+                entry_p = float(payload.get("entry_price") or cp)
+                lot = float(payload.get("lot_size")) if payload.get("lot_size") else None
+                self.core.order_manager.add_sub_order(
+                    purpose=purpose,
+                    execution_type=exec_type,
+                    current_price=cp,
+                    entry_price=entry_p,
+                    lot_size=lot,
+                )
+            elif action == "close_by_id":
+                oid = str(payload.get("order_id") or "")
+                self.core.order_manager.close_order_by_id(order_id=oid, current_price=cp)
+            elif action == "close_all":
+                self.core.order_manager.close_all_orders(current_price=cp)
             state = await asyncio.to_thread(
                 self.core.compute_full_state, None, True, action == "scan_new_setup"
             )

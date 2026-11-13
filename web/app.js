@@ -398,10 +398,15 @@
     const pnlBadge = el("orderPnlBadge");
     const msg = el("orderStatusMsg");
     const btnFill = el("btnOrderFillNow");
+    const btnAdd = el("btnAddSubOrder");
     const btnBE = el("btnOrderBreakeven");
     const btnClose = el("btnOrderCloseManual");
     const btnCancel = el("btnOrderCancel");
     const btnScan = el("btnScanNewSetup");
+    const multiCard = el("multiOrdersCard");
+    const multiList = el("multiOrdersList");
+    const multiCount = el("multiOrdersCount");
+    const multiAvg = el("multiOrdersAvgEntry");
 
     if (!card || !statusPill) return;
 
@@ -413,10 +418,12 @@
       if (pnlBadge) pnlBadge.style.display = "none";
       if (msg) msg.textContent = "กำลังติดตามโครงสร้างตลาด SMC เมื่อ Confluence และโอกาสถึง TP > 50% ระบบจะล็อคแผนเข้าทันที";
       if (btnFill) btnFill.style.display = "none";
+      if (btnAdd) btnAdd.style.display = "none";
       if (btnBE) btnBE.style.display = "none";
       if (btnClose) btnClose.style.display = "none";
       if (btnCancel) btnCancel.style.display = "none";
       if (btnScan) btnScan.style.display = "inline-flex";
+      if (multiCard) multiCard.style.display = "none";
       return;
     }
 
@@ -425,18 +432,61 @@
     const isMarket = ord.execution_type === "MARKET";
     const entry = Number(ord.entry_mt5 || 0);
 
+    // Multi-Order Rendering
+    const hasMulti = ord.orders && ord.orders.length > 1;
+    if (hasMulti) {
+      if (multiCard) multiCard.style.display = "flex";
+      if (multiCount) multiCount.textContent = ord.orders.length;
+      if (multiAvg) {
+        multiAvg.textContent = `ทุนเฉลี่ย: ${Number(ord.avg_entry_price || entry).toFixed(2)} (${Number(ord.total_lot_size || 0).toFixed(2)} Lot)`;
+      }
+      if (multiList) {
+        multiList.innerHTML = ord.orders.map((o) => {
+          const oEntry = Number(o.filled_price || o.entry_mt5 || 0).toFixed(2);
+          const oLot = Number(o.lot_size || 0.1).toFixed(2);
+          const pnlUsd = Number(o.floating_pnl_usd || 0);
+          const pnlR = Number(o.floating_pnl_r || 0);
+          const pnlClass = pnlUsd >= 0 ? "pnl-pos" : "pnl-neg";
+          const pnlStr = o.status === "FILLED"
+            ? `<span class="sub-order-pnl ${pnlClass}">${pnlUsd >= 0 ? "+" : ""}$${pnlUsd.toFixed(2)} (${pnlR >= 0 ? "+" : ""}${pnlR.toFixed(2)}R)</span>`
+            : `<span class="sub-order-pending" style="color:var(--text-muted);font-size:10px;">⏳ รอเกี่ยว</span>`;
+          const bClass = o.purpose === "RECOVERY" ? "badge-recovery" : o.purpose === "SCALE_IN" ? "badge-scale" : "badge-initial";
+
+          return `
+            <div class="sub-order-row">
+              <span class="sub-order-badge ${bClass}">${o.purpose_th || ("ไม้ #" + o.order_index)}</span>
+              <div class="sub-order-info">
+                <span>${o.side} @ ${oEntry} (${oLot})</span>
+                ${pnlStr}
+              </div>
+              <button class="btn-close-sub" data-order-id="${o.order_id}" title="จบการเทรดไม้นี้">✓ จบไม้นี้</button>
+            </div>
+          `;
+        }).join("");
+
+        multiList.querySelectorAll(".btn-close-sub").forEach((b) => {
+          b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const oid = b.dataset.orderId;
+            if (confirm("ยืนยันจบการเทรดไม้นี้?")) {
+              sendWs({ action: "close_order_by_id", order_id: oid, current_price: curPrice });
+              showToast("✓ จบการเทรดไม้นี้เรียบร้อย");
+            }
+          });
+        });
+      }
+    } else {
+      if (multiCard) multiCard.style.display = "none";
+    }
+
     if (status === "FILLED") {
       card.className = "order-lifecycle-bar status-filled";
       statusPill.className = "order-status-pill pill-filled";
-      statusPill.textContent = `🚀 FILLED (${side})`;
+      statusPill.textContent = hasMulti ? `🚀 FILLED (${side} • ${ord.orders.length} ไม้)` : `🚀 FILLED (${side})`;
       if (execPill) execPill.textContent = isMarket ? "⚡ Market" : "🎯 Limit";
 
-      const filledP = Number(ord.filled_price || entry);
-      const lot = Number(ord.lot_size || 0.10);
-      const riskUsd = Math.max(1, Number(ord.actual_risk_usd || 50));
-      const delta = side === "BUY" ? (curPrice - filledP) : (filledP - curPrice);
-      const fltUsd = ord.floating_pnl_usd !== undefined ? Number(ord.floating_pnl_usd) : Number((delta * lot * 100).toFixed(2));
-      const fltR = ord.floating_pnl_r !== undefined ? Number(ord.floating_pnl_r) : Number((fltUsd / riskUsd).toFixed(2));
+      const fltUsd = ord.floating_pnl_usd !== undefined ? Number(ord.floating_pnl_usd) : 0.0;
+      const fltR = ord.floating_pnl_r !== undefined ? Number(ord.floating_pnl_r) : 0.0;
 
       if (pnlBadge) {
         pnlBadge.style.display = "inline-block";
@@ -449,6 +499,7 @@
       }
 
       if (btnFill) btnFill.style.display = "none";
+      if (btnAdd) btnAdd.style.display = "inline-flex";
       if (btnBE) {
         btnBE.style.display = "inline-flex";
         if (ord.sl_moved_breakeven) {
@@ -461,7 +512,10 @@
           btnBE.style.opacity = "1";
         }
       }
-      if (btnClose) btnClose.style.display = "inline-flex";
+      if (btnClose) {
+        btnClose.style.display = "inline-flex";
+        btnClose.textContent = hasMulti ? `✓ จบการเทรดทุกไม้ (${ord.orders.length})` : "✓ จบการเทรดไม้นี้";
+      }
       if (btnCancel) btnCancel.style.display = "none";
       if (btnScan) btnScan.style.display = "inline-flex";
 
@@ -479,6 +533,7 @@
       }
 
       if (btnFill) btnFill.style.display = "inline-flex";
+      if (btnAdd) btnAdd.style.display = "inline-flex";
       if (btnBE) btnBE.style.display = "none";
       if (btnClose) btnClose.style.display = "none";
       if (btnCancel) btnCancel.style.display = "inline-flex";
@@ -1028,14 +1083,24 @@
       });
     });
 
-    // Right Sidebar Advisor Tabs
-    document.querySelectorAll(".adv-tab").forEach((tab) => {
-      tab.addEventListener("click", () => {
-        document.querySelectorAll(".adv-tab").forEach((t) => t.classList.remove("active"));
-        document.querySelectorAll(".adv-pane").forEach((p) => p.classList.remove("active"));
-        tab.classList.add("active");
-        const pane = el(`tab-${tab.dataset.tab}`);
-        if (pane) pane.classList.add("active");
+    // Right Sidebar Collapsible Accordion Panels (ย่อหุบได้)
+    document.querySelectorAll(".acc-head").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const card = btn.closest(".acc-card");
+        if (!card) return;
+        const body = card.querySelector(".acc-body");
+        const indicator = card.querySelector(".acc-indicator");
+        const isOpen = card.classList.contains("active");
+
+        if (isOpen) {
+          card.classList.remove("active");
+          if (body) body.style.display = "none";
+          if (indicator) indicator.textContent = "▸";
+        } else {
+          card.classList.add("active");
+          if (body) body.style.display = "flex";
+          if (indicator) indicator.textContent = "▾";
+        }
       });
     });
 
@@ -1072,7 +1137,15 @@
     if (el("btnOrderFillNow")) {
       el("btnOrderFillNow").addEventListener("click", () => {
         sendWs({ action: "fill_active_order_now", current_price: getCurPrice() });
-        showToast("⚡ บันทึกสถานะ: เปิดออเดอร์ใน MT5 แล้ว!");
+        showToast("⚡ บันทึกสถานะ: เปิดออเดอร์แล้ว!");
+      });
+    }
+
+    if (el("btnAddSubOrder")) {
+      el("btnAddSubOrder").addEventListener("click", () => {
+        const cp = getCurPrice();
+        sendWs({ action: "add_sub_order", purpose: "AUTO", execution_type: "MARKET", current_price: cp });
+        showToast("⚡ ส่งคำสั่งเปิดไม้เพิ่ม (แก้ไม้/สเกล) เรียบร้อย!");
       });
     }
 
@@ -1085,16 +1158,21 @@
 
     if (el("btnOrderCloseManual")) {
       el("btnOrderCloseManual").addEventListener("click", () => {
-        if (confirm("ยืนยันว่าได้ปิดออเดอร์ใน MT5 แล้ว?")) {
+        const ord = (currentState && currentState.risk_ticket && currentState.risk_ticket.active_order) || {};
+        const hasMulti = ord.orders && ord.orders.length > 1;
+        const confirmMsg = hasMulti
+          ? `ยืนยันว่าต้องการจบการเทรดทุกไม้ (${ord.orders.length} ไม้)?`
+          : "ยืนยันว่าต้องการจบการเทรดไม้นี้?";
+        if (confirm(confirmMsg)) {
           sendWs({ action: "close_active_order", current_price: getCurPrice() });
-          showToast("✓ บันทึกการปิดออเดอร์เรียบร้อย — เริ่มสแกนรอบใหม่");
+          showToast("✓ จบการเทรดเรียบร้อย — เริ่มสแกนรอบใหม่");
         }
       });
     }
 
     if (el("btnOrderCancel")) {
       el("btnOrderCancel").addEventListener("click", () => {
-        if (confirm("ยืนยันยกเลิกคำสั่งดักเข้าใน MT5 นี้?")) {
+        if (confirm("ยืนยันยกเลิกคำสั่งดักเข้าที่รออยู่?")) {
           sendWs({ action: "cancel_active_order", reason: "MANUAL_CANCEL" });
           showToast("✕ ยกเลิกคำสั่งเรียบร้อย — ระบบจะเริ่มสแกนหาจังหวะใหม่");
         }

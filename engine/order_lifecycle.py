@@ -40,39 +40,55 @@ def _now_bkk_str(ts: Optional[int] = None) -> str:
 
 
 class OrderLifecycleManager:
-    """Manages active trade order life cycle, price updates, floating PnL, and persistence."""
+    """Manages active trade order life cycle, price updates, floating PnL, and persistence.
+    Supports single or multiple concurrent orders for recovery/DCA (แก้ไม้) or scale-in (ทำกำไรเพิ่ม)."""
 
     def __init__(self, persistence_path: Optional[str] = None):
         self.file_path = persistence_path or ORDER_FILE_PATH
+        self.active_orders: List[Dict[str, Any]] = []
         self.active_order: Optional[Dict[str, Any]] = None
         self.order_history: List[Dict[str, Any]] = []
         self.last_event: Optional[Dict[str, Any]] = None
         self.load_from_disk()
 
+    def _sync_primary(self) -> None:
+        """Keep active_orders clean and synchronize active_order to the primary slot."""
+        self.active_orders = [o for o in self.active_orders if o.get("status") in ("PENDING", "FILLED")]
+        self.active_order = self.active_orders[0] if self.active_orders else None
+
     def load_from_disk(self) -> None:
-        """Restore active order from disk so MT5 open positions are never lost on restart."""
+        """Restore active orders from disk so open positions are never lost on restart."""
         if not os.path.exists(self.file_path):
             return
         try:
             with open(self.file_path, encoding="utf-8") as fh:
                 doc = json.load(fh)
             if isinstance(doc, dict):
-                act = doc.get("active_order")
-                if act and isinstance(act, dict) and act.get("status") in ("PENDING", "FILLED"):
-                    self.active_order = act
+                act_list = doc.get("active_orders")
+                if isinstance(act_list, list) and act_list:
+                    self.active_orders = [
+                        o for o in act_list if isinstance(o, dict) and o.get("status") in ("PENDING", "FILLED")
+                    ]
+                elif doc.get("active_order"):
+                    act = doc.get("active_order")
+                    if isinstance(act, dict) and act.get("status") in ("PENDING", "FILLED"):
+                        self.active_orders = [act]
+                self._sync_primary()
                 hist = doc.get("order_history")
                 if isinstance(hist, list):
-                    self.order_history = hist[-25:]
+                    self.order_history = hist[-50:]
         except Exception:
             pass
 
     def save_to_disk(self) -> None:
         """Atomically persist active order state and recent trade history."""
         try:
+            self._sync_primary()
             payload = {
                 "saved_at_bkk": _now_bkk_str(),
                 "active_order": self.active_order,
-                "order_history": self.order_history[-25:],
+                "active_orders": self.active_orders,
+                "order_history": self.order_history[-50:],
             }
             tmp = self.file_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -83,8 +99,8 @@ class OrderLifecycleManager:
             pass
 
     def has_active_order(self) -> bool:
-        """Check if an order is currently active (waiting for fill or currently live in MT5)."""
-        return bool(self.active_order and self.active_order.get("status") in ("PENDING", "FILLED"))
+        """Check if any order is currently active (waiting for fill or currently live in MT5)."""
+        return bool(any(o.get("status") in ("PENDING", "FILLED") for o in self.active_orders))
 
     def register_trade_setup(
         self,
@@ -119,7 +135,7 @@ class OrderLifecycleManager:
         reward_risk = float(risk_ticket.get("reward_risk") or 1.5)
 
         now_ts = int(time.time())
-        order_id = f"K79-{side}-{now_ts}"
+        order_id = f"K79-{side}-{now_ts}-O1"
 
         is_filled = exec_type == "MARKET"
         initial_status = "FILLED" if is_filled else "PENDING"
@@ -127,8 +143,11 @@ class OrderLifecycleManager:
 
         order = {
             "order_id": order_id,
+            "order_index": 1,
             "symbol": "XAUUSD",
             "side": side,
+            "purpose": "INITIAL",
+            "purpose_th": "ไม้หลัก (Initial)",
             "execution_type": exec_type,
             "order_type": order_type_str,
             "status": initial_status,
@@ -168,7 +187,8 @@ class OrderLifecycleManager:
             ),
         }
 
-        self.active_order = order
+        self.active_orders = [order]
+        self._sync_primary()
         self.last_event = {
             "type": "NEW_ORDER_REGISTERED",
             "order_id": order_id,
@@ -183,6 +203,108 @@ class OrderLifecycleManager:
         self.save_to_disk()
         return order
 
+    def add_sub_order(
+        self,
+        purpose: str = "AUTO",
+        execution_type: str = "MARKET",
+        current_price: float = 0.0,
+        entry_price: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+        lot_size: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Add a secondary order for DCA/Recovery (แก้ไม้) or Scale-in (ทำกำไรเพิ่ม).
+        Supports up to 5 concurrent active orders."""
+        if not self.has_active_order():
+            return None
+        if len(self.active_orders) >= 5:
+            return None
+
+        primary = self.active_orders[0]
+        side = primary["side"]
+        now_ts = int(time.time())
+        idx = len(self.active_orders) + 1
+
+        is_market = execution_type.upper() == "MARKET"
+        actual_entry = r2(current_price if is_market else (entry_price or current_price))
+
+        # Auto-determine purpose if AUTO:
+        # If price is in drawdown vs primary entry -> RECOVERY (แก้ไม้)
+        # If price is in profit vs primary entry -> SCALE_IN (ทำกำไรเพิ่ม)
+        purp = purpose.upper()
+        if purp == "AUTO":
+            primary_entry = float(primary.get("filled_price") or primary.get("entry_mt5") or actual_entry)
+            if side == "BUY":
+                purp = "RECOVERY" if actual_entry < primary_entry else "SCALE_IN"
+            else:
+                purp = "RECOVERY" if actual_entry > primary_entry else "SCALE_IN"
+
+        purpose_th = "ไม้แก้ (DCA)" if purp == "RECOVERY" else "ไม้เพิ่มกำไร (Scale)"
+        order_id = f"K79-{side}-{now_ts}-O{idx}"
+        order_type_str = f"{side} NOW ({purpose_th})" if is_market else f"{side} LIMIT ({purpose_th})"
+        initial_status = "FILLED" if is_market else "PENDING"
+
+        sl = r2(stop_loss or primary.get("stop_mt5"))
+        tp = r2(take_profit or primary.get("target_mt5"))
+        lot = float(lot_size or primary.get("lot_size") or 0.10)
+        actual_risk = max(1.0, float(primary.get("actual_risk_usd") or 50.0))
+
+        sub_order = {
+            "order_id": order_id,
+            "order_index": idx,
+            "symbol": "XAUUSD",
+            "side": side,
+            "purpose": purp,
+            "purpose_th": purpose_th,
+            "execution_type": "MARKET" if is_market else "LIMIT",
+            "order_type": order_type_str,
+            "status": initial_status,
+            "timeframe": primary.get("timeframe", "M5"),
+            "trading_style": primary.get("trading_style", "intraday"),
+            "entry_mt5": actual_entry,
+            "stop_mt5": sl,
+            "tp1_mt5": primary.get("tp1_mt5", tp),
+            "target_mt5": tp,
+            "breakeven_sl_mt5": r2(actual_entry),
+            "lot_size": lot,
+            "actual_risk_usd": actual_risk,
+            "potential_profit_usd": float(primary.get("potential_profit_usd") or 100.0),
+            "reward_risk": float(primary.get("reward_risk") or 1.5),
+            "created_ts": now_ts,
+            "created_bkk": _now_bkk_str(now_ts),
+            "filled_ts": now_ts if is_market else None,
+            "filled_price": actual_entry if is_market else None,
+            "tp1_hit": False,
+            "tp1_hit_ts": None,
+            "sl_moved_breakeven": False,
+            "floating_pnl_usd": 0.0,
+            "floating_pnl_r": 0.0,
+            "highest_pnl_r": 0.0,
+            "lowest_pnl_r": 0.0,
+            "closed_ts": None,
+            "close_price": None,
+            "close_reason": None,
+            "management_note_th": (
+                f"⚡ เปิด{purpose_th} สำเร็จ @ {actual_entry:.2f} (Lot {lot:.2f}) — คุม SL ที่ {sl:.2f} และ TP ที่ {tp:.2f}"
+                if is_market
+                else f"⏳ ดัก{purpose_th} @ {actual_entry:.2f} — รอเกี่ยวคำสั่ง"
+            ),
+        }
+
+        self.active_orders.append(sub_order)
+        self._sync_primary()
+        self.last_event = {
+            "type": "SUB_ORDER_ADDED",
+            "order_id": order_id,
+            "purpose": purp,
+            "purpose_th": purpose_th,
+            "side": side,
+            "entry_price": actual_entry,
+            "message": f"🔔 เปิด{purpose_th} สำเร็จ: {side} @ {actual_entry:.2f} (Lot {lot:.2f})",
+        }
+        self.save_to_disk()
+        return sub_order
+
     def update_price_tick(
         self,
         current_price: float,
@@ -191,262 +313,319 @@ class OrderLifecycleManager:
         ts: Optional[int] = None,
         contract_size: float = 100.0,
     ) -> Optional[Dict[str, Any]]:
-        """Evaluate active order against the latest price tick / candle bar.
-        Returns a dict describing the event if an order state transition occurred (e.g. FILLED, TP1, TP2, SL)."""
+        """Evaluate active orders against the latest price tick / candle bar.
+        Returns the last significant state transition event if occurred."""
         if not self.has_active_order():
             return None
-
-        order = self.active_order
-        side = order["side"]
-        entry = float(order["entry_mt5"])
-        stop = float(order["stop_mt5"])
-        tp1 = float(order["tp1_mt5"])
-        target = float(order["target_mt5"])
-        lot = float(order.get("lot_size") or 0.10)
-        risk_usd = max(1.0, float(order.get("actual_risk_usd") or 50.0))
-        rr = float(order.get("reward_risk") or 1.5)
-        invalidation = float(order.get("scenario_c_invalidation_mt5") or stop)
-        be_sl = float(order.get("breakeven_sl_mt5") or entry)
 
         bar_hi = high if high is not None else current_price
         bar_lo = low if low is not None else current_price
         now_ts = int(ts or time.time())
+        last_event = None
 
-        event = None
+        remaining_orders = []
+        for order in self.active_orders:
+            side = order["side"]
+            entry = float(order["entry_mt5"])
+            stop = float(order["stop_mt5"])
+            tp1 = float(order["tp1_mt5"])
+            target = float(order["target_mt5"])
+            lot = float(order.get("lot_size") or 0.10)
+            risk_usd = max(1.0, float(order.get("actual_risk_usd") or 50.0))
+            rr = float(order.get("reward_risk") or 1.5)
+            be_sl = float(order.get("breakeven_sl_mt5") or entry)
+            invalidation = float(order.get("scenario_c_invalidation_mt5") or stop)
 
-        # ---------------- Case 1: PENDING LIMIT ORDER ----------------
-        if order["status"] == "PENDING":
-            dist = abs(current_price - entry)
-            order["distance_to_entry_usd"] = r2(dist)
+            # ---------------- Case 1: PENDING LIMIT ORDER ----------------
+            if order["status"] == "PENDING":
+                dist = abs(current_price - entry)
+                order["distance_to_entry_usd"] = r2(dist)
 
-            # Check if price filled the limit entry
-            filled = False
-            if side == "BUY" and bar_lo <= entry:
-                filled = True
-            elif side == "SELL" and bar_hi >= entry:
-                filled = True
+                filled = False
+                if side == "BUY" and bar_lo <= entry:
+                    filled = True
+                elif side == "SELL" and bar_hi >= entry:
+                    filled = True
 
-            if filled:
-                order["status"] = "FILLED"
-                order["filled_ts"] = now_ts
-                order["filled_price"] = entry
-                order["filled_bkk"] = _now_bkk_str(now_ts)
-                order["management_note_th"] = (
-                    f"🚀 ออเดอร์เกี่ยวกับตลาดแล้ว (FILLED)! ถือครองตำแหน่งตามแผน — "
-                    f"เมื่อแตะ TP1 ({tp1:.2f}) ให้แบ่งปิด 50% และเลื่อน SL มาบังทุนที่ {be_sl:.2f}"
-                )
-                event = {
-                    "type": "ORDER_FILLED",
-                    "order_id": order["order_id"],
-                    "side": side,
-                    "filled_price": entry,
-                    "message": f"🚀 ออเดอร์เกี่ยวกับตลาดแล้ว (FILLED): {side} XAUUSD @ {entry:.2f}!",
-                }
-            else:
-                # Check if setup was invalidated before price ever filled
-                invalidated = False
-                if side == "BUY" and bar_lo <= invalidation:
-                    invalidated = True
-                    reason = "INVALIDATED_BEFORE_FILL"
-                    note = f"⚠️ ราคาทะลุแนว Invalidation ({invalidation:.2f}) ก่อนเกี่ยวออเดอร์ — แนะนำยกเลิกคำสั่ง {side} LIMIT ใน MT5"
-                elif side == "SELL" and bar_hi >= invalidation:
-                    invalidated = True
-                    reason = "INVALIDATED_BEFORE_FILL"
-                    note = f"⚠️ ราคาทะลุแนว Invalidation ({invalidation:.2f}) ก่อนเกี่ยวออเดอร์ — แนะนำยกเลิกคำสั่ง {side} LIMIT ใน MT5"
-                elif (side == "BUY" and bar_hi >= target) or (side == "SELL" and bar_lo <= target):
-                    invalidated = True
-                    reason = "MISSED_TARGET"
-                    note = f"⚪ ราคาพุ่งแตะเป้า TP2 ({target:.2f}) โดยไม่ย่อมาเกี่ยวคำสั่ง (ยกเลิกแผน)"
-
-                if invalidated:
-                    order["status"] = "CANCELLED"
-                    order["closed_ts"] = now_ts
-                    order["close_price"] = current_price
-                    order["close_reason"] = reason
-                    order["management_note_th"] = note
-                    event = {
-                        "type": "ORDER_CANCELLED",
+                if filled:
+                    order["status"] = "FILLED"
+                    order["filled_ts"] = now_ts
+                    order["filled_price"] = entry
+                    order["filled_bkk"] = _now_bkk_str(now_ts)
+                    order["management_note_th"] = (
+                        f"🚀 ออเดอร์เกี่ยวกับตลาดแล้ว ({order.get('purpose_th', side)})! "
+                        f"ถือครองตามแผน — TP1 {tp1:.2f} / TP2 {target:.2f}"
+                    )
+                    last_event = {
+                        "type": "ORDER_FILLED",
                         "order_id": order["order_id"],
                         "side": side,
-                        "reason": reason,
-                        "message": note,
+                        "filled_price": entry,
+                        "message": f"🚀 ออเดอร์เกี่ยวกับตลาดแล้ว: {side} @ {entry:.2f}!",
                     }
-                    self._archive_order()
+                    remaining_orders.append(order)
+                else:
+                    invalidated = False
+                    reason = ""
+                    if (side == "BUY" and bar_lo <= invalidation) or (side == "SELL" and bar_hi >= invalidation):
+                        invalidated = True
+                        reason = "INVALIDATED_BEFORE_FILL"
+                    elif (side == "BUY" and bar_hi >= target) or (side == "SELL" and bar_lo <= target):
+                        invalidated = True
+                        reason = "MISSED_TARGET"
 
-        # ---------------- Case 2: FILLED ACTIVE TRADE ----------------
-        elif order["status"] == "FILLED":
-            filled_p = float(order.get("filled_price") or entry)
-            delta = (current_price - filled_p) if side == "BUY" else (filled_p - current_price)
-            flt_usd = round(delta * lot * contract_size, 2)
-            flt_r = round(flt_usd / risk_usd, 2)
+                    if invalidated:
+                        order["status"] = "CANCELLED"
+                        order["closed_ts"] = now_ts
+                        order["close_price"] = current_price
+                        order["close_reason"] = reason
+                        order["management_note_th"] = "คำสั่งถูกยกเลิกเนื่องจากราคาเลยจุดเข้าหรือชนเป้าก่อน"
+                        self.order_history.append(dict(order))
+                        last_event = {
+                            "type": "ORDER_CANCELLED",
+                            "order_id": order["order_id"],
+                            "side": side,
+                            "reason": reason,
+                            "message": f"คำสั่ง {order['order_id']} ถูกยกเลิก ({reason})",
+                        }
+                    else:
+                        remaining_orders.append(order)
 
-            order["floating_pnl_usd"] = flt_usd
-            order["floating_pnl_r"] = flt_r
-            order["highest_pnl_r"] = max(float(order.get("highest_pnl_r") or flt_r), flt_r)
-            order["lowest_pnl_r"] = min(float(order.get("lowest_pnl_r") or flt_r), flt_r)
+            # ---------------- Case 2: FILLED ACTIVE TRADE ----------------
+            elif order["status"] == "FILLED":
+                filled_p = float(order.get("filled_price") or entry)
+                delta = (current_price - filled_p) if side == "BUY" else (filled_p - current_price)
+                flt_usd = round(delta * lot * contract_size, 2)
+                flt_r = round(flt_usd / risk_usd, 2)
 
-            active_sl = be_sl if order.get("sl_moved_breakeven") else stop
+                order["floating_pnl_usd"] = flt_usd
+                order["floating_pnl_r"] = flt_r
+                order["highest_pnl_r"] = max(float(order.get("highest_pnl_r") or flt_r), flt_r)
+                order["lowest_pnl_r"] = min(float(order.get("lowest_pnl_r") or flt_r), flt_r)
 
-            # 1. Check Full Target (TP2)
-            hit_tp2 = False
-            if side == "BUY" and bar_hi >= target:
-                hit_tp2 = True
-            elif side == "SELL" and bar_lo <= target:
-                hit_tp2 = True
+                active_sl = be_sl if order.get("sl_moved_breakeven") else stop
 
-            if hit_tp2:
-                order["status"] = "CLOSED_TP2"
-                order["closed_ts"] = now_ts
-                order["close_price"] = target
-                order["close_reason"] = "TP2_FULL_TARGET"
-                order["realized_pnl_r"] = rr
-                order["realized_pnl_usd"] = round(risk_usd * rr, 2)
-                order["management_note_th"] = f"🏆 ชนะแตะเป้า TP2 ({target:.2f}) สมบูรณ์! ปิดกำไรทั้งชุด (+{rr:.2f}R)"
-                event = {
-                    "type": "TRADE_CLOSED_TP2",
-                    "order_id": order["order_id"],
-                    "side": side,
-                    "pnl_r": rr,
-                    "message": f"🏆 ชนะแตะเป้า TP2 สมบูรณ์! {side} XAUUSD (+{rr:.2f}R)",
-                }
-                self._archive_order()
-                self.save_to_disk()
-                return event
+                # 1. Full Target TP2
+                hit_tp2 = False
+                if side == "BUY" and bar_hi >= target:
+                    hit_tp2 = True
+                elif side == "SELL" and bar_lo <= target:
+                    hit_tp2 = True
 
-            # 2. Check Stop Loss / Breakeven SL
-            hit_sl = False
-            if side == "BUY" and bar_lo <= active_sl:
-                hit_sl = True
-            elif side == "SELL" and bar_hi >= active_sl:
-                hit_sl = True
+                if hit_tp2:
+                    order["status"] = "CLOSED_TP2"
+                    order["closed_ts"] = now_ts
+                    order["close_price"] = target
+                    order["close_reason"] = "TP2_FULL_TARGET"
+                    order["realized_pnl_r"] = rr
+                    order["realized_pnl_usd"] = round(risk_usd * rr, 2)
+                    order["management_note_th"] = f"🏆 ชนะแตะเป้า TP2 ({target:.2f}) สมบูรณ์! (+{rr:.2f}R)"
+                    self.order_history.append(dict(order))
+                    last_event = {
+                        "type": "TRADE_CLOSED_TP2",
+                        "order_id": order["order_id"],
+                        "side": side,
+                        "pnl_r": rr,
+                        "message": f"🏆 ชนะแตะเป้า TP2 สมบูรณ์! {side} XAUUSD (+{rr:.2f}R)",
+                    }
+                    continue
 
-            if hit_sl:
-                if order.get("sl_moved_breakeven"):
-                    order["status"] = "CLOSED_BREAKEVEN"
+                # 2. Stop Loss / Breakeven SL
+                hit_sl = False
+                if side == "BUY" and bar_lo <= active_sl:
+                    hit_sl = True
+                elif side == "SELL" and bar_hi >= active_sl:
+                    hit_sl = True
+
+                if hit_sl:
+                    if order.get("sl_moved_breakeven"):
+                        order["status"] = "CLOSED_BREAKEVEN"
+                        order["realized_pnl_r"] = 0.50
+                        order["realized_pnl_usd"] = round(risk_usd * 0.50, 2)
+                        order["management_note_th"] = f"🟢 ชน SL บังทุน ({active_sl:.2f}) ล็อกกำไรไม้แรก (+0.50R)"
+                        last_event = {
+                            "type": "TRADE_CLOSED_BREAKEVEN",
+                            "order_id": order["order_id"],
+                            "side": side,
+                            "pnl_r": 0.50,
+                            "message": f"🟢 ชน SL บังทุน ล็อกกำไรไม้แรก (+0.50R)",
+                        }
+                    else:
+                        order["status"] = "CLOSED_SL"
+                        order["realized_pnl_r"] = -1.00
+                        order["realized_pnl_usd"] = -risk_usd
+                        order["management_note_th"] = f"🔴 ชน Stop Loss ({stop:.2f}) จบแผนตามวินัย (-1.00R)"
+                        last_event = {
+                            "type": "TRADE_CLOSED_SL",
+                            "order_id": order["order_id"],
+                            "side": side,
+                            "pnl_r": -1.00,
+                            "message": f"🔴 ออเดอร์ชน Stop Loss ที่ {stop:.2f} (-1.00R)",
+                        }
                     order["closed_ts"] = now_ts
                     order["close_price"] = active_sl
-                    order["close_reason"] = "BREAKEVEN_SL"
-                    order["realized_pnl_r"] = 0.50  # 50% locked at TP1, 50% stopped at BE
-                    order["realized_pnl_usd"] = round(risk_usd * 0.50, 2)
-                    order["management_note_th"] = f"🟢 ชน SL บังทุน ({active_sl:.2f}) ล็อกกำไรไม้แรก 50% สำเร็จ (+0.50R)"
-                    event = {
-                        "type": "TRADE_CLOSED_BREAKEVEN",
-                        "order_id": order["order_id"],
-                        "side": side,
-                        "pnl_r": 0.50,
-                        "message": f"🟢 ชน SL บังทุน ล็อกกำไรไม้แรก 50% เรียบร้อย (+0.50R)",
-                    }
-                else:
-                    order["status"] = "CLOSED_SL"
-                    order["closed_ts"] = now_ts
-                    order["close_price"] = stop
-                    order["close_reason"] = "STOP_LOSS"
-                    order["realized_pnl_r"] = -1.00
-                    order["realized_pnl_usd"] = -risk_usd
-                    order["management_note_th"] = f"🔴 ชน Stop Loss ({stop:.2f}) จบแผนตามวินัย (-1.00R)"
-                    event = {
-                        "type": "TRADE_CLOSED_SL",
-                        "order_id": order["order_id"],
-                        "side": side,
-                        "pnl_r": -1.00,
-                        "message": f"🔴 ออเดอร์ชน Stop Loss ที่ {stop:.2f} (-1.00R)",
-                    }
-                self._archive_order()
-                self.save_to_disk()
-                return event
+                    order["close_reason"] = "BREAKEVEN_SL" if order.get("sl_moved_breakeven") else "STOP_LOSS"
+                    self.order_history.append(dict(order))
+                    continue
 
-            # 3. Check TP1 Partial Profit & Move SL to Breakeven
-            if not order.get("tp1_hit"):
-                hit_tp1 = False
-                if side == "BUY" and bar_hi >= tp1:
-                    hit_tp1 = True
-                elif side == "SELL" and bar_lo <= tp1:
-                    hit_tp1 = True
+                # 3. TP1 Partial Profit & Breakeven SL
+                if not order.get("tp1_hit"):
+                    hit_tp1 = False
+                    if side == "BUY" and bar_hi >= tp1:
+                        hit_tp1 = True
+                    elif side == "SELL" and bar_lo <= tp1:
+                        hit_tp1 = True
 
-                if hit_tp1:
-                    order["tp1_hit"] = True
-                    order["tp1_hit_ts"] = now_ts
-                    order["sl_moved_breakeven"] = True
-                    order["management_note_th"] = (
-                        f"🟢 ราคาแตะ TP1 ({tp1:.2f}) แล้ว! แนะนำแบ่งปิด 50% ใน MT5 "
-                        f"และเลื่อน Stop Loss มาบังทุนที่ {be_sl:.2f} ทันที"
-                    )
-                    event = {
-                        "type": "TP1_REACHED",
-                        "order_id": order["order_id"],
-                        "side": side,
-                        "message": f"🟢 แตะเป้า TP1 ({tp1:.2f}) แล้ว! แบ่งปิด 50% และเลื่อน SL บังทุน",
-                    }
+                    if hit_tp1:
+                        order["tp1_hit"] = True
+                        order["tp1_hit_ts"] = now_ts
+                        order["sl_moved_breakeven"] = True
+                        order["management_note_th"] = (
+                            f"🟢 ราคาแตะ TP1 ({tp1:.2f}) แล้ว! แนะนำแบ่งปิด 50% "
+                            f"และเลื่อน Stop Loss มาบังทุนที่ {be_sl:.2f} ทันที"
+                        )
+                        last_event = {
+                            "type": "TP1_REACHED",
+                            "order_id": order["order_id"],
+                            "side": side,
+                            "message": f"🟢 แตะเป้า TP1 ({tp1:.2f}) แล้ว! แบ่งปิด 50% และเลื่อน SL บังทุน",
+                        }
 
-        if event:
-            self.last_event = event
+                remaining_orders.append(order)
+
+        self.active_orders = remaining_orders
+        self._sync_primary()
+        if last_event:
+            self.last_event = last_event
         self.save_to_disk()
-        return event
+        return last_event
 
-    def _archive_order(self) -> None:
-        """Move completed/cancelled order into history and clear active slot."""
-        if self.active_order:
-            self.order_history.append(dict(self.active_order))
-            self.active_order = None
-
-    def cancel_active_order(self, reason: str = "MANUAL_CANCEL") -> Optional[Dict[str, Any]]:
-        """User explicitly cancels the pending order in MT5."""
-        if not self.active_order:
+    def close_order_by_id(
+        self,
+        order_id: str,
+        current_price: Optional[float] = None,
+        reason: str = "MANUAL_CLOSE",
+    ) -> Optional[Dict[str, Any]]:
+        """Close a specific active order by its ID."""
+        target_ord = None
+        for o in self.active_orders:
+            if o.get("order_id") == order_id:
+                target_ord = o
+                break
+        if not target_ord:
             return None
-        order = self.active_order
-        order["status"] = "CANCELLED"
-        order["closed_ts"] = int(time.time())
-        order["close_reason"] = reason
-        order["management_note_th"] = "ยกเลิกคำสั่งเรียบร้อยแล้ว — กลับสู่โหมดสแกนหาจังหวะใหม่"
+
+        now_ts = int(time.time())
+        cp = current_price or target_ord.get("entry_mt5") or 0.0
+        side = target_ord["side"]
+        lot = float(target_ord.get("lot_size") or 0.10)
+        entry_p = float(target_ord.get("filled_price") or target_ord.get("entry_mt5") or cp)
+        delta = (cp - entry_p) if side == "BUY" else (entry_p - cp)
+        flt_usd = round(delta * lot * 100.0, 2)
+        risk_usd = max(1.0, float(target_ord.get("actual_risk_usd") or 50.0))
+        flt_r = round(flt_usd / risk_usd, 2)
+
+        target_ord["status"] = "CLOSED_MANUAL"
+        target_ord["closed_ts"] = now_ts
+        target_ord["close_price"] = cp
+        target_ord["close_reason"] = reason
+        target_ord["realized_pnl_usd"] = flt_usd
+        target_ord["realized_pnl_r"] = flt_r
+        target_ord["management_note_th"] = f"จบการเทรดไม้นี้เรียบร้อย (PnL {flt_r:+.2f}R, {flt_usd:+.2f} USD)"
+
+        self.order_history.append(dict(target_ord))
+        self.active_orders = [o for o in self.active_orders if o.get("order_id") != order_id]
+        self._sync_primary()
         event = {
-            "type": "ORDER_CANCELLED",
-            "order_id": order["order_id"],
-            "reason": reason,
-            "message": "ยกเลิกคำสั่งเรียบร้อยแล้ว",
+            "type": "ORDER_CLOSED_MANUAL",
+            "order_id": order_id,
+            "pnl_usd": flt_usd,
+            "pnl_r": flt_r,
+            "message": f"จบการเทรดไม้ {target_ord.get('purpose_th', '')} เรียบร้อย ({flt_usd:+.2f} USD)",
         }
         self.last_event = event
-        self._archive_order()
         self.save_to_disk()
         return event
+
+    def close_all_orders(
+        self,
+        current_price: Optional[float] = None,
+        reason: str = "MANUAL_CLOSE_ALL",
+    ) -> List[Dict[str, Any]]:
+        """Close all currently active orders simultaneously."""
+        events = []
+        order_ids = [o["order_id"] for o in list(self.active_orders)]
+        for oid in order_ids:
+            ev = self.close_order_by_id(oid, current_price=current_price, reason=reason)
+            if ev:
+                events.append(ev)
+        self.active_orders = []
+        self._sync_primary()
+        self.save_to_disk()
+        return events
 
     def close_active_order(self, reason: str = "MANUAL_CLOSE", current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
-        """User explicitly closed the active order in MT5."""
-        if not self.active_order:
+        """Backwards-compatible: closes the active order (or all if multiple)."""
+        if not self.has_active_order():
             return None
-        order = self.active_order
-        now_ts = int(time.time())
-        order["status"] = "CLOSED_MANUAL"
-        order["closed_ts"] = now_ts
-        order["close_price"] = current_price or order.get("entry_mt5")
-        order["close_reason"] = reason
-        order["management_note_th"] = f"ปิดออเดอร์ใน MT5 เรียบร้อย (PnL {order.get('floating_pnl_r', 0.0):+.2f}R)"
-        event = {
-            "type": "TRADE_CLOSED_MANUAL",
-            "order_id": order["order_id"],
-            "message": f"บันทึกการปิดออเดอร์เรียบร้อย ({order.get('floating_pnl_usd', 0.0):+.2f} USD)",
-        }
-        self.last_event = event
-        self._archive_order()
-        self.save_to_disk()
-        return event
+        if len(self.active_orders) > 1:
+            events = self.close_all_orders(current_price=current_price, reason=reason)
+            return events[-1] if events else None
+        else:
+            return self.close_order_by_id(self.active_orders[0]["order_id"], current_price=current_price, reason=reason)
 
-    def fill_now(self, current_price: float) -> Optional[Dict[str, Any]]:
-        """User pressed fill now (e.g. manually entered at market in MT5 before limit was hit)."""
-        if not self.active_order or self.active_order.get("status") != "PENDING":
+    def cancel_active_order(self, reason: str = "MANUAL_CANCEL", order_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Cancel a pending limit order (or all pending orders if order_id is None)."""
+        if not self.has_active_order():
             return None
+        if order_id:
+            for o in self.active_orders:
+                if o.get("order_id") == order_id:
+                    o["status"] = "CANCELLED"
+                    o["closed_ts"] = int(time.time())
+                    o["close_reason"] = reason
+                    self.order_history.append(dict(o))
+                    self.active_orders = [x for x in self.active_orders if x.get("order_id") != order_id]
+                    self._sync_primary()
+                    self.save_to_disk()
+                    return {"type": "ORDER_CANCELLED", "order_id": order_id, "message": "ยกเลิกคำสั่งเรียบร้อย"}
+            return None
+        else:
+            for o in list(self.active_orders):
+                if o.get("status") == "PENDING":
+                    o["status"] = "CANCELLED"
+                    o["closed_ts"] = int(time.time())
+                    o["close_reason"] = reason
+                    self.order_history.append(dict(o))
+            self.active_orders = [o for o in self.active_orders if o.get("status") == "FILLED"]
+            self._sync_primary()
+            self.save_to_disk()
+            return {"type": "ORDER_CANCELLED", "message": "ยกเลิกคำสั่งที่รอทั้งหมดเรียบร้อย"}
+
+    def fill_now(self, current_price: float, order_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """User pressed fill now for pending order(s)."""
+        if not self.has_active_order():
+            return None
+        target = None
+        for o in self.active_orders:
+            if (not order_id or o.get("order_id") == order_id) and o.get("status") == "PENDING":
+                target = o
+                break
+        if not target:
+            return None
+
         now_ts = int(time.time())
-        order = self.active_order
-        order["status"] = "FILLED"
-        order["filled_ts"] = now_ts
-        order["filled_price"] = current_price
-        order["filled_bkk"] = _now_bkk_str(now_ts)
-        order["management_note_th"] = (
-            f"🚀 เปิดออเดอร์ใน MT5 แล้ว @ {current_price:.2f} — "
-            f"ติดตามเป้าหมาย TP1 ({order['tp1_mt5']:.2f}) และ TP2 ({order['target_mt5']:.2f})"
+        target["status"] = "FILLED"
+        target["filled_ts"] = now_ts
+        target["filled_price"] = current_price
+        target["filled_bkk"] = _now_bkk_str(now_ts)
+        target["management_note_th"] = (
+            f"🚀 เปิดออเดอร์แล้ว @ {current_price:.2f} — ติดตามเป้าหมาย TP1 ({target['tp1_mt5']:.2f}) และ TP2 ({target['target_mt5']:.2f})"
         )
+        self._sync_primary()
         event = {
             "type": "ORDER_FILLED",
-            "order_id": order["order_id"],
+            "order_id": target["order_id"],
             "filled_price": current_price,
             "message": f"เปลี่ยนสถานะเป็นเปิดออเดอร์แล้ว @ {current_price:.2f}",
         }
@@ -454,40 +633,83 @@ class OrderLifecycleManager:
         self.save_to_disk()
         return event
 
-    def set_breakeven(self) -> Optional[Dict[str, Any]]:
+    def set_breakeven(self, order_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """User marked SL as moved to Break-Even."""
-        if not self.active_order or self.active_order.get("status") != "FILLED":
+        if not self.has_active_order():
             return None
-        order = self.active_order
-        order["sl_moved_breakeven"] = True
-        order["management_note_th"] = (
-            f"🛡️ เลื่อน SL บังทุนที่ {order.get('breakeven_sl_mt5', order['entry_mt5']):.2f} เรียบร้อย — ถือครองลุ้น TP2 อย่างปลอดภัย"
-        )
+        affected = 0
+        for o in self.active_orders:
+            if (not order_id or o.get("order_id") == order_id) and o.get("status") == "FILLED":
+                o["sl_moved_breakeven"] = True
+                o["management_note_th"] = f"🛡️ เลื่อน SL บังทุนที่ {o.get('breakeven_sl_mt5', o['entry_mt5']):.2f} เรียบร้อย"
+                affected += 1
+        if affected == 0:
+            return None
+        self._sync_primary()
         event = {
             "type": "SL_MOVED_BREAKEVEN",
-            "order_id": order["order_id"],
-            "message": "บันทึกการขยับ SL บังทุนเรียบร้อย",
+            "message": f"บันทึกการขยับ SL บังทุน ({affected} ไม้) เรียบร้อย",
         }
         self.last_event = event
         self.save_to_disk()
         return event
 
     def get_active_order_dict(self, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
-        """Return serialized active order data with live updated metrics."""
-        if not self.active_order:
+        """Return serialized active order data with individual positions and portfolio aggregates."""
+        self._sync_primary()
+        if not self.active_orders:
             return None
-        out = dict(self.active_order)
-        if current_price is not None:
-            if out.get("status") == "PENDING":
-                out["distance_to_entry_usd"] = r2(abs(current_price - float(out["entry_mt5"])))
-            elif out.get("status") == "FILLED":
-                filled_p = float(out.get("filled_price") or out["entry_mt5"])
-                side = out["side"]
-                lot = float(out.get("lot_size") or 0.10)
-                risk_usd = max(1.0, float(out.get("actual_risk_usd") or 50.0))
-                delta = (current_price - filled_p) if side == "BUY" else (filled_p - current_price)
+
+        primary = self.active_orders[0]
+        out = dict(primary)
+        cp = current_price if current_price is not None else float(primary.get("entry_mt5") or 0.0)
+
+        orders_data = []
+        total_lot = 0.0
+        total_pnl_usd = 0.0
+        total_pnl_r = 0.0
+        weighted_entry_sum = 0.0
+
+        for idx, ord_item in enumerate(self.active_orders, 1):
+            o_dict = dict(ord_item)
+            o_dict["order_index"] = idx
+            lot = float(o_dict.get("lot_size") or 0.10)
+            risk_usd = max(1.0, float(o_dict.get("actual_risk_usd") or 50.0))
+            entry_p = float(o_dict.get("filled_price") or o_dict.get("entry_mt5") or cp)
+            side = o_dict.get("side", "BUY")
+
+            if o_dict.get("status") == "PENDING":
+                o_dict["distance_to_entry_usd"] = r2(abs(cp - entry_p))
+            elif o_dict.get("status") == "FILLED":
+                delta = (cp - entry_p) if side == "BUY" else (entry_p - cp)
                 flt_usd = round(delta * lot * 100.0, 2)
                 flt_r = round(flt_usd / risk_usd, 2)
-                out["floating_pnl_usd"] = flt_usd
-                out["floating_pnl_r"] = flt_r
+                o_dict["floating_pnl_usd"] = flt_usd
+                o_dict["floating_pnl_r"] = flt_r
+
+                total_lot += lot
+                total_pnl_usd += flt_usd
+                total_pnl_r += flt_r
+                weighted_entry_sum += entry_p * lot
+
+            orders_data.append(o_dict)
+
+        avg_entry = round(weighted_entry_sum / total_lot, 2) if total_lot > 0 else float(primary.get("entry_mt5") or cp)
+
+        out["orders"] = orders_data
+        out["total_orders_count"] = len(orders_data)
+        out["filled_orders_count"] = sum(1 for o in orders_data if o.get("status") == "FILLED")
+        out["pending_orders_count"] = sum(1 for o in orders_data if o.get("status") == "PENDING")
+        out["total_lot_size"] = round(total_lot, 2) if total_lot > 0 else float(primary.get("lot_size") or 0.10)
+        out["total_floating_pnl_usd"] = round(total_pnl_usd, 2)
+        out["total_floating_pnl_r"] = round(total_pnl_r, 2)
+        out["avg_entry_price"] = avg_entry
+
+        if len(orders_data) > 1:
+            out["floating_pnl_usd"] = round(total_pnl_usd, 2)
+            out["floating_pnl_r"] = round(total_pnl_r, 2)
+        elif len(orders_data) == 1 and orders_data[0].get("status") == "FILLED":
+            out["floating_pnl_usd"] = orders_data[0]["floating_pnl_usd"]
+            out["floating_pnl_r"] = orders_data[0]["floating_pnl_r"]
+
         return out

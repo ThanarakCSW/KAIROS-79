@@ -184,6 +184,76 @@ class TestOrderLifecycle(unittest.TestCase):
         self.assertEqual(len(self.manager.order_history), 1)
         self.assertEqual(self.manager.order_history[0]["status"], "CLOSED_MANUAL")
 
+    def test_multi_order_recovery_and_scale_in(self):
+        """Verify opening multiple orders for DCA/Recovery (แก้ไม้) and Scale-in (ทำกำไรเพิ่ม)."""
+        risk_ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2640.00,
+            "tp1_mt5": 2660.00,
+            "target_mt5": 2670.00,
+            "lot_size": 0.10,
+            "actual_risk_usd": 100.0,
+            "reward_risk": 2.0,
+            "order_type": "BUY NOW (Market)",
+            "execution_type": "MARKET",
+        }
+        smc_setup = {"side": "BUY", "execution_type": "MARKET", "confluence_score": 75}
+
+        # 1. Register primary order at 2650.00 (FILLED)
+        o1 = self.manager.register_trade_setup(risk_ticket, smc_setup, 2650.00)
+        self.assertEqual(o1["status"], "FILLED")
+        self.assertEqual(len(self.manager.active_orders), 1)
+
+        # 2. Price drops to 2645.00 (drawdown) -> Open Recovery / DCA Order (แก้ไม้)
+        o2 = self.manager.add_sub_order(
+            purpose="AUTO",
+            execution_type="MARKET",
+            current_price=2645.00,
+            lot_size=0.10,
+        )
+        self.assertIsNotNone(o2)
+        self.assertEqual(o2["purpose"], "RECOVERY")
+        self.assertEqual(o2["purpose_th"], "ไม้แก้ (DCA)")
+        self.assertEqual(o2["entry_mt5"], 2645.00)
+        self.assertEqual(len(self.manager.active_orders), 2)
+
+        # 3. Check combined position stats at price 2648.00:
+        # Order 1: 2650 -> 2648 = -2.00 * 0.10 * 100 = -$20.00
+        # Order 2: 2645 -> 2648 = +3.00 * 0.10 * 100 = +$30.00
+        # Total PnL = +$10.00
+        # Avg Entry = (2650 * 0.1 + 2645 * 0.1) / 0.2 = 2647.50
+        summary = self.manager.get_active_order_dict(current_price=2648.00)
+        self.assertEqual(summary["total_orders_count"], 2)
+        self.assertEqual(summary["total_lot_size"], 0.20)
+        self.assertEqual(summary["avg_entry_price"], 2647.50)
+        self.assertEqual(summary["total_floating_pnl_usd"], 10.00)
+        self.assertEqual(summary["floating_pnl_usd"], 10.00)
+
+        # 4. Price surges to 2655.00 -> Add Scale-in / Pyramiding Order (ทำกำไรเพิ่ม)
+        o3 = self.manager.add_sub_order(
+            purpose="AUTO",
+            execution_type="MARKET",
+            current_price=2655.00,
+            lot_size=0.10,
+        )
+        self.assertIsNotNone(o3)
+        self.assertEqual(o3["purpose"], "SCALE_IN")
+        self.assertEqual(o3["purpose_th"], "ไม้เพิ่มกำไร (Scale)")
+        self.assertEqual(len(self.manager.active_orders), 3)
+
+        # 5. Close individual order (e.g. close the recovery order #2 to lock in profit)
+        ev_close_o2 = self.manager.close_order_by_id(o2["order_id"], current_price=2655.00)
+        self.assertIsNotNone(ev_close_o2)
+        self.assertEqual(len(self.manager.active_orders), 2)
+        self.assertEqual(len(self.manager.order_history), 1)
+
+        # 6. Close remaining orders all at once
+        all_closed = self.manager.close_all_orders(current_price=2656.00)
+        self.assertEqual(len(all_closed), 2)
+        self.assertFalse(self.manager.has_active_order())
+        self.assertEqual(len(self.manager.order_history), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

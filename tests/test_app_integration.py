@@ -241,6 +241,24 @@ class TestAppIntegration(unittest.TestCase):
             self.assertEqual(resp_doc["active_order"]["status"], "FILLED")
             self.assertEqual(resp_doc["active_order"]["filled_price"], 2651.00)
 
+            # 4. Test POST /api/order/action add_sub_order (Multi-Order DCA / Scale-in)
+            reader_sub = asyncio.StreamReader()
+            sub_body = json.dumps({"action": "add_sub_order", "current_price": 2646.00, "purpose": "AUTO"}).encode("utf-8")
+            sub_req = (
+                f"POST /api/order/action HTTP/1.1\r\n"
+                f"Host: localhost\r\n"
+                f"Content-Length: {len(sub_body)}\r\n"
+                f"Content-Type: application/json\r\n\r\n"
+            ).encode("utf-8") + sub_body
+            reader_sub.feed_data(sub_req)
+            reader_sub.feed_eof()
+            writer_sub = _MemoryWriter()
+            await srv.handle_client(reader_sub, writer_sub)
+
+            resp_sub_body = bytes(writer_sub.buffer).split(b"\r\n\r\n", 1)[1]
+            resp_sub_doc = json.loads(resp_sub_body.decode("utf-8"))
+            self.assertEqual(resp_sub_doc["active_order"]["total_orders_count"], 2)
+
             # Close active order
             reader4 = asyncio.StreamReader()
             close_body = json.dumps({"action": "close", "current_price": 2658.00}).encode("utf-8")
