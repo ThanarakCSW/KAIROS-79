@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright   "Copyright 2026, KAIROS-79 AI Team"
 #property link        "https://github.com/ThanarakCSW/KAIROS-79"
-#property version     "1.04"
-#property description "KAIROS-79 MetaTrader 5 Bridge Expert Advisor (EA) v1.04"
+#property version     "1.05"
+#property description "KAIROS-79 MetaTrader 5 Bridge Expert Advisor (EA) v1.05"
 #property description "Connects MT5 on Windows/VPS directly to KAIROS-79 AI Web Platform."
-#property description "Supports Auto ON/OFF, Hard SL Guard, Daily DD Kill Switch, Partial Close, and Local BE."
+#property description "Supports Auto ON/OFF, Hard SL, Daily Kill Switch, OnTradeTransaction Deal Sync, and Step Trailing."
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -66,6 +66,8 @@ int            g_next_poll_ms = 500;
 
 string         g_processed_action_ids[100];
 int            g_processed_idx = 0;
+ulong          g_processed_deal_ids[100];
+int            g_processed_deal_idx = 0;
 int            g_current_day_of_year = -1;
 double         g_day_start_equity = 0.0;
 bool           g_daily_kill_switch_tripped = false;
@@ -88,6 +90,24 @@ void MarkActionProcessed(const string act_id)
    if(act_id == "") return;
    g_processed_action_ids[g_processed_idx] = act_id;
    g_processed_idx = (g_processed_idx + 1) % 100;
+}
+
+bool IsDealProcessed(ulong deal_id)
+{
+   if(deal_id <= 0) return false;
+   for(int i = 0; i < 100; i++)
+   {
+      if(g_processed_deal_ids[i] == deal_id)
+         return true;
+   }
+   return false;
+}
+
+void MarkDealProcessed(ulong deal_id)
+{
+   if(deal_id <= 0) return;
+   g_processed_deal_ids[g_processed_deal_idx] = deal_id;
+   g_processed_deal_idx = (g_processed_deal_idx + 1) % 100;
 }
 
 bool IsInRolloverWindow()
@@ -478,6 +498,32 @@ void SendExecutionReport(
       fill_price, slippage_pts, sl, tp, profit, comment, error_code, error_msg
    );
    string payload = part1 + part2;
+
+   string resp = "";
+   SendHttpRequest("POST", "/api/ea/execution", payload, resp);
+}
+
+//+------------------------------------------------------------------+
+//| Send Real Deal Exit Report from OnTradeTransaction               |
+//+------------------------------------------------------------------+
+void SendDealExecutionReport(
+   ulong deal,
+   ulong position_id,
+   const string sym,
+   const string side,
+   double lot,
+   double fill_price,
+   double profit,
+   double swap,
+   double commission,
+   const string comment,
+   const string deal_reason_str
+)
+{
+   string payload = StringFormat(
+      "{\"action_id\":\"DEAL-%I64u\",\"signal_id\":\"\",\"status\":\"DEAL_CLOSED\",\"deal\":%I64u,\"ticket\":%I64u,\"symbol\":\"%s\",\"side\":\"%s\",\"order_type\":\"DEAL\",\"lot\":%.2f,\"fill_price\":%.2f,\"profit\":%.2f,\"swap\":%.2f,\"commission\":%.2f,\"comment\":\"%s\",\"close_reason\":\"%s\",\"error_code\":0,\"error_msg\":\"OK\"}",
+      deal, deal, position_id, sym, side, lot, fill_price, profit, swap, commission, comment, deal_reason_str
+   );
 
    string resp = "";
    SendHttpRequest("POST", "/api/ea/execution", payload, resp);
@@ -1325,7 +1371,7 @@ void UpdateChartHUD()
    }
 
    string hud = "========================================\n"
-              + "  🤖 KAIROS-79 EA Bridge v1.04\n"
+              + "  🤖 KAIROS-79 EA Bridge v1.05\n"
               + "========================================\n"
               + "  Server URL:     " + g_server_url + "\n"
               + "  Status:         " + conn_text + "\n"
@@ -1338,7 +1384,7 @@ void UpdateChartHUD()
               + "  Open/Pending:   " + IntegerToString(CountMagicPositions()) + " / " + IntegerToString(OrdersTotal()) + "\n"
               + "  Poll Interval:  " + IntegerToString(g_next_poll_ms) + "ms\n"
               + "========================================\n"
-              + (g_server_online ? "  ✅ Telemetry & Hard-SL Guards Active" : trouble_hint);
+              + (g_server_online ? "  ✅ Telemetry, Hard-SL & Deal Sync Active" : trouble_hint);
 
    Comment(hud);
 }
@@ -1362,7 +1408,7 @@ int OnInit()
    CheckDailyDrawdownGuard();
 
    Print("=======================================================");
-   Print("🚀 Starting KAIROS-79 MT5 Bridge EA v1.04 on ", g_symbol);
+   Print("🚀 Starting KAIROS-79 MT5 Bridge EA v1.05 on ", g_symbol);
    Print("🔗 Configured Server URL: ", g_server_url);
    Print("🛡️ Magic Number: ", InpMagicNumber, " | MaxSpread=$", InpMaxSpreadUsd, " | HardSL=", (InpEnforceHardSL ? "ON" : "OFF"));
    if(StringFind(g_server_url, ":8080") >= 0)
@@ -1427,6 +1473,55 @@ void OnTick()
       g_last_tick_guard_ms = now_ms;
       CheckDailyDrawdownGuard();
       CheckLocalPositionGuards();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Trade Transaction Event Handler (Real Deal History Capture)      |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                         const MqlTradeRequest &request,
+                         const MqlTradeResult &result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      ulong deal = trans.deal;
+      if(deal > 0 && !IsDealProcessed(deal) && HistoryDealSelect(deal))
+      {
+         long deal_entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+         long deal_magic = HistoryDealGetInteger(deal, DEAL_MAGIC);
+         if(InpMagicNumber != 0 && deal_magic != InpMagicNumber) return;
+
+         string sym = HistoryDealGetString(deal, DEAL_SYMBOL);
+         if(sym != "" && sym != g_symbol) return;
+
+         // Check if this is an exit deal (DEAL_ENTRY_OUT or DEAL_ENTRY_OUT_BY)
+         if(deal_entry == DEAL_ENTRY_OUT || deal_entry == DEAL_ENTRY_OUT_BY)
+         {
+            MarkDealProcessed(deal);
+            ulong pos_id = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+            double profit = HistoryDealGetDouble(deal, DEAL_PROFIT);
+            double swap = HistoryDealGetDouble(deal, DEAL_SWAP);
+            double comm = HistoryDealGetDouble(deal, DEAL_COMMISSION);
+            double price = HistoryDealGetDouble(deal, DEAL_PRICE);
+            double vol = HistoryDealGetDouble(deal, DEAL_VOLUME);
+            long deal_type = HistoryDealGetInteger(deal, DEAL_TYPE);
+            long deal_reason = HistoryDealGetInteger(deal, DEAL_REASON);
+            string comment = HistoryDealGetString(deal, DEAL_COMMENT);
+
+            string reason_str = "DEAL_CLOSE";
+            if(deal_reason == DEAL_REASON_SL) reason_str = "DEAL_SL";
+            else if(deal_reason == DEAL_REASON_TP) reason_str = "DEAL_TP";
+            else if(deal_reason == DEAL_REASON_CLIENT) reason_str = "DEAL_MANUAL";
+
+            string side_str = (deal_type == DEAL_TYPE_BUY) ? "BUY" : ((deal_type == DEAL_TYPE_SELL) ? "SELL" : "");
+
+            PrintFormat("💰 Real MT5 Deal #%I64u Position #%I64u: PnL=$%.2f, Swap=$%.2f, Comm=$%.2f, Reason=%s",
+               deal, pos_id, profit, swap, comm, reason_str);
+
+            SendDealExecutionReport(deal, pos_id, sym, side_str, vol, price, profit, swap, comm, comment, reason_str);
+         }
+      }
    }
 }
 //+------------------------------------------------------------------+

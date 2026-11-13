@@ -148,8 +148,11 @@ class TradingAssistantCore:
             min_win_prob_pct=min_win_prob,
         )
         smc["trade_setup"] = opt_setup
+        pns_cfg = self.config.get("pre_news_shield") or {}
+        pre_mins = int(pns_cfg.get("minutes_before") or 15)
         news = evaluate_news_window(
-            blackout_minutes=int(self.config.get("news_blackout_minutes") or 30)
+            blackout_minutes=int(self.config.get("news_blackout_minutes") or 30),
+            pre_news_minutes=pre_mins,
         )
         market_flow = build_market_flow_narrative(
             structure=structure,
@@ -228,7 +231,62 @@ class TradingAssistantCore:
             high=cur_hi,
             low=cur_lo,
             ts=cur_ts,
+            config=self.config,
         )
+
+        # Pre-News Position Shield: Cancel PENDING limit orders & move winning FILLED to Breakeven
+        if pns_cfg.get("enabled", True) and news.get("is_imminent_news") and self.order_manager.has_active_order():
+            imminent_events = news.get("imminent_news_events") or []
+            ev_title = imminent_events[0]["title"] if imminent_events else "High-Impact USD News"
+            min_away = float(imminent_events[0].get("minutes_away", 0.0)) if imminent_events else 0.0
+
+            for ord_item in list(self.order_manager.active_orders):
+                # 1. Cancel Pending Limit Orders
+                if ord_item.get("status") == "PENDING" and pns_cfg.get("cancel_pending_limit", True):
+                    oid = ord_item.get("order_id")
+                    if oid and not ord_item.get("pre_news_shield_handled"):
+                        ord_item["pre_news_shield_handled"] = True
+                        cancel_ev = self.order_manager.cancel_active_order(
+                            reason="PRE_NEWS_SHIELD",
+                            order_id=oid,
+                        )
+                        if cancel_ev:
+                            cancel_ev["message"] = (
+                                f"🛡️ Pre-News Shield: ยกเลิกใบจอง {ord_item['side']} LIMIT @ {ord_item['entry_mt5']:.2f} "
+                                f"ก่อนข่าวแดง USD ({ev_title}) ออกใน {min_away:.0f} นาที"
+                            )
+                            if not order_event:
+                                order_event = cancel_ev
+                        bt = ord_item.get("broker_ticket")
+                        if bt:
+                            self.ea_bridge.enqueue_action("CLOSE_ORDER", {"ticket": int(bt), "symbol": "XAUUSD"})
+
+                # 2. Protect Winning Positions with Break-Even SL
+                elif ord_item.get("status") == "FILLED" and not ord_item.get("sl_moved_breakeven"):
+                    be_threshold = float(pns_cfg.get("breakeven_filled_min_r") or 0.25)
+                    flt_r = float(ord_item.get("floating_pnl_r") or 0.0)
+                    if flt_r >= be_threshold:
+                        be_sl = float(ord_item.get("breakeven_sl_mt5") or ord_item.get("entry_mt5") or 0.0)
+                        ord_item["sl_moved_breakeven"] = True
+                        ord_item["stop_mt5"] = be_sl
+                        ord_item["pre_news_shield_handled"] = True
+                        ord_item["management_note_th"] = (
+                            f"🛡️ Pre-News Shield: ขยับ SL บังทุนที่ {be_sl:.2f} "
+                            f"ก่อนข่าวแดง USD ({ev_title}) ออกใน {min_away:.0f} นาที"
+                        )
+                        self.order_manager.save_to_disk()
+                        bt = ord_item.get("broker_ticket")
+                        if bt:
+                            self.ea_bridge.enqueue_action(
+                                action_type="MODIFY_ORDER",
+                                payload={
+                                    "ticket": int(bt),
+                                    "symbol": ord_item.get("symbol", "XAUUSD"),
+                                    "new_sl": be_sl,
+                                    "new_tp": float(ord_item.get("target_mt5") or 0.0),
+                                },
+                                signal_id=f"{ord_item['order_id']}-NEWS-BE",
+                            )
 
         min_conf = int((self.config.get("ai") or {}).get("auto_trigger_min_confluence") or 55)
         if self.order_manager.has_active_order():
@@ -450,6 +508,29 @@ class TradingAssistantCore:
                         },
                         signal_id=f"{target_ord['order_id']}-TP1",
                     )
+
+            # Case 2.6: Step Trailing Stop Modify on MT5
+            if order_event and order_event.get("type") == "TRAILING_STOP_UPDATED":
+                trail_oid = order_event.get("order_id")
+                target_ord = next(
+                    (o for o in self.order_manager.active_orders if o.get("order_id") == trail_oid),
+                    self.order_manager.active_order,
+                )
+                if target_ord and target_ord.get("broker_ticket") and order_event.get("new_sl"):
+                    new_sl_val = float(order_event["new_sl"])
+                    step_idx = order_event.get("step_index", 1)
+                    sig_trail = f"{target_ord['order_id']}-TRAIL-{step_idx}"
+                    if sig_trail not in self.ea_bridge.executed_signal_ids:
+                        self.ea_bridge.enqueue_action(
+                            action_type="MODIFY_ORDER",
+                            payload={
+                                "ticket": int(target_ord["broker_ticket"]),
+                                "symbol": target_ord.get("symbol", "XAUUSD"),
+                                "new_sl": new_sl_val,
+                                "new_tp": float(target_ord.get("target_mt5") or 0.0),
+                            },
+                            signal_id=sig_trail,
+                        )
 
             # Case 3: Autonomous Close / Invalidation when disadvantaged, circuit-broken, or exited
             if order_event and order_event.get("type") in (

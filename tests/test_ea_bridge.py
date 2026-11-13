@@ -812,6 +812,106 @@ class TestEABridge(unittest.TestCase):
             if os.path.exists(tmp_state):
                 os.remove(tmp_state)
 
+    def test_pre_news_position_shield(self):
+        """Verify Pre-News Shield cancels pending limit orders and protects winning positions."""
+        import tempfile
+        from unittest.mock import patch
+        from engine.order_lifecycle import OrderLifecycleManager
+
+        tmp_state = os.path.join(tempfile.gettempdir(), f"k79_news_shield_{os.getpid()}.json")
+        if os.path.exists(tmp_state):
+            os.remove(tmp_state)
+        try:
+            core = TradingAssistantCore()
+            core.order_manager = OrderLifecycleManager(persistence_path=tmp_state)
+            core.ea_bridge = EABridgeManager(config_path=self.tmp_config, heartbeat_timeout_sec=2.0)
+            core.ea_bridge.set_auto_trading(True)
+            core.ea_bridge.action_queue.clear()
+            core.ea_bridge.executed_signal_ids.clear()
+
+            # 1. Register a PENDING limit order with ticket 888111
+            core.order_manager.register_trade_setup(
+                risk_ticket={
+                    "side": "BUY",
+                    "execution_type": "LIMIT",
+                    "order_type": "BUY LIMIT (Pending)",
+                    "entry_mt5": 2645.0,
+                    "stop_mt5": 2635.0,
+                    "tp1_mt5": 2655.0,
+                    "target_mt5": 2665.0,
+                    "lot_size": 0.10,
+                    "win_prob_passed": True,
+                    "verdict": "PASS",
+                },
+                smc_setup={"side": "BUY", "confluence_score": 85},
+                current_price=2650.0,
+                timeframe="M5",
+                force_replace=True,
+            )
+            core.order_manager.active_order["broker_ticket"] = 888111
+
+            # Mock imminent red news (CPI in 8 minutes)
+            mock_news = {
+                "in_news_blackout": False,
+                "is_imminent_news": True,
+                "imminent_news_events": [{
+                    "title": "US CPI m/m",
+                    "country": "USD",
+                    "impact": "High",
+                    "minutes_away": 8.0,
+                }],
+                "session": {"is_rollover_danger": False},
+            }
+
+            with patch("app.evaluate_news_window", return_value=mock_news):
+                core.compute_full_state(timeframe="M5")
+
+            # Pending order must be cancelled and CLOSE_ORDER enqueued to delete on MT5
+            self.assertFalse(core.order_manager.has_active_order())
+            self.assertTrue(any(
+                a.get("type") == "CLOSE_ORDER" and a.get("ticket") == 888111
+                for a in core.ea_bridge.action_queue
+            ))
+
+            # 2. Register a winning FILLED order (in profit +0.3R below TP1)
+            core.ea_bridge.action_queue.clear()
+            core.ea_bridge.executed_signal_ids.clear()
+            core.order_manager.register_trade_setup(
+                risk_ticket={
+                    "side": "BUY",
+                    "execution_type": "MARKET",
+                    "order_type": "BUY NOW",
+                    "entry_mt5": 2655.0,
+                    "stop_mt5": 2645.0,  # $10 risk
+                    "breakeven_sl_mt5": 2655.25,
+                    "tp1_mt5": 2665.0,   # TP1 is at 2665 (price 2658 has not reached it)
+                    "target_mt5": 2675.0,
+                    "lot_size": 0.10,
+                    "actual_risk_usd": 100.0,
+                    "win_prob_passed": True,
+                    "verdict": "PASS",
+                },
+                smc_setup={"side": "BUY", "confluence_score": 85},
+                current_price=2655.0,
+                timeframe="M5",
+                force_replace=True,
+            )
+            core.order_manager.active_order["broker_ticket"] = 888222
+
+            with patch("app.evaluate_news_window", return_value=mock_news):
+                core.compute_full_state(timeframe="M5")
+
+            # Filled winning order must have SL moved to Breakeven (2655.25) and MODIFY_ORDER enqueued
+            self.assertTrue(core.order_manager.active_order["sl_moved_breakeven"])
+            self.assertEqual(core.order_manager.active_order["stop_mt5"], 2655.25)
+            self.assertTrue(any(
+                a.get("type") == "MODIFY_ORDER" and a.get("ticket") == 888222 and a.get("new_sl") == 2655.25
+                for a in core.ea_bridge.action_queue
+            ))
+        finally:
+            if os.path.exists(tmp_state):
+                os.remove(tmp_state)
+
 
 if __name__ == "__main__":
     unittest.main()

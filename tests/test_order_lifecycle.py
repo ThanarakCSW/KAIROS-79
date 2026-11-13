@@ -409,6 +409,111 @@ class TestOrderLifecycle(unittest.TestCase):
         self.assertIn("ตัดขาดทุนก่อนชน SL เต็ม", ev_cut["reason_th"])
         self.assertFalse(self.manager.has_active_order())
 
+    def test_step_trailing_stop_after_tp1(self):
+        """Verify that after TP1 is hit, price advancement towards TP2 triggers Step Trailing Stop."""
+        risk_ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2640.00,  # 10 USD risk
+            "tp1_mt5": 2660.00,   # +1.0R
+            "target_mt5": 2670.00,# +2.0R
+            "breakeven_sl_mt5": 2650.25,
+            "lot_size": 0.10,
+            "actual_risk_usd": 100.00,
+            "execution_type": "MARKET",
+            "order_type": "BUY NOW",
+        }
+        smc_setup = {"side": "BUY", "confluence_score": 85}
+        cfg = {
+            "step_trailing": {
+                "enabled": True,
+                "steps": [
+                    {"trigger_r": 1.4, "lock_r": 0.60},
+                    {"trigger_r": 1.8, "lock_r": 1.00},
+                ],
+            }
+        }
+        # 1. Register BUY order
+        self.manager.register_trade_setup(risk_ticket, smc_setup, current_price=2650.00)
+        self.assertEqual(self.manager.active_order["status"], "FILLED")
+
+        # 2. Price rallies to 2660.50 (touches TP1 at 2660) -> TP1_REACHED event
+        ev_tp1 = self.manager.update_price_tick(current_price=2660.50, high=2661.00, low=2650.00, config=cfg)
+        self.assertIsNotNone(ev_tp1)
+        self.assertEqual(ev_tp1["type"], "TP1_REACHED")
+        self.assertTrue(self.manager.active_order["tp1_hit"])
+        self.assertEqual(self.manager.active_order["stop_mt5"], 2650.25)
+
+        # 3. Price pushes to 2664.50 (+1.45R >= 1.4R) -> Step Trailing Step 1 locks +0.60R
+        # Entry 2650 + 0.60 * 10 = 2656.00
+        ev_step1 = self.manager.update_price_tick(current_price=2664.50, high=2665.00, low=2660.00, config=cfg)
+        self.assertIsNotNone(ev_step1)
+        self.assertEqual(ev_step1["type"], "TRAILING_STOP_UPDATED")
+        self.assertEqual(ev_step1["locked_r"], 0.60)
+        self.assertEqual(ev_step1["new_sl"], 2656.00)
+        self.assertEqual(self.manager.active_order["stop_mt5"], 2656.00)
+        self.assertEqual(self.manager.active_order["trailing_step_index"], 1)
+
+        # 4. Price pushes further to 2668.50 (+1.85R >= 1.8R) -> Step Trailing Step 2 locks +1.00R
+        # Entry 2650 + 1.00 * 10 = 2660.00
+        ev_step2 = self.manager.update_price_tick(current_price=2668.50, high=2669.00, low=2664.00, config=cfg)
+        self.assertIsNotNone(ev_step2)
+        self.assertEqual(ev_step2["type"], "TRAILING_STOP_UPDATED")
+        self.assertEqual(ev_step2["locked_r"], 1.00)
+        self.assertEqual(ev_step2["new_sl"], 2660.00)
+        self.assertEqual(self.manager.active_order["stop_mt5"], 2660.00)
+        self.assertEqual(self.manager.active_order["trailing_step_index"], 2)
+
+    def test_real_deal_history_ingestion_and_updates(self):
+        """Verify that DEAL_CLOSED execution reports capture exact broker financials (PnL, Swap, Comm)."""
+        risk_ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2640.00,
+            "tp1_mt5": 2660.00,
+            "target_mt5": 2670.00,
+            "lot_size": 0.10,
+            "actual_risk_usd": 100.00,
+            "execution_type": "MARKET",
+            "order_type": "BUY NOW",
+        }
+        smc_setup = {"side": "BUY", "confluence_score": 85}
+        order = self.manager.register_trade_setup(risk_ticket, smc_setup, current_price=2650.00)
+        # Bind broker ticket
+        self.manager.bind_execution_report({
+            "status": "FILLED",
+            "signal_id": order["order_id"],
+            "ticket": 777111,
+            "fill_price": 2650.20,
+        })
+        self.assertEqual(self.manager.active_order["broker_ticket"], 777111)
+
+        # MT5 reports exit deal via OnTradeTransaction with real financial numbers
+        deal_report = {
+            "status": "DEAL_CLOSED",
+            "ticket": 777111,
+            "deal": 999888,
+            "profit": 150.00,
+            "swap": -3.50,
+            "commission": -6.00,
+            "fill_price": 2665.00,
+            "close_reason": "DEAL_TP",
+        }
+        bound = self.manager.bind_execution_report(deal_report)
+        self.assertTrue(bound)
+        self.assertFalse(self.manager.has_active_order())
+
+        # Check recorded history
+        closed_item = self.manager.order_history[-1]
+        self.assertEqual(closed_item["broker_deal_id"], 999888)
+        self.assertEqual(closed_item["close_price"], 2665.00)
+        self.assertEqual(closed_item["close_reason"], "DEAL_TP")
+        # 150.00 - 3.50 - 6.00 = 140.50 net USD
+        self.assertAlmostEqual(closed_item["realized_pnl_usd"], 140.50, places=2)
+        self.assertAlmostEqual(closed_item["swap_usd"], -3.50, places=2)
+        self.assertAlmostEqual(closed_item["commission_usd"], -6.00, places=2)
+        self.assertAlmostEqual(closed_item["realized_pnl_r"], 1.41, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,29 @@
     "scale_in_enabled": true,
     "cooldown_seconds": 30
   },
+  "pre_news_shield": {
+    "enabled": true,
+    "minutes_before": 15,
+    "cancel_pending_limit": true,
+    "breakeven_filled_min_r": 0.25
+  },
+  "step_trailing": {
+    "enabled": true,
+    "steps": [
+      {
+        "trigger_r": 1.4,
+        "lock_r": 0.60
+      },
+      {
+        "trigger_r": 1.8,
+        "lock_r": 1.00
+      },
+      {
+        "trigger_r": 2.2,
+        "lock_r": 1.40
+      }
+    ]
+  },
   "data_feed": {
     "mode": "live_or_replay",
     "yahoo_symbol": "GC=F",

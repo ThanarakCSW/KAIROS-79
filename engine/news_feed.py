@@ -153,6 +153,7 @@ def evaluate_news_window(
     now_utc: Optional[datetime.datetime] = None,
     blackout_minutes: int = 30,
     events_override: Optional[List[Dict[str, Any]]] = None,
+    pre_news_minutes: int = 15,
 ) -> Dict[str, Any]:
     """Check for upcoming or recent USD Red-Folder (High Impact) news events."""
     dt = now_utc or utc_now()
@@ -162,6 +163,7 @@ def evaluate_news_window(
     raw_events = events_override if events_override is not None else fetch_ff_calendar()
     red_events: List[Dict[str, Any]] = []
     active_blackout_events: List[Dict[str, Any]] = []
+    imminent_news_events: List[Dict[str, Any]] = []
 
     for ev in raw_events:
         country = str(ev.get("country") or "").upper()
@@ -193,14 +195,20 @@ def evaluate_news_window(
             red_events.append(item)
             if abs(diff_min) <= blackout_minutes:
                 active_blackout_events.append(item)
+            if 0.0 <= diff_min <= pre_news_minutes:
+                imminent_news_events.append(item)
 
     red_events.sort(key=lambda x: abs(x["minutes_away"]))
+    imminent_news_events.sort(key=lambda x: x["minutes_away"])
     session_info = get_gold_session(dt)
 
     return {
         "session": session_info,
         "blackout_minutes": blackout_minutes,
+        "pre_news_minutes": pre_news_minutes,
         "in_news_blackout": len(active_blackout_events) > 0,
+        "is_imminent_news": len(imminent_news_events) > 0,
+        "imminent_news_events": imminent_news_events,
         "blackout_events": active_blackout_events,
         "upcoming_usd_red_news": red_events[:6],
     }

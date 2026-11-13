@@ -158,6 +158,9 @@ class OrderLifecycleManager:
             "trading_style": trading_style,
             "entry_mt5": entry_mt5,
             "stop_mt5": stop_mt5,
+            "initial_stop_mt5": stop_mt5,
+            "initial_sl_dist": abs(entry_mt5 - stop_mt5),
+            "trailing_step_index": 0,
             "tp1_mt5": tp1_mt5,
             "target_mt5": target_mt5,
             "breakeven_sl_mt5": r2(risk_ticket.get("breakeven_sl_mt5") or entry_mt5),
@@ -266,6 +269,9 @@ class OrderLifecycleManager:
             "trading_style": primary.get("trading_style", "intraday"),
             "entry_mt5": actual_entry,
             "stop_mt5": sl,
+            "initial_stop_mt5": sl,
+            "initial_sl_dist": abs(actual_entry - sl),
+            "trailing_step_index": 0,
             "tp1_mt5": primary.get("tp1_mt5", tp),
             "target_mt5": tp,
             "breakeven_sl_mt5": r2(actual_entry),
@@ -585,6 +591,7 @@ class OrderLifecycleManager:
         low: Optional[float] = None,
         ts: Optional[int] = None,
         contract_size: float = 100.0,
+        config: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Evaluate active orders against the latest price tick / candle bar.
         Returns the last significant state transition event if occurred."""
@@ -676,7 +683,7 @@ class OrderLifecycleManager:
                 order["highest_pnl_r"] = max(float(order.get("highest_pnl_r") or flt_r), flt_r)
                 order["lowest_pnl_r"] = min(float(order.get("lowest_pnl_r") or flt_r), flt_r)
 
-                active_sl = be_sl if order.get("sl_moved_breakeven") else stop
+                active_sl = float(order.get("stop_mt5") or (be_sl if order.get("sl_moved_breakeven") else stop))
 
                 # 1. Full Target TP2
                 hit_tp2 = False
@@ -740,7 +747,20 @@ class OrderLifecycleManager:
                     hit_sl = True
 
                 if hit_sl:
-                    if order.get("sl_moved_breakeven"):
+                    if int(order.get("trailing_step_index") or 0) > 0:
+                        locked_r = float(order.get("locked_r") or 0.60)
+                        order["status"] = "CLOSED_TRAILING"
+                        order["realized_pnl_r"] = locked_r
+                        order["realized_pnl_usd"] = round(risk_usd * locked_r, 2)
+                        order["management_note_th"] = f"🔒 ชน Trailing Stop ({active_sl:.2f}) ล็อกกำไร (+{locked_r:.2f}R)"
+                        last_event = {
+                            "type": "TRADE_CLOSED_TRAILING",
+                            "order_id": order["order_id"],
+                            "side": side,
+                            "pnl_r": locked_r,
+                            "message": f"🔒 ชน Trailing Stop ล็อกกำไร (+{locked_r:.2f}R)",
+                        }
+                    elif order.get("sl_moved_breakeven"):
                         order["status"] = "CLOSED_BREAKEVEN"
                         order["realized_pnl_r"] = 0.50
                         order["realized_pnl_usd"] = round(risk_usd * 0.50, 2)
@@ -782,6 +802,7 @@ class OrderLifecycleManager:
                         order["tp1_hit"] = True
                         order["tp1_hit_ts"] = now_ts
                         order["sl_moved_breakeven"] = True
+                        order["stop_mt5"] = be_sl
                         order["management_note_th"] = (
                             f"🟢 ราคาแตะ TP1 ({tp1:.2f}) แล้ว! แนะนำแบ่งปิด 50% "
                             f"และเลื่อน Stop Loss มาบังทุนที่ {be_sl:.2f} ทันที"
@@ -790,8 +811,48 @@ class OrderLifecycleManager:
                             "type": "TP1_REACHED",
                             "order_id": order["order_id"],
                             "side": side,
+                            "be_sl": be_sl,
                             "message": f"🟢 แตะเป้า TP1 ({tp1:.2f}) แล้ว! แบ่งปิด 50% และเลื่อน SL บังทุน",
                         }
+
+                # 4. Step Trailing Stop after TP1
+                step_trailing_cfg = (config or {}).get("step_trailing") or {}
+                if order.get("tp1_hit") and step_trailing_cfg.get("enabled", True):
+                    trail_steps = step_trailing_cfg.get("steps") or [
+                        {"trigger_r": 1.4, "lock_r": 0.60},
+                        {"trigger_r": 1.8, "lock_r": 1.00},
+                        {"trigger_r": 2.2, "lock_r": 1.40},
+                    ]
+                    cur_step_idx = int(order.get("trailing_step_index") or 0)
+                    highest_r = float(order.get("highest_pnl_r", flt_r))
+                    sl_dist = float(order.get("initial_sl_dist") or abs(entry - stop) or (risk_usd / max(0.01, lot * contract_size)))
+                    if sl_dist < 0.10:
+                        sl_dist = max(0.50, risk_usd / max(0.01, lot * contract_size))
+
+                    for idx_step, step in enumerate(trail_steps, 1):
+                        trig_r = float(step.get("trigger_r", 999.0))
+                        lck_r = float(step.get("lock_r", 0.0))
+                        if highest_r >= trig_r and idx_step > cur_step_idx:
+                            cand_sl = r2(entry + (lck_r * sl_dist)) if side == "BUY" else r2(entry - (lck_r * sl_dist))
+                            cur_sl = float(order.get("stop_mt5") or 0.0)
+                            improves_sl = (cand_sl > cur_sl) if side == "BUY" else (cur_sl <= 0.0 or cand_sl < cur_sl)
+                            if improves_sl:
+                                order["trailing_step_index"] = idx_step
+                                order["stop_mt5"] = cand_sl
+                                order["locked_r"] = lck_r
+                                order["management_note_th"] = (
+                                    f"🔒 Step Trailing #{idx_step}: ล็อกกำไรที่ +{lck_r:.2f}R "
+                                    f"(ขยับ SL เป็น {cand_sl:.2f})"
+                                )
+                                last_event = {
+                                    "type": "TRAILING_STOP_UPDATED",
+                                    "order_id": order["order_id"],
+                                    "side": side,
+                                    "new_sl": cand_sl,
+                                    "locked_r": lck_r,
+                                    "step_index": idx_step,
+                                    "message": f"🔒 Step Trailing: ล็อกกำไรที่ +{lck_r:.2f}R (SL {cand_sl:.2f})",
+                                }
 
                 remaining_orders.append(order)
 
@@ -807,6 +868,12 @@ class OrderLifecycleManager:
         order_id: str,
         current_price: Optional[float] = None,
         reason: str = "MANUAL_CLOSE",
+        realized_pnl_usd: Optional[float] = None,
+        realized_pnl_r: Optional[float] = None,
+        swap_usd: float = 0.0,
+        commission_usd: float = 0.0,
+        deal_id: Optional[Any] = None,
+        contract_size: float = 100.0,
     ) -> Optional[Dict[str, Any]]:
         """Close a specific active order by its ID."""
         target_ord = None
@@ -822,27 +889,49 @@ class OrderLifecycleManager:
         side = target_ord["side"]
         lot = float(target_ord.get("lot_size") or 0.10)
         entry_p = float(target_ord.get("filled_price") or target_ord.get("entry_mt5") or cp)
-        delta = (cp - entry_p) if side == "BUY" else (entry_p - cp)
-        flt_usd = round(delta * lot * 100.0, 2)
         risk_usd = max(1.0, float(target_ord.get("actual_risk_usd") or 50.0))
-        flt_r = round(flt_usd / risk_usd, 2)
 
-        target_ord["status"] = "CLOSED_MANUAL"
+        if realized_pnl_usd is not None:
+            flt_usd = round(float(realized_pnl_usd), 2)
+            flt_r = round(flt_usd / risk_usd, 2) if realized_pnl_r is None else round(float(realized_pnl_r), 2)
+        else:
+            delta = (cp - entry_p) if side == "BUY" else (entry_p - cp)
+            flt_usd = round(delta * lot * contract_size, 2)
+            flt_r = round(flt_usd / risk_usd, 2)
+
+        target_ord["status"] = "CLOSED_MANUAL" if "MANUAL" in reason else f"CLOSED_{reason}"
         target_ord["closed_ts"] = now_ts
         target_ord["close_price"] = cp
         target_ord["close_reason"] = reason
         target_ord["realized_pnl_usd"] = flt_usd
         target_ord["realized_pnl_r"] = flt_r
-        target_ord["management_note_th"] = f"จบการเทรดไม้นี้เรียบร้อย (PnL {flt_r:+.2f}R, {flt_usd:+.2f} USD)"
+        target_ord["swap_usd"] = round(float(swap_usd or 0.0), 2)
+        target_ord["commission_usd"] = round(float(commission_usd or 0.0), 2)
+        if deal_id is not None:
+            target_ord["broker_deal_id"] = deal_id
+
+        if swap_usd != 0.0 or commission_usd != 0.0:
+            target_ord["management_note_th"] = (
+                f"ปิดการเทรดสำเร็จ (เหตุผล: {reason}, กำไรสุทธิ {flt_usd:+.2f} USD ({flt_r:+.2f}R), "
+                f"Swap ${swap_usd:+.2f}, Comm ${commission_usd:+.2f})"
+            )
+        else:
+            target_ord["management_note_th"] = f"จบการเทรดไม้นี้เรียบร้อย (PnL {flt_r:+.2f}R, {flt_usd:+.2f} USD)"
 
         self.order_history.append(dict(target_ord))
         self.active_orders = [o for o in self.active_orders if o.get("order_id") != order_id]
         self._sync_primary()
+        event_type = "ORDER_CLOSED_MANUAL" if "MANUAL" in reason else f"ORDER_CLOSED_{reason}"
         event = {
-            "type": "ORDER_CLOSED_MANUAL",
+            "type": event_type,
             "order_id": order_id,
             "pnl_usd": flt_usd,
+            "profit_usd": flt_usd,
             "pnl_r": flt_r,
+            "swap_usd": round(float(swap_usd or 0.0), 2),
+            "commission_usd": round(float(commission_usd or 0.0), 2),
+            "deal_id": deal_id,
+            "close_reason": reason,
             "message": f"จบการเทรดไม้ {target_ord.get('purpose_th', '')} เรียบร้อย ({flt_usd:+.2f} USD)",
         }
         self.last_event = event
@@ -1048,6 +1137,31 @@ class OrderLifecycleManager:
                 target_ord = self.active_order
 
         if target_ord is None:
+            if ticket_int > 0 or sig_id:
+                for hist_ord in self.order_history:
+                    matched_hist = (
+                        (sig_id and hist_ord.get("order_id") == sig_id)
+                        or (ticket_int > 0 and str(hist_ord.get("broker_ticket") or "") == str(ticket_int))
+                    )
+                    if matched_hist:
+                        if rec.get("profit") is not None:
+                            d_profit = float(rec.get("profit") or 0.0)
+                            d_swap = float(rec.get("swap") or 0.0)
+                            d_comm = float(rec.get("commission") or 0.0)
+                            risk_u = max(1.0, float(hist_ord.get("actual_risk_usd") or 50.0))
+                            hist_ord["realized_pnl_usd"] = round(d_profit + d_swap + d_comm, 2)
+                            hist_ord["realized_pnl_r"] = round(hist_ord["realized_pnl_usd"] / risk_u, 2)
+                            hist_ord["swap_usd"] = round(d_swap, 2)
+                            hist_ord["commission_usd"] = round(d_comm, 2)
+                        if rec.get("deal"):
+                            hist_ord["broker_deal_id"] = rec["deal"]
+                        if fill_px > 0.0:
+                            hist_ord["close_price"] = fill_px
+                        deal_reas = rec.get("close_reason") or rec.get("deal_reason")
+                        if deal_reas:
+                            hist_ord["close_reason"] = deal_reas
+                        self.save_to_disk()
+                        return True
             return False
 
         now_ts = int(time.time())
@@ -1101,10 +1215,26 @@ class OrderLifecycleManager:
                 target_ord["stop_mt5"] = new_sl
             if new_tp > 0.0:
                 target_ord["target_mt5"] = new_tp
-        elif status == "CLOSED":
+        elif status in ("CLOSED", "DEAL_CLOSED"):
+            deal_profit = float(rec.get("profit") or 0.0)
+            deal_swap = float(rec.get("swap") or 0.0)
+            deal_comm = float(rec.get("commission") or 0.0)
+            deal_px = float(rec.get("fill_price") or fill_px or 0.0)
+            deal_reason = rec.get("close_reason") or rec.get("deal_reason") or "MT5_CLOSED"
+            has_financials = rec.get("profit") is not None or rec.get("deal") is not None
+            total_net_pnl = round(deal_profit + deal_swap + deal_comm, 2) if has_financials else None
+
             oid = target_ord.get("order_id")
             if oid:
-                self.close_order_by_id(oid, current_price=fill_px or None, reason="MT5_CLOSED")
+                self.close_order_by_id(
+                    oid,
+                    current_price=deal_px or None,
+                    reason=deal_reason,
+                    realized_pnl_usd=total_net_pnl,
+                    swap_usd=deal_swap,
+                    commission_usd=deal_comm,
+                    deal_id=rec.get("deal"),
+                )
                 return True
         elif status == "CANCELLED":
             oid = target_ord.get("order_id")
