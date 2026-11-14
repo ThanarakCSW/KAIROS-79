@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="th" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KAIROS-79 (K79) • BTC/USD Precision Bitcoin Timing &amp; Risk System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <!-- Sleek 2-Tier Top Command Bar -->
+  <header class="topbar">
+    <div class="topbar-primary">
+      <div class="topbar-left">
+        <div class="brand-badge btc-badge" title="KAIROS-79 (K79) — ระบบจับจังหวะบิตคอยน์และคัดกรองความเสี่ยงเชิงรุก">
+          <span class="pulse-btc"></span>
+          <span class="brand-wordmark">KAIROS-79</span>
+          <span class="brand-divider"></span>
+          <span class="symbol-name">BTC/USD</span>
+        </div>
+
+        <div class="asset-switcher" role="tablist" aria-label="Asset Switcher">
+          <a href="/" class="asset-tab" title="Gold (XAU/USD)"><span class="asset-icon">🟡</span> Gold (XAU)</a>
+          <a href="/btc" class="asset-tab active btc-tab" title="Bitcoin (BTC/USD)"><span class="asset-icon">₿</span> Bitcoin (BTC)</a>
+        </div>
+
+        <span class="topbar-divider" aria-hidden="true"></span>
+
+        <div class="ticker-group">
+          <span id="livePrice" class="live-price">90500.00</span>
+          <span id="bidAskPill" class="bid-ask-pill">Bid — / Ask —</span>
+        </div>
+
+        <div class="market-meta-pills">
+          <span id="trendBadge" class="meta-pill pill-neutral">Trend: —</span>
+          <span id="volFlowBadge" class="meta-pill pill-neutral" title="ปริมาณการซื้อขายสัมพัทธ์ (RVOL) และสถานะกระแสตลาด">Vol: —</span>
+          <span id="sessionBadge" class="meta-pill">Session: —</span>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <span id="mt5StatusPill" class="meta-pill pill-mt5-offline" title="สถานะการเชื่อมต่อ MetaTrader 5 EA">
+          <i class="conn-dot"></i> <span id="mt5StatusText">MT5: Offline</span>
+        </span>
+
+        <span id="wsStatus" class="conn-indicator">
+          <i class="conn-dot"></i> <span id="wsStatusText">Connecting</span>
+        </span>
+
+        <label class="icon-btn" title="เปิด/ปิดเสียงแจ้งเตือนเมื่อมีสัญญาณ">
+          <input type="checkbox" id="soundEnabled" checked hidden />
+          <span id="soundIcon">🔔</span>
+        </label>
+
+        <button id="btnOpenSettings" class="btn-outline">
+          ⚙️ ตั้งค่าพอร์ต &amp; API
+        </button>
+      </div>
+    </div>
+
+    <div class="topbar-toolbar">
+      <div class="toolbar-controls">
+        <div class="segmented-control" id="styleSelector" title="เลือกโหมดการเทรด (บังคับโอกาสถึง TP > 50% ทั้งสองโหมด)">
+          <button class="seg-btn seg-btn-text style-btn active" data-style="intraday">🎯 โหมดปกติ (Intraday)</button>
+          <button class="seg-btn seg-btn-text style-btn" data-style="scalping">⚡ เทรดสั้น (Scalping)</button>
+        </div>
+
+        <span class="topbar-divider" aria-hidden="true"></span>
+
+        <div class="segmented-control" id="tfSelector" title="เลือกไทม์เฟรมหลัก">
+          <button class="seg-btn tf-btn" data-tf="M1">M1</button>
+          <button class="seg-btn tf-btn active" data-tf="M5">M5</button>
+          <button class="seg-btn tf-btn" data-tf="M15">M15</button>
+          <button class="seg-btn tf-btn" data-tf="H1">H1</button>
+          <button class="seg-btn tf-btn" data-tf="H4">H4</button>
+        </div>
+
+        <span class="topbar-divider" aria-hidden="true"></span>
+
+        <div class="segmented-control" id="chartModeSelector" title="สลับดูกราฟโซน AI SMC หรือกราฟ TradingView BTCUSD แท้">
+          <button class="seg-btn seg-btn-text chart-mode-btn active" data-chart-mode="ai">📊 กราฟโซน AI</button>
+          <button class="seg-btn seg-btn-text chart-mode-btn" data-chart-mode="tv">📺 TradingView แท้</button>
+        </div>
+
+        <span class="topbar-divider" aria-hidden="true"></span>
+
+        <div class="broker-feed-indicator" title="สถานะเชื่อมต่อและข้อมูลราคาจากโปรแกรม MT5 โบรกเกอร์">
+          <span class="broker-dot"></span> <span id="brokerFeedText">🏛️ โบรกเกอร์ MT5 (BTCUSD)</span>
+        </div>
+      </div>
+
+      <div class="toolbar-actions">
+        <button id="btnToggleAutoTrading" class="btn-auto-trading auto-off" title="คลิกเพื่อเปิด/ปิด การส่งคำสั่งอัตโนมัติไปยัง MetaTrader 5 EA">
+          <span class="auto-indicator">⚡</span> <span id="autoTradingText">AUTO: OFF</span>
+        </button>
+        <button id="btnAnalyzeNow" class="btn-ai-glow">
+          <span class="sparkle">✦</span> ให้ Gemini วิเคราะห์กราฟตอนนี้
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main 2-Column Workspace -->
+  <main class="workspace">
+    <!-- Left: Interactive Chart + Bottom Drawer Tabs -->
+    <section class="chart-stage">
+      <div class="chart-wrapper">
+        <!-- Compact Single-Row Floating Chart HUD (Only Key Info, Never Blocks Candles) -->
+        <div class="chart-hud">
+          <div class="hud-row">
+            <span class="hud-tag" id="barsCountBadge" title="จำนวนแท่งเทียนที่นำมาคำนวณและวิเคราะห์ย้อนหลังลึก">📊 15,000 แท่ง</span>
+            <span class="hud-tag" id="chartPatternBadge" title="รูปแบบกราฟในอดีต (Chart Pattern)">📐 Pattern: —</span>
+            <span class="hud-tag" id="atrBadge">ATR: —</span>
+            <span class="hud-tag ema-tag"><i class="dot ema20"></i><span id="hudEma20">20: —</span></span>
+            <span class="hud-tag ema-tag"><i class="dot ema50"></i><span id="hudEma50">50: —</span></span>
+            <span class="hud-tag ema-tag"><i class="dot ema200"></i><span id="hudEma200">200: —</span></span>
+            <span class="hud-tag" id="hudMtfCompact">MTF: —</span>
+          </div>
+        </div>
+
+        <div id="chartContainer" class="chart-canvas-host">
+          <canvas id="fallbackCanvas" class="fallback-canvas"></canvas>
+        </div>
+        <div id="tvWidgetContainer" class="chart-canvas-host" style="display:none;"></div>
+      </div>
+
+      <!-- Focused 3-Tab Bottom Dock (Priority-First Organization) -->
+      <div class="bottom-dock">
+        <div class="dock-tabs">
+          <div class="dock-tab-group">
+            <button class="dock-tab active" data-dock="flow">📊 วอลุ่ม &amp; กระแสตลาด</button>
+            <button class="dock-tab" data-dock="structure">📐 โซน SMC &amp; แนวรับต้านเดิมย้อนหลัง</button>
+            <button class="dock-tab" data-dock="stats">🏆 สถิติ &amp; ข่าว BTC</button>
+          </div>
+          <span id="feedSourceLabel" class="feed-source-label">Feed: —</span>
+        </div>
+
+        <div class="dock-body">
+          <!-- Tab 1 (Default): Volume & Causal Market Flow -->
+          <div id="dock-flow" class="dock-pane active">
+            <div id="marketFlowList" class="flow-overview-grid"></div>
+          </div>
+
+          <!-- Tab 2: Top SMC Zones + MTF + Institutional Key Levels -->
+          <div id="dock-structure" class="dock-pane">
+            <div id="structureOverviewList" class="compact-cards-row"></div>
+          </div>
+
+          <!-- Tab 3: Signal Accuracy & USD Red News -->
+          <div id="dock-stats" class="dock-pane">
+            <div id="statsNewsList" class="compact-cards-row"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right: Focused MT5 Ticket + Tabbed AI Advisor -->
+    <aside class="command-sidebar">
+      <!-- 1. Hero MT5 Execution Ticket -->
+      <div class="ticket-hero" id="ticketCard">
+        <!-- Integrated Order Lifecycle Header -->
+        <div id="orderLifecycleCard" class="order-lifecycle-bar status-idle">
+          <div class="lifecycle-top-row">
+            <div class="lifecycle-title-group">
+              <h2 id="ticketSideTitle">รอสัญญาณ BTCUSD</h2>
+              <span id="orderStatusPill" class="order-status-pill pill-idle">🔍 SCANNING</span>
+              <span id="orderPnlBadge" class="order-pnl-badge" style="display:none;">PnL: $0.00 (+0.00R)</span>
+            </div>
+
+            <div class="lifecycle-badge-cluster">
+              <span id="orderTicketBadge" class="order-ticket-pill" style="display:none;" title="หมายเลขคำสั่งจริงใน MetaTrader 5">Ticket #—</span>
+              <span id="autoMultiOrderPill" class="auto-multi-pill" title="ระบบสแกนหาโอกาสแก้ไม้และทำกำไรเพิ่มให้อัตโนมัติโดยไม่ต้องปิดไม้เก่า">🤖 AUTO MULTI</span>
+              <span id="verdictBadge" class="verdict-pill pass">PASS</span>
+              <div class="confluence-mini-pill" title="คะแนนความแม่นยำจากจุดร่วม SMC + EMA">
+                <span class="conf-lbl">CONF</span>
+                <strong id="confluenceBadge">85%</strong>
+              </div>
+              <span id="orderExecTypePill" class="order-exec-pill exec-waiting">รอสัญญาณ</span>
+            </div>
+          </div>
+
+          <!-- Concise Status & Context Row -->
+          <div class="lifecycle-note-row">
+            <div id="orderStatusMsg" class="lifecycle-msg">กำลังติดตามโครงสร้างตลาด SMC เมื่อ Confluence และโอกาสถึง TP > 50% ระบบจะล็อคแผนเข้าทันที</div>
+            <span id="statusSub" class="lifecycle-sub-note">⏳ กำลังสแกน</span>
+          </div>
+
+          <!-- Action Buttons (Compact & Sleek) -->
+          <div class="lifecycle-actions" id="orderActionButtons">
+            <button id="btnSendOrderToMT5" class="btn-order-action btn-send-mt5" title="ส่งคำสั่งซื้อขายนี้ตรงไปยัง MetaTrader 5 ทันที">🚀 ส่งเข้า MT5</button>
+            <button id="btnOrderFillNow" class="btn-order-action btn-fill" title="กดเมื่อราคาใน MT5 เกี่ยวเปิดออเดอร์แล้ว">⚡ เปิดไม้แล้ว</button>
+            <button id="btnAddSubOrder" class="btn-order-action btn-add" style="display:none;" title="เปิดไม้เพิ่มทันทีที่ราคาปัจจุบัน (แก้ไม้เมื่อติดลบ หรือทำกำไรเพิ่มเมื่อบวก)">➕ เปิดไม้เพิ่ม</button>
+            <button id="btnOrderBreakeven" class="btn-order-action btn-be" style="display:none;" title="กดเมื่อเลื่อน SL มาบังทุนแล้ว">🛡️ บังทุน</button>
+            <button id="btnOrderCloseManual" class="btn-order-action btn-close" style="display:none;" title="กดเมื่อปิดทำกำไร/ตัดจบออเดอร์นี้">✓ ปิดไม้</button>
+            <button id="btnOrderCancel" class="btn-order-action btn-cancel" title="ยกเลิกคำสั่งนี้และสแกนหาจังหวะใหม่">✕ ยกเลิก</button>
+            <button id="btnScanNewSetup" class="btn-order-action btn-scan" title="รีเซ็ตและสั่ง AI สแกนแผนใหม่">🔄 สแกนใหม่</button>
+          </div>
+
+          <!-- MT5 Test Dispatch Controls -->
+          <div class="test-order-bar" id="testOrderBar">
+            <span class="test-bar-label">🧪 ทดสอบส่งคำสั่งเข้า MT5:</span>
+            <button id="btnTestBuyMarket" type="button" class="btn-order-action btn-test-buy" title="ยิงคำสั่งทดสอบ BUY ที่ราคาตลาดปัจจุบัน (Market 0.01 Lot) เข้า MT5 ทันที">⚡ ยิง BUY Market</button>
+            <button id="btnTestBuyLimit" type="button" class="btn-order-action btn-test-limit" title="ยิงคำสั่งทดสอบ BUY LIMIT ดักย่อ -$100.00 ต่ำกว่าราคาปัจจุบัน (Pending Limit 0.01 Lot) เข้า MT5 ทันที">⏳ ยิง BUY Limit</button>
+            <button id="btnTestSellMarket" type="button" class="btn-order-action btn-test-sell" title="ยิงคำสั่งทดสอบ SELL ที่ราคาตลาดปัจจุบัน (Market 0.01 Lot) เข้า MT5 ทันที">⚡ ยิง SELL Market</button>
+          </div>
+
+          <!-- Multi-Order Active Positions List -->
+          <div id="multiOrdersCard" class="multi-orders-wrap" style="display:none;">
+            <div class="multi-orders-head">
+              <span class="multi-orders-title">📋 ตำแหน่งที่ถือครอง (<span id="multiOrdersCount">0</span> ไม้)</span>
+              <span id="multiOrdersAvgEntry" class="multi-orders-avg">ทุนเฉลี่ย: —</span>
+            </div>
+            <div id="multiOrdersList" class="multi-orders-list"></div>
+          </div>
+        </div>
+
+        <!-- 2x2 Click-to-Copy Tiles for MT5 -->
+        <div class="mt5-tiles">
+          <button class="mt5-tile tile-lot copy-trigger" data-copy-target="valLot" title="คลิกเพื่อคัดลอก Lot Size">
+            <div class="tile-head">
+              <span>VOLUME (LOT)</span>
+              <span class="copy-hint">คัดลอก</span>
+            </div>
+            <div class="tile-val"><strong id="valLot">0.05</strong></div>
+            <div class="tile-sub" id="riskUsdSub">ความเสี่ยง $50.00 (1%)</div>
+          </button>
+
+          <button class="mt5-tile tile-entry copy-trigger" data-copy-target="valEntry" title="คลิกเพื่อคัดลอกราคา Entry">
+            <div class="tile-head">
+              <span id="entryHeadLabel">ENTRY PRICE</span>
+              <span class="copy-hint">คัดลอก</span>
+            </div>
+            <div class="tile-val"><strong id="valEntry">90500.00</strong></div>
+            <div class="tile-sub" id="entryDistSub">รอการยืนยันราคา</div>
+          </button>
+
+          <button class="mt5-tile tile-sl copy-trigger" data-copy-target="valSL" title="คลิกเพื่อคัดลอกราคา Stop Loss">
+            <div class="tile-head">
+              <span>STOP LOSS</span>
+              <span class="copy-hint">คัดลอก</span>
+            </div>
+            <div class="tile-val"><strong id="valSL">90200.00</strong></div>
+            <div class="tile-sub" id="slDistSub">ห่าง $300.00 (30000 pts)</div>
+          </button>
+
+          <button class="mt5-tile tile-tp copy-trigger" data-copy-target="valTP" title="คลิกเพื่อคัดลอกราคา Take Profit">
+            <div class="tile-head">
+              <span>TAKE PROFIT</span>
+              <span class="copy-hint">คัดลอก</span>
+            </div>
+            <div class="tile-val"><strong id="valTP">91200.00</strong></div>
+            <div class="tile-sub" id="tpProfitSub">R:R 1:2.33 (+$116.50)</div>
+          </button>
+        </div>
+
+        <!-- Compact Monte Carlo Strip & Copy Action -->
+        <div class="mc-strip">
+          <div class="mc-strip-head">
+            <div class="mc-title-group">
+              <span id="simTitleText">🎲 จำลอง 35,000 ครั้ง</span>
+              <strong id="valEV" class="ev-tag">EV +0.72R</strong>
+            </div>
+            <button id="btnCopyAllTicket" class="btn-copy-ticket" title="คัดลอกรายละเอียดคำสั่ง MT5 ทั้งชุดลง Clipboard">
+              📋 คัดลอกโพย MT5
+            </button>
+          </div>
+
+          <div class="mc-multi-bar">
+            <div id="barWin" class="mc-seg seg-win" style="width: 54%"></div>
+            <div id="barSweep" class="mc-seg seg-sweep" style="width: 10%"></div>
+            <div id="barStop" class="mc-seg seg-stop" style="width: 36%"></div>
+          </div>
+
+          <div class="mc-legend-row">
+            <span>🟢 ชนะแตะ TP: <strong id="valWinPct">54%</strong></span>
+            <span>🟡 กวาดหาง: <strong id="valSweepPct">10%</strong></span>
+            <span>🔴 ชน SL: <strong id="valStopPct">36%</strong></span>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Slide-Over Settings Modal Drawer (Hidden until clicked) -->
+  <div id="settingsModal" class="modal-backdrop hidden">
+    <div class="modal-drawer">
+      <div class="modal-header">
+        <div>
+          <h3>⚙️ ตั้งค่าพอร์ต &amp; Gemini AI (BTC/USD)</h3>
+          <p>ปรับขนาดทุน ความเสี่ยง ค่าชดเชยราคาโบรกเกอร์ MT5 และคีย์ AI</p>
+        </div>
+        <button id="btnCloseSettings" class="btn-close">✕</button>
+      </div>
+
+      <form id="settingsForm" class="modal-form" novalidate>
+        <div class="form-row">
+          <label>
+            <span>ขนาดพอร์ต Equity ($)</span>
+            <input type="number" step="any" min="1" id="cfgBalance" value="5000" />
+            <small>ใช้คำนวณ Lot Size บิตคอยน์อัตโนมัติ (1.0 Lot = 1 BTC)</small>
+          </label>
+          <div class="form-field">
+            <label for="cfgLeverage">อัตราทด Leverage (1:X)</label>
+            <div class="input-with-presets">
+              <input type="number" step="any" min="1" max="5000" id="cfgLeverage" value="100" />
+              <div class="leverage-presets">
+                <button type="button" class="btn-lev-chip" data-lev="100">1:100</button>
+                <button type="button" class="btn-lev-chip" data-lev="200">1:200</button>
+                <button type="button" class="btn-lev-chip" data-lev="500">1:500</button>
+                <button type="button" class="btn-lev-chip" data-lev="1000">1:1000</button>
+                <button type="button" class="btn-lev-chip" data-lev="2000">1:2000</button>
+              </div>
+            </div>
+            <small>ใช้คำนวณ Margin Required &amp; Margin Usage</small>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label>
+            <span>ความเสี่ยงต่อไม้ (% Risk)</span>
+            <input type="number" step="any" min="0.01" max="100" id="cfgRiskPct" value="1.0" />
+            <small>แนะนำ 0.5% – 2.0% ต่อออเดอร์ (คุม Drawdown)</small>
+          </label>
+          <label>
+            <span>ส่วนต่างราคาโบรกเกอร์ Offset ($)</span>
+            <input type="number" step="any" id="cfgOffset" value="0.0" />
+            <small>เช่น +5.00 หรือ -10.00 เพื่อให้ตรงจอ MT5</small>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label>
+            <span>ค่า Spread โบรกเกอร์ (Points)</span>
+            <input type="number" step="any" min="0" id="cfgSpread" value="1500" />
+            <small>เช่น 1500 points = $15.00 นำไปเผื่อในระยะ SL</small>
+          </label>
+          <label style="display: flex; flex-direction: column; justify-content: center;">
+            <span style="margin-bottom: 6px;">ระบบเพิ่มไม้อัตโนมัติ (Multi-Order)</span>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="cfgAutoMultiOrder" checked style="width: 18px; height: 18px; accent-color: #f7931a; cursor: pointer;" />
+              <span style="font-size: 11.5px; color: var(--text-secondary);">เปิดไม้แก้ (DCA) / สเกลกำไรอัตโนมัติ</span>
+            </div>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label style="display: flex; flex-direction: column; justify-content: center; grid-column: 1 / -1; background: rgba(56, 189, 248, 0.05); padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.2);">
+            <span style="margin-bottom: 4px; color: var(--text-primary); font-weight: 700;">⚡ ระบบส่งคำสั่งอัตโนมัติไปยัง MetaTrader 5 (Auto-Trading EA Bridge)</span>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="cfgAutoTrading" style="width: 18px; height: 18px; accent-color: #38bdf8; cursor: pointer;" />
+              <span style="font-size: 12px; color: var(--text-primary);">เปิดใช้งาน Auto-Trading (เมื่อเปิด สัญญาณจะส่งเข้าพอร์ต MT5 ทันที)</span>
+            </div>
+            <small style="color: var(--text-muted); margin-top: 4px;">รองรับ MT5 บน Windows PC / VPS ผ่าน WebRequest URL: <code id="eaWebRequestUrl">http://127.0.0.1:8000</code> (Magic: 797979)</small>
+            <div class="mt5-setup-guide" style="margin-top: 8px; padding: 8px 10px; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; font-size: 11px; line-height: 1.5; color: var(--text-secondary);">
+              <div style="font-weight: 700; color: #60a5fa; margin-bottom: 4px;">💡 วิธีแก้สถานะ DISCONNECTED ใน MT5 บน Windows:</div>
+              <ol style="margin: 0 0 0 16px; padding: 0;">
+                <li>ใน MT5 ไปที่ <strong>Tools</strong> &rarr; <strong>Options (Ctrl+O)</strong> &rarr; แท็บ <strong>Expert Advisors</strong></li>
+                <li>ติ๊กถูก <strong style="color: #34d399;">[✓] Allow WebRequest for listed URL:</strong></li>
+                <li>เพิ่ม 2 URL: <code>http://127.0.0.1:8000</code> และ <code>http://localhost:8000</code></li>
+                <li>บนกราฟ MT5 กด <strong>F7</strong> ตรวจสอบว่าช่อง <code>InpServerUrl</code> เป็น <code>http://127.0.0.1:8000</code></li>
+                <li>กดปุ่ม <strong style="color: #34d399;">Algo Trading</strong> ด้านบนของ MT5 ให้เป็นสีเขียว</li>
+              </ol>
+            </div>
+          </label>
+        </div>
+
+        <label class="full-field">
+          <span>🔑 Google Gemini API Key (จาก aistudio.google.com/apikey)</span>
+          <input type="password" id="cfgGeminiKey" placeholder="AIzaSy... (เว้นว่างไว้หากใช้คีย์เดิมที่บันทึกแล้ว)" />
+          <small>เมื่อใส่คีย์แล้ว Gemini 2.5 Flash จะวิเคราะห์แท่งเทียนและตัดสินใจแผนเทรดทั้งหมด</small>
+        </label>
+
+        <div class="modal-actions">
+          <button type="button" id="btnCancelSettings" class="btn-outline">ยกเลิก</button>
+          <button type="submit" class="btn-ai-glow">💾 บันทึก &amp; คำนวณใหม่ทันที</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden">คัดลอกสำเร็จ!</div>
+  <script>window.CURRENT_SYMBOL = "BTCUSD";</script>
+  <script src="/app.js"></script>
+</body>
+</html>

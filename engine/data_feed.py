@@ -223,11 +223,12 @@ UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML,
 
 SWISSQUOTE_XAU_URL = "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD"
 BINANCE_BOOK_URL = "https://api.binance.com/api/v3/ticker/bookTicker?symbol=PAXGUSDT"
-BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={interval}&limit={limit}"
+BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
 YAHOO_CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}"
 BINANCE_WS_HOST = "stream.binance.com"
 BINANCE_WS_PORT = 9443
 BINANCE_WS_PATH = "/ws/paxgusdt@trade"
+BINANCE_BTC_WS_PATH = "/ws/btcusdt@trade"
 
 TV_WS_HOST = "data.tradingview.com"
 TV_WS_PORT = 443
@@ -362,6 +363,20 @@ def load_fixture_bars(fixture_path: Optional[str] = None, target_count: int = 15
                 "h": round(float(b["h"]) * scale, 5),
                 "l": round(float(b["l"]) * scale, 5),
                 "c": round(float(b["c"]) * scale, 5),
+                "v": b.get("v", 0),
+            }
+            for b in expanded
+        ]
+    elif "BTC" in sym_u:
+        # Scale Gold base ~$2650 to realistic Bitcoin price ~$90,500 (scaling ratio 34.15x)
+        scale = 90500.0 / 2650.0
+        return [
+            {
+                "t": b["t"],
+                "o": round(float(b["o"]) * scale, 2),
+                "h": round(float(b["h"]) * scale, 2),
+                "l": round(float(b["l"]) * scale, 2),
+                "c": round(float(b["c"]) * scale, 2),
                 "v": b.get("v", 0),
             }
             for b in expanded
@@ -688,8 +703,9 @@ def fetch_binance_gold_bars(
     timeframe: str = "M5",
     limit: int = DEFAULT_BARS_LIMIT,
     timeout: int = 5,
+    symbol: str = "PAXGUSDT",
 ) -> Optional[List[Dict[str, Any]]]:
-    """Fetch free real-time gold candles from Binance public API (supports up to 15,000 bars via multi-batch pagination)."""
+    """Fetch free real-time candles from Binance public API (supports up to 15,000 bars via multi-batch pagination)."""
     b_tf = TF_TO_BINANCE.get(timeframe.upper(), "5m")
     try:
         req_limit = max(50, min(limit, 15000))
@@ -701,9 +717,9 @@ def fetch_binance_gold_bars(
             if needed <= 0:
                 break
             if end_time:
-                url = f"{BINANCE_KLINES_URL.format(interval=b_tf, limit=needed)}&endTime={end_time}"
+                url = f"{BINANCE_KLINES_URL.format(symbol=symbol, interval=b_tf, limit=needed)}&endTime={end_time}"
             else:
-                url = BINANCE_KLINES_URL.format(interval=b_tf, limit=needed)
+                url = BINANCE_KLINES_URL.format(symbol=symbol, interval=b_tf, limit=needed)
             batch = _http_get_json(url, timeout=timeout)
             if not isinstance(batch, list) or not batch:
                 break
@@ -739,6 +755,9 @@ def fetch_binance_gold_bars(
         return deduped[-req_limit:]
     except Exception:
         return None
+
+
+fetch_binance_bars = fetch_binance_gold_bars
 
 
 def fetch_yahoo_gold_bars(
@@ -886,7 +905,73 @@ class MarketDataHub:
                         "symbol": sym,
                     }
 
-                # For non-gold symbols when MT5 is offline/sandbox, fallback to scaled fixture
+                # Tier 0.5: BTC Specific Feeds (TradingView & Binance REST) before offline fixture
+                if "BTC" in sym:
+                    # Tier 1 (TradingView BTC)
+                    tv_res = fetch_tradingview_gold_bars(tf, symbol="BINANCE:BTCUSDT", limit=DEFAULT_BARS_LIMIT)
+                    if not tv_res:
+                        tv_res = fetch_tradingview_gold_bars(tf, symbol="COINBASE:BTCUSD", limit=DEFAULT_BARS_LIMIT)
+                    if tv_res and tv_res.get("bars"):
+                        live_bars = tv_res["bars"]
+                        q = tv_res.get("quote") or {}
+                        q["symbol"] = sym
+                        self.cached_bars_by_sym_tf[cache_key] = live_bars
+                        self.last_fetch_ts_by_tf[cache_key] = now
+                        return {
+                            "bars": [dict(b) for b in live_bars],
+                            "source": tv_res["source"],
+                            "timeframe": tf,
+                            "live_quote": q,
+                            "symbol": sym,
+                        }
+
+                    # Tier 2 (Binance BTCUSDT REST Klines)
+                    b_bars = fetch_binance_bars(timeframe=tf, symbol="BTCUSDT", limit=DEFAULT_BARS_LIMIT)
+                    if b_bars:
+                        last_c = float(b_bars[-1]["c"])
+                        b_quote = {
+                            "symbol": sym,
+                            "price": last_c,
+                            "bid": round(last_c - 5.0, 2),
+                            "ask": round(last_c + 5.0, 2),
+                            "spread_usd": 10.0,
+                            "spread_points": 1000,
+                            "ts": int(time.time()),
+                            "source": "binance_btcusdt_rest",
+                        }
+                        self.cached_bars_by_sym_tf[cache_key] = b_bars
+                        self.last_fetch_ts_by_tf[cache_key] = now
+                        return {
+                            "bars": [dict(b) for b in b_bars],
+                            "source": "binance_btcusdt_rest",
+                            "timeframe": tf,
+                            "live_quote": b_quote,
+                            "symbol": sym,
+                        }
+
+                    # Tier 3 (Fixture offline fallback for BTC)
+                    bars = load_fixture_bars(target_count=300, symbol=sym)
+                    self.cached_bars_by_sym_tf[cache_key] = bars
+                    self.last_fetch_ts_by_tf[cache_key] = now
+                    last_c = float(bars[-1]["c"])
+                    return {
+                        "bars": [dict(b) for b in bars],
+                        "source": "fixture_offline_btc",
+                        "timeframe": tf,
+                        "symbol": sym,
+                        "live_quote": {
+                            "symbol": sym,
+                            "bid": round(last_c - 7.5, 2),
+                            "ask": round(last_c + 7.5, 2),
+                            "price": last_c,
+                            "spread_usd": 15.0,
+                            "spread_points": 1500,
+                            "ts": int(time.time()),
+                            "source": "fixture_offline_btc",
+                        },
+                    }
+
+                # For other non-gold symbols when MT5 is offline/sandbox, fallback to scaled fixture
                 if sym != "XAUUSD":
                     bars = load_fixture_bars(target_count=300, symbol=sym)
                     self.cached_bars_by_sym_tf[cache_key] = bars
@@ -897,18 +982,6 @@ class MarketDataHub:
                         "timeframe": tf,
                         "symbol": sym,
                         "live_quote": {"bid": bars[-1]["c"], "ask": bars[-1]["c"] + 0.00015, "price": bars[-1]["c"]},
-                    }
-                    self.basis_shift = 0.0
-                    self.source = mt5_res["source"]
-                    self.last_fetch_ts = now
-                    self.last_fetch_ts_by_tf[tf] = now
-                    self.cached_bars_by_tf[tf] = live_bars
-                    return {
-                        "bars": [dict(b) for b in live_bars],
-                        "source": self.source,
-                        "timeframe": tf,
-                        "live_quote": self.latest_spot_quote,
-                        "symbol": mt5_res.get("symbol"),
                     }
 
                 # Tier 1 (Dynamic Live Primary): Direct TradingView WebSocket (`OANDA:XAUUSD` / `FOREXCOM:XAUUSD`)
@@ -1250,8 +1323,8 @@ class MarketDataHub:
         }
 
 
-async def stream_binance_gold_ws(on_trade: Callable[[float, int], Any]) -> None:
-    """Pure-Python asyncio RFC 6455 WebSocket client for wss://stream.binance.com:9443/ws/paxgusdt@trade."""
+async def stream_binance_gold_ws(on_trade: Callable[[float, int], Any], stream_path: str = BINANCE_WS_PATH) -> None:
+    """Pure-Python asyncio RFC 6455 WebSocket client for Binance trade streams."""
     while True:
         writer = None
         try:
@@ -1263,7 +1336,7 @@ async def stream_binance_gold_ws(on_trade: Callable[[float, int], Any]) -> None:
             )
             ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
             req = (
-                f"GET {BINANCE_WS_PATH} HTTP/1.1\r\n"
+                f"GET {stream_path} HTTP/1.1\r\n"
                 f"Host: {BINANCE_WS_HOST}:{BINANCE_WS_PORT}\r\n"
                 f"Upgrade: websocket\r\n"
                 f"Connection: Upgrade\r\n"
@@ -1322,6 +1395,11 @@ async def stream_binance_gold_ws(on_trade: Callable[[float, int], Any]) -> None:
                 except Exception:
                     pass
             await asyncio.sleep(3.0)
+
+
+async def stream_binance_btc_ws(on_trade: Callable[[float, int], Any]) -> None:
+    """Pure-Python asyncio RFC 6455 WebSocket client for wss://stream.binance.com:9443/ws/btcusdt@trade."""
+    await stream_binance_gold_ws(on_trade, stream_path=BINANCE_BTC_WS_PATH)
 
 
 async def stream_tradingview_gold_ws(

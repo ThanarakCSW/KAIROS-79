@@ -138,9 +138,11 @@ class OrderLifecycleManager:
         if "NOW" in str(setup.get("order_type") or "") or "NOW" in str(risk_ticket.get("order_type") or ""):
             exec_type = "MARKET"
 
-        is_forex = ("EUR" in sym or "GBP" in sym or ("USD" in sym and "XAU" not in sym))
+        is_crypto = "BTC" in sym
+        is_forex = ("EUR" in sym or "GBP" in sym or ("USD" in sym and "XAU" not in sym and not is_crypto))
         pip_digits = int(risk_ticket.get("pip_digits") or (5 if is_forex else 2))
-        contract_size = float(risk_ticket.get("contract_size") or (100000.0 if is_forex else 100.0))
+        def_contract_size = 1.0 if is_crypto else (100000.0 if is_forex else 100.0)
+        contract_size = float(risk_ticket.get("contract_size") or def_contract_size)
         point_size = float(risk_ticket.get("point_size") or (0.00001 if is_forex else 0.01))
 
         def r_sym(v: Optional[float]) -> float:
@@ -282,10 +284,16 @@ class OrderLifecycleManager:
         lot = float(lot_size or primary.get("lot_size") or 0.10)
         actual_risk = max(1.0, float(primary.get("actual_risk_usd") or 50.0))
 
+        sub_sym = str(primary.get("symbol") or "XAUUSD").upper()
+        sub_csize = float(primary.get("contract_size") or (1.0 if "BTC" in sub_sym else 100.0))
+        sub_digits = int(primary.get("pip_digits") or (5 if ("EUR" in sub_sym or "GBP" in sub_sym) else 2))
+
         sub_order = {
             "order_id": order_id,
             "order_index": idx,
-            "symbol": "XAUUSD",
+            "symbol": sub_sym,
+            "contract_size": sub_csize,
+            "pip_digits": sub_digits,
             "side": side,
             "purpose": purp,
             "purpose_th": purpose_th,
@@ -950,12 +958,13 @@ class OrderLifecycleManager:
         entry_p = float(target_ord.get("filled_price") or target_ord.get("entry_mt5") or cp)
         risk_usd = max(1.0, float(target_ord.get("actual_risk_usd") or 50.0))
 
+        ord_csize = float(target_ord.get("contract_size") or (1.0 if "BTC" in str(target_ord.get("symbol", "")).upper() else contract_size))
         if realized_pnl_usd is not None:
             flt_usd = round(float(realized_pnl_usd), 2)
             flt_r = round(flt_usd / risk_usd, 2) if realized_pnl_r is None else round(float(realized_pnl_r), 2)
         else:
             delta = (cp - entry_p) if side == "BUY" else (entry_p - cp)
-            flt_usd = round(delta * lot * contract_size, 2)
+            flt_usd = round(delta * lot * ord_csize, 2)
             flt_r = round(flt_usd / risk_usd, 2)
 
         target_ord["status"] = "CLOSED_MANUAL" if "MANUAL" in reason else f"CLOSED_{reason}"
@@ -1133,7 +1142,7 @@ class OrderLifecycleManager:
             risk_usd = max(1.0, float(o_dict.get("actual_risk_usd") or 50.0))
             entry_p = float(o_dict.get("filled_price") or o_dict.get("entry_mt5") or cp)
             side = o_dict.get("side", "BUY")
-            order_csize = float(o_dict.get("contract_size") or 100.0)
+            order_csize = float(o_dict.get("contract_size") or (1.0 if "BTC" in str(o_dict.get("symbol", "")).upper() else 100.0))
             order_digits = int(o_dict.get("pip_digits") or 2)
 
             if o_dict.get("status") == "PENDING":

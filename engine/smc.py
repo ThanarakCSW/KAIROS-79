@@ -457,6 +457,7 @@ def build_trade_setup(
     mtf_res: Optional[Dict[str, Any]] = None,
     macro_res: Optional[Dict[str, Any]] = None,
     trading_style: str = "intraday",
+    symbol: str = "XAUUSD",
 ) -> Dict[str, Any]:
     """Build a deterministic Trade Plan (BUY or SELL) for either 'intraday' or 'scalping' mode."""
     current_price = float(structure_res["current_price"])
@@ -965,10 +966,26 @@ def build_trade_setup(
 
     available_setups = [s for s in [session_sweep_setup, micro_pullback_setup] if s is not None]
 
+    sym_u = (symbol or "XAUUSD").upper()
+    is_btc = "BTC" in sym_u
+    style_label = (
+        "⚡ โหมดเทรดสั้น (BTC Scalping)"
+        if (is_scalp and is_btc)
+        else (
+            "🎯 โหมดเทรดรอบปกติ (BTC SMC)"
+            if is_btc
+            else (
+                "⚡ โหมดเทรดสั้น (Gold Scalping)"
+                if is_scalp
+                else "🎯 โหมดเทรดรอบปกติ (Intraday SMC)"
+            )
+        )
+    )
+
     return {
-        "symbol": "XAUUSD",
+        "symbol": sym_u,
         "trading_style": "scalping" if is_scalp else "intraday",
-        "style_label_th": "⚡ โหมดเทรดสั้น (Gold Scalping)" if is_scalp else "🎯 โหมดเทรดรอบปกติ (Intraday SMC)",
+        "style_label_th": style_label,
         "setup_archetype": setup_archetype,
         "archetype_label_th": archetype_label_th,
         "available_setups": available_setups,
@@ -1006,6 +1023,7 @@ def analyze_smc(
     mtf_res: Optional[Dict[str, Any]] = None,
     macro_res: Optional[Dict[str, Any]] = None,
     trading_style: str = "intraday",
+    symbol: str = "XAUUSD",
 ) -> Dict[str, Any]:
     """Pure function: run full Structure + SMC + MTF + Macro analysis and produce a Trade Setup."""
     st = structure_res or analyze_structure(bars, timeframe=timeframe)
@@ -1027,6 +1045,7 @@ def analyze_smc(
         mtf_res=mtf_res,
         macro_res=macro_res,
         trading_style=trading_style,
+        symbol=symbol,
     )
 
     return {

@@ -135,6 +135,77 @@ body {
   box-shadow: 0 0 10px var(--gold);
 }
 
+.pulse-btc {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f7931a;
+  box-shadow: 0 0 10px #f7931a;
+}
+
+/* ---------------- Asset Switcher ---------------- */
+.asset-switcher {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.asset-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.asset-tab:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.asset-tab.active {
+  color: #ffffff;
+  background: rgba(245, 184, 65, 0.2);
+  border: 1px solid rgba(245, 184, 65, 0.4);
+  box-shadow: 0 0 10px rgba(245, 184, 65, 0.25);
+}
+
+.asset-tab.active.btc-tab {
+  background: rgba(247, 147, 26, 0.22);
+  border: 1px solid rgba(247, 147, 26, 0.5);
+  box-shadow: 0 0 10px rgba(247, 147, 26, 0.3);
+  color: #ffb74d;
+}
+
+.asset-tab .asset-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.brand-badge.btc-badge {
+  background: rgba(247, 147, 26, 0.12);
+  border-color: rgba(247, 147, 26, 0.4);
+}
+
+.brand-badge.btc-badge .symbol-name {
+  color: #f7931a;
+}
+
+.brand-badge.btc-badge .brand-divider {
+  background: rgba(247, 147, 26, 0.4);
+}
+
 .brand-wordmark {
   font-family: var(--font-mono);
   font-weight: 800;

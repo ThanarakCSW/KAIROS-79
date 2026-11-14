@@ -22,6 +22,11 @@
           <span class="symbol-name">XAU/USD</span>
         </div>
 
+        <div class="asset-switcher" role="tablist" aria-label="Asset Switcher">
+          <a href="/" class="asset-tab active" title="Gold (XAU/USD)"><span class="asset-icon">🟡</span> Gold (XAU)</a>
+          <a href="/btc" class="asset-tab" title="Bitcoin (BTC/USD)"><span class="asset-icon">₿</span> Bitcoin (BTC)</a>
+        </div>
+
         <span class="topbar-divider" aria-hidden="true"></span>
 
         <div class="ticker-group">
@@ -377,6 +382,7 @@
   </div>
 
   <div id="toast" class="toast hidden">คัดลอกสำเร็จ!</div>
+  <script>window.CURRENT_SYMBOL = "XAUUSD";</script>
   <script src="/app.js"></script>
 </body>
 </html>

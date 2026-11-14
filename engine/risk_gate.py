@@ -52,7 +52,8 @@ def evaluate_risk_and_size(
 ) -> Dict[str, Any]:
     """Pure function: size position across assets and run deterministic Risk Gate checks."""
     symbol = str(trade_setup.get("symbol") or config.get("symbol") or "XAUUSD").upper()
-    is_forex = ("EUR" in symbol or "GBP" in symbol or ("USD" in symbol and "XAU" not in symbol))
+    is_crypto = "BTC" in symbol
+    is_forex = ("EUR" in symbol or "GBP" in symbol or ("USD" in symbol and "XAU" not in symbol and not is_crypto))
     pip_digits = 5 if is_forex else 2
 
     def r_sym(val: Optional[float]) -> Optional[float]:
@@ -60,7 +61,12 @@ def evaluate_risk_and_size(
 
     balance = float(config.get("account_balance") or 5000.0)
     risk_pct = float(config.get("risk_per_trade_pct") or 1.0)
-    def_contract_size = 100000.0 if is_forex else 100.0
+    if is_crypto:
+        def_contract_size = 1.0
+    elif is_forex:
+        def_contract_size = 100000.0
+    else:
+        def_contract_size = 100.0
     contract_size = float(config.get("contract_size") or def_contract_size)
     min_lot = float(config.get("min_lot") or 0.01)
     max_lot = float(config.get("max_lot") or 10.0)
@@ -78,7 +84,8 @@ def evaluate_risk_and_size(
     min_win_prob = float(config.get("min_win_prob_pct") or 0.0)
 
     broker_offset = float(config.get("broker_price_offset") or 0.0)
-    spread_points = float(config.get("broker_spread_points") or (15.0 if is_forex else 25.0))
+    def_spread_pts = 1500.0 if is_crypto else (15.0 if is_forex else 25.0)
+    spread_points = float(config.get("broker_spread_points") or def_spread_pts)
     point_size = float(config.get("point_size") or (0.00001 if is_forex else 0.01))
     spread_usd = round(spread_points * point_size, pip_digits)
 
@@ -104,7 +111,7 @@ def evaluate_risk_and_size(
         tp1_mt5 = r_sym(float(tp1_raw) + broker_offset)
     else:
         tp1_mt5 = r_sym(entry_mt5 + sl_distance_usd if side == "BUY" else entry_mt5 - sl_distance_usd)
-    breakeven_offset = 0.00015 if is_forex else 0.15
+    breakeven_offset = 5.0 if is_crypto else (0.00015 if is_forex else 0.15)
     breakeven_sl_mt5 = r_sym(entry_mt5 + breakeven_offset if side == "BUY" else entry_mt5 - breakeven_offset)
 
     risk_budget_usd = round(balance * (risk_pct / 100.0), 2)
@@ -202,8 +209,9 @@ def evaluate_risk_and_size(
 
     # 5. SL vs ATR(14) check
     if sl_atr_ratio < min_sl_atr:
+        asset_name = "Bitcoin" if is_crypto else ("Forex" if is_forex else "ทองคำ")
         caution_warnings.append(
-            f"ระยะ SL แคบเกินไปสำหรับทองคำ ({sl_atr_ratio:.2f}x ATR < {min_sl_atr:.2f}x ATR) เสี่ยงโดนสะบัดหาง"
+            f"ระยะ SL แคบเกินไปสำหรับ{asset_name} ({sl_atr_ratio:.2f}x ATR < {min_sl_atr:.2f}x ATR) เสี่ยงโดนสะบัดหาง"
         )
     else:
         passed_checks.append(f"ระยะ SL กว้างเหมาะสม ({sl_atr_ratio:.2f}x ATR14)")

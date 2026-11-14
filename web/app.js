@@ -13,6 +13,7 @@
   let activeChartMode = "ai";
   let lastTvTf = null;
   let lastReportedExecId = null;
+  const CURRENT_SYMBOL = window.CURRENT_SYMBOL || (window.location.pathname.includes("btc") ? "BTCUSD" : "XAUUSD");
   const BKK_OFFSET = 7 * 3600; // UTC+7 Bangkok timezone alignment with TradingView
 
   const el = (id) => document.getElementById(id);
@@ -22,11 +23,13 @@
     if (!tvBox) return;
     const tfMap = { M1: "1", M5: "5", M15: "15", H1: "60", H4: "240" };
     const interval = tfMap[tf] || "5";
+    const frameId = CURRENT_SYMBOL === "BTCUSD" ? "tv_btcusd_frame" : "tv_xauusd_frame";
+    const tvSymbol = CURRENT_SYMBOL === "BTCUSD" ? "BINANCE%3ABTCUSDT" : "OANDA%3AXAUUSD";
     if (lastTvTf === interval && tvBox.innerHTML.trim() !== "") return;
     lastTvTf = interval;
     const src =
-      `https://s.tradingview.com/widgetembed/?frameElementId=tv_xauusd_frame` +
-      `&symbol=OANDA%3AXAUUSD&interval=${interval}&hidesidetoolbar=0&symboledit=1` +
+      `https://s.tradingview.com/widgetembed/?frameElementId=${frameId}` +
+      `&symbol=${tvSymbol}&interval=${interval}&hidesidetoolbar=0&symboledit=1` +
       `&saveimage=0&toolbarbg=0c111d&studies=%5B%5D&theme=dark&style=1` +
       `&timezone=Asia%2FBangkok&withdateranges=1&showpopupbutton=1&locale=th_TH`;
     tvBox.innerHTML = `<iframe src="${src}" style="width:100%;height:100%;border:0;" allowtransparency="true" allowfullscreen></iframe>`;
@@ -598,7 +601,7 @@
     if (el("brokerFeedText")) {
       const bSym = (state.data_source && state.data_source.includes("("))
         ? state.data_source
-        : (ea.symbol ? `โบรกเกอร์ MT5 (${ea.symbol})` : "โบรกเกอร์ MT5 (XAUUSD)");
+        : (ea.symbol ? `โบรกเกอร์ MT5 (${ea.symbol})` : `โบรกเกอร์ MT5 (${CURRENT_SYMBOL})`);
       el("brokerFeedText").textContent = `🏛️ ${bSym}`;
     }
 
@@ -983,7 +986,7 @@
         el("ticketSideTitle").textContent = `🚀 ${activeOrd.side} (${ordersCnt} ไม้)`;
         el("statusSub").textContent = `🚀 ถือครอง ${ordersCnt} ไม้ • ทุนเฉลี่ย ${Number(activeOrd.avg_entry_price || activeOrd.entry_mt5).toFixed(2)}`;
       } else {
-        el("ticketSideTitle").textContent = `🚀 ${activeOrd.side} XAUUSD (เปิดออเดอร์แล้ว)`;
+        el("ticketSideTitle").textContent = `🚀 ${activeOrd.side} ${CURRENT_SYMBOL} (เปิดออเดอร์แล้ว)`;
         el("statusSub").textContent = `🚀 ถือครอง @ ${Number(activeOrd.entry_mt5).toFixed(2)}`;
       }
       el("ticketSideTitle").style.color = activeOrd.side === "SELL" ? "var(--bear)" : "var(--bull)";
@@ -1182,7 +1185,7 @@
 
     if (state.is_new_signal_alert) {
       playAlertBeep(tk.verdict);
-      showToast(`🔔 แจ้งเตือนสัญญาณ ${tk.side} XAUUSD (${tk.verdict})`);
+      showToast(`🔔 แจ้งเตือนสัญญาณ ${tk.side} ${CURRENT_SYMBOL} (${tk.verdict})`);
     }
   }
 
@@ -1360,7 +1363,7 @@
 
   function connectWebSocket() {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${proto}//${window.location.host}/ws`;
+    const wsUrl = `${proto}//${window.location.host}/ws?symbol=${encodeURIComponent(CURRENT_SYMBOL)}`;
     const badge = el("wsStatus");
     const badgeText = el("wsStatusText");
 
@@ -1368,6 +1371,7 @@
     ws.onopen = () => {
       badge.classList.add("live");
       badgeText.textContent = "Live Stream";
+      sendWs({ action: "subscribe", symbol: CURRENT_SYMBOL });
     };
     ws.onmessage = (ev) => {
       try {
@@ -1388,6 +1392,7 @@
 
   function sendWs(payload) {
     if (ws && ws.readyState === WebSocket.OPEN) {
+      if (!payload.symbol) payload.symbol = CURRENT_SYMBOL;
       ws.send(JSON.stringify(payload));
     }
   }
@@ -1515,14 +1520,14 @@
           const resp = await fetch("/api/ea/toggle_auto", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({}),
+            body: JSON.stringify({ symbol: CURRENT_SYMBOL }),
           });
           const doc = await resp.json();
           const isNowOn = doc.auto_trading_enabled;
           showToast(
             isNowOn
-              ? "⚡ เปิดใช้งาน Auto-Trading (MT5 EA) แล้ว"
-              : "⏸️ ปิดการส่งออเดอร์ Auto-Trading แล้ว"
+              ? `⚡ เปิดใช้งาน Auto-Trading (${CURRENT_SYMBOL}) แล้ว`
+              : `⏸️ ปิดการส่งออเดอร์ Auto-Trading (${CURRENT_SYMBOL}) แล้ว`
           );
           if (currentState) {
             currentState.ea_bridge = doc.ea_bridge || currentState.ea_bridge || {};
@@ -1542,13 +1547,13 @@
           const resp = await fetch("/api/ea/toggle_auto", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ enabled: cfgAuto.checked }),
+            body: JSON.stringify({ enabled: cfgAuto.checked, symbol: CURRENT_SYMBOL }),
           });
           const doc = await resp.json();
           showToast(
             cfgAuto.checked
-              ? "⚡ เปิดใช้งาน Auto-Trading แล้ว"
-              : "⏸️ ปิด Auto-Trading แล้ว"
+              ? `⚡ เปิดใช้งาน Auto-Trading (${CURRENT_SYMBOL}) แล้ว`
+              : `⏸️ ปิด Auto-Trading (${CURRENT_SYMBOL}) แล้ว`
           );
           if (currentState) {
             currentState.ea_bridge = doc.ea_bridge || currentState.ea_bridge || {};
@@ -1561,7 +1566,7 @@
 
     // AI action (Replay mode removed per user request)
     el("btnAnalyzeNow").addEventListener("click", () => {
-      sendWs({ action: "analyze_now" });
+      sendWs({ action: "analyze_now", symbol: CURRENT_SYMBOL });
       showToast("กำลังส่งกราฟและผลจำลอง 35,000 เส้นทางให้ Gemini วิเคราะห์...");
     });
 
@@ -1575,12 +1580,12 @@
 
     if (el("btnSendOrderToMT5")) {
       el("btnSendOrderToMT5").addEventListener("click", async () => {
-        sendWs({ action: "send_order_to_mt5" });
+        sendWs({ action: "send_order_to_mt5", symbol: CURRENT_SYMBOL });
         try {
           await fetch("/api/ea/send_order", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({}),
+            body: JSON.stringify({ symbol: CURRENT_SYMBOL }),
           });
         } catch (e) {
           console.warn("send_order HTTP fallback:", e);
@@ -1592,49 +1597,50 @@
     // Quick Test Dispatch Buttons (BUY Market, BUY Limit, SELL Market)
     if (el("btnTestBuyMarket")) {
       el("btnTestBuyMarket").addEventListener("click", async () => {
-        sendWs({ action: "dispatch_test_order", side: "BUY", order_type: "MARKET" });
+        sendWs({ action: "dispatch_test_order", side: "BUY", order_type: "MARKET", symbol: CURRENT_SYMBOL });
         try {
           await fetch("/api/ea/test_order", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ side: "BUY", order_type: "MARKET" }),
+            body: JSON.stringify({ side: "BUY", order_type: "MARKET", symbol: CURRENT_SYMBOL }),
           });
         } catch (e) {
           console.warn("test_order HTTP fallback:", e);
         }
-        showToast("⚡ ยิงคำสั่งทดสอบ BUY Market (0.01 Lot) เข้า MT5 แล้ว! รอ MT5 ดึงคำสั่ง...");
+        showToast(`⚡ ยิงคำสั่งทดสอบ BUY Market (0.01 Lot ${CURRENT_SYMBOL}) เข้า MT5 แล้ว! รอ MT5 ดึงคำสั่ง...`);
       });
     }
 
     if (el("btnTestBuyLimit")) {
       el("btnTestBuyLimit").addEventListener("click", async () => {
-        sendWs({ action: "dispatch_test_order", side: "BUY", order_type: "LIMIT" });
+        sendWs({ action: "dispatch_test_order", side: "BUY", order_type: "LIMIT", symbol: CURRENT_SYMBOL });
         try {
           await fetch("/api/ea/test_order", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ side: "BUY", order_type: "LIMIT" }),
+            body: JSON.stringify({ side: "BUY", order_type: "LIMIT", symbol: CURRENT_SYMBOL }),
           });
         } catch (e) {
           console.warn("test_order HTTP fallback:", e);
         }
-        showToast("⏳ ยิงคำสั่งทดสอบ BUY LIMIT (0.01 Lot ดักย่อ -$2.50) เข้า MT5 แล้ว! ตรวจสอบแถบ Orders ใน MT5");
+        const limitOffset = CURRENT_SYMBOL === "BTCUSD" ? "-$100.00" : "-$2.50";
+        showToast(`⏳ ยิงคำสั่งทดสอบ BUY LIMIT (0.01 Lot ดักย่อ ${limitOffset}) เข้า MT5 แล้ว! ตรวจสอบแถบ Orders ใน MT5`);
       });
     }
 
     if (el("btnTestSellMarket")) {
       el("btnTestSellMarket").addEventListener("click", async () => {
-        sendWs({ action: "dispatch_test_order", side: "SELL", order_type: "MARKET" });
+        sendWs({ action: "dispatch_test_order", side: "SELL", order_type: "MARKET", symbol: CURRENT_SYMBOL });
         try {
           await fetch("/api/ea/test_order", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ side: "SELL", order_type: "MARKET" }),
+            body: JSON.stringify({ side: "SELL", order_type: "MARKET", symbol: CURRENT_SYMBOL }),
           });
         } catch (e) {
           console.warn("test_order HTTP fallback:", e);
         }
-        showToast("⚡ ยิงคำสั่งทดสอบ SELL Market (0.01 Lot) เข้า MT5 แล้ว! รอ MT5 ดึงคำสั่ง...");
+        showToast(`⚡ ยิงคำสั่งทดสอบ SELL Market (0.01 Lot ${CURRENT_SYMBOL}) เข้า MT5 แล้ว! รอ MT5 ดึงคำสั่ง...`);
       });
     }
 
@@ -1707,7 +1713,7 @@
       const isMarket = tk.execution_type === "MARKET" || (tk.order_type && tk.order_type.includes("NOW"));
       const actionType = isMarket ? "เข้าทันทีที่ราคาตลาด (MARKET)" : "ตั้งคำสั่งดักล่วงหน้า (PENDING LIMIT)";
       const text = [
-        `[MT5 Trade Ticket] ${tk.side} XAUUSD — ${actionType} (${tk.verdict})`,
+        `[MT5 Trade Ticket] ${tk.side} ${CURRENT_SYMBOL} — ${actionType} (${tk.verdict})`,
         `Volume: ${Number(tk.lot_size).toFixed(2)} Lot (Risk $${Number(tk.actual_risk_usd).toFixed(2)}) • Margin $${Number(tk.margin_required_usd || 0).toFixed(2)} (Leverage 1:${Math.round(tk.leverage || 100)})`,
         `Entry: ${Number(tk.entry_mt5).toFixed(2)}`,
         `Stop Loss: ${Number(tk.stop_mt5).toFixed(2)}`,
@@ -1754,7 +1760,8 @@
         leverage: lev,
         risk_per_trade_pct: parseFloat(el("cfgRiskPct").value) || 1.0,
         broker_price_offset: parseFloat(el("cfgOffset").value) || 0.0,
-        broker_spread_points: parseFloat(el("cfgSpread").value) || 25,
+        broker_spread_points: parseFloat(el("cfgSpread").value) || (CURRENT_SYMBOL === "BTCUSD" ? 1500 : 25),
+        symbol: CURRENT_SYMBOL,
         multi_order: {
           auto_mode_enabled: el("cfgAutoMultiOrder") ? el("cfgAutoMultiOrder").checked : true,
         },
@@ -1782,7 +1789,7 @@
     initChart();
     bindEvents();
     try {
-      const resp = await fetch("/api/state");
+      const resp = await fetch(`/api/state?symbol=${encodeURIComponent(CURRENT_SYMBOL)}`);
       if (resp.ok) {
         const initial = await resp.json();
         renderDashboard(initial);

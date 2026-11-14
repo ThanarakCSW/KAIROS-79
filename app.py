@@ -74,10 +74,15 @@ def save_config(cfg: Dict[str, Any]) -> None:
 class TradingAssistantCore:
     """Coordinates MarketDataHub, Deterministic Engines, and Automated AI Advisor."""
 
-    def __init__(self) -> None:
+    def __init__(self, symbol: str = "XAUUSD") -> None:
+        self.symbol = (symbol or "XAUUSD").upper()
         self.config = load_config()
         self.hub = MarketDataHub()
-        self.order_manager = OrderLifecycleManager()
+        self.hub.preferred_symbol = self.symbol
+        is_btc = "BTC" in self.symbol
+        persistence_file = "active_order_btc.json" if is_btc else "active_order.json"
+        persistence_path = os.path.join(ROOT_DIR, persistence_file)
+        self.order_manager = OrderLifecycleManager(persistence_path=persistence_path)
         self.ea_bridge = EABridgeManager(CONFIG_PATH)
         self.timeframe = str(self.config.get("default_timeframe") or "M5").upper()
         self.trading_style = str(self.config.get("trading_style") or "intraday").lower()
@@ -99,11 +104,13 @@ class TradingAssistantCore:
             self.trading_style = trading_style
             self.config["trading_style"] = trading_style
 
-        feed = self.hub.get_bars(tf, force_refresh=force_refresh)
+        is_btc = "BTC" in self.symbol
+        feed = self.hub.get_bars(tf, force_refresh=force_refresh, symbol=self.symbol)
         raw_bars = feed["bars"]
-        offset = float(self.config.get("broker_price_offset") or 0.0)
-        spread_pts = float(self.config.get("broker_spread_points") or 25.0)
-        point_size = float(self.config.get("point_size") or 0.01)
+        offset = float(self.config.get("broker_price_offset_btc" if is_btc else "broker_price_offset") or 0.0)
+        def_spread_pts = 1500.0 if is_btc else 25.0
+        spread_pts = float(self.config.get("broker_spread_points_btc" if is_btc else "broker_spread_points") or def_spread_pts)
+        point_size = float(self.config.get("point_size_btc" if is_btc else "point_size") or 0.01)
         spread_usd = round(spread_pts * point_size, 2)
 
         # Apply broker offset to displayed chart bars so the chart & zones match MT5 directly
@@ -131,6 +138,7 @@ class TradingAssistantCore:
             mtf_res=mtf,
             macro_res=macro,
             trading_style=self.trading_style,
+            symbol=self.symbol,
         )
         replays_cnt = max(35000, int(self.config.get("simulation_replays") or 35000))
         self.config["simulation_replays"] = replays_cnt
@@ -202,8 +210,12 @@ class TradingAssistantCore:
             else 0.0
         )
         ea_acc = self.ea_bridge.account_info or {}
+        def_contract_size = 1.0 if is_btc else 100.0
+        contract_size = float(self.config.get("contract_size_btc" if is_btc else "contract_size") or def_contract_size)
         cfg_for_risk = dict(
             self.config,
+            symbol=self.symbol,
+            contract_size=contract_size,
             broker_price_offset=0.0,
             trading_style=self.trading_style,
             min_win_prob_pct=min_win_prob,
@@ -235,7 +247,9 @@ class TradingAssistantCore:
             high=cur_hi,
             low=cur_lo,
             ts=cur_ts,
+            contract_size=contract_size,
             config=self.config,
+            symbol=self.symbol,
         )
 
         # Pre-News Position Shield: Cancel PENDING limit orders & move winning FILLED to Breakeven
@@ -263,7 +277,7 @@ class TradingAssistantCore:
                                 order_event = cancel_ev
                         bt = ord_item.get("broker_ticket")
                         if bt:
-                            self.ea_bridge.enqueue_action("CLOSE_ORDER", {"ticket": int(bt), "symbol": "XAUUSD"})
+                            self.ea_bridge.enqueue_action("CLOSE_ORDER", {"ticket": int(bt), "symbol": self.symbol})
 
                 # 2. Protect Winning Positions with Break-Even SL
                 elif ord_item.get("status") == "FILLED" and not ord_item.get("sl_moved_breakeven"):
@@ -285,7 +299,7 @@ class TradingAssistantCore:
                                 action_type="MODIFY_ORDER",
                                 payload={
                                     "ticket": int(bt),
-                                    "symbol": ord_item.get("symbol", "XAUUSD"),
+                                    "symbol": ord_item.get("symbol", self.symbol),
                                     "new_sl": be_sl,
                                     "new_tp": float(ord_item.get("target_mt5") or 0.0),
                                 },
@@ -322,7 +336,7 @@ class TradingAssistantCore:
                 act_lot = float(active_ord.get("total_lot_size", active_ord["lot_size"]))
                 act_entry = float(active_ord.get("avg_entry_price", active_ord["entry_mt5"]))
                 cur_bal = float(self.config.get("account_balance", 5000.0))
-                contract_size = float(self.config.get("contract_size", 100.0))
+                contract_size = float(self.config.get("contract_size_btc" if is_btc else "contract_size", (1.0 if is_btc else 100.0)))
                 margin_req = round((act_lot * contract_size * act_entry) / cur_lev, 2)
                 risk_ticket["leverage"] = cur_lev
                 risk_ticket["margin_required_usd"] = margin_req
@@ -372,6 +386,7 @@ class TradingAssistantCore:
                         current_price=cur_p,
                         timeframe=tf,
                         trading_style=self.trading_style,
+                        symbol=self.symbol,
                     )
                 risk_ticket["active_order"] = self.order_manager.get_active_order_dict(cur_p)
                 order_event = self.order_manager.last_event
@@ -396,14 +411,14 @@ class TradingAssistantCore:
                         payload={
                             "side": act_ord["side"],
                             "order_type": act_ord.get("execution_type", "LIMIT"),
-                            "symbol": act_ord.get("symbol", "XAUUSD"),
-                            "lot": float(act_ord.get("lot_size") or risk_ticket.get("lot_size") or 0.10),
+                            "symbol": act_ord.get("symbol", self.symbol),
+                            "lot": float(act_ord.get("lot_size") or risk_ticket.get("lot_size") or (0.01 if is_btc else 0.10)),
                             "price": float(act_ord.get("entry_mt5") or cur_p),
                             "sl": float(act_ord.get("stop_mt5") or 0.0),
                             "tp": float(act_ord.get("target_mt5") or 0.0),
                             "tp1": float(act_ord.get("tp1_mt5") or 0.0),
                             "magic": 797979,
-                            "comment": f"K79-{act_ord['side']}",
+                            "comment": f"K79-{self.symbol[:3]}-{act_ord['side']}",
                         },
                         signal_id=sig_id,
                     )
@@ -419,14 +434,14 @@ class TradingAssistantCore:
                     payload={
                         "side": risk_ticket["side"],
                         "order_type": risk_ticket.get("execution_type", "LIMIT"),
-                        "symbol": "XAUUSD",
-                        "lot": float(risk_ticket.get("lot_size") or 0.10),
+                        "symbol": self.symbol,
+                        "lot": float(risk_ticket.get("lot_size") or (0.01 if is_btc else 0.10)),
                         "price": float(risk_ticket.get("entry_mt5") or cur_p),
                         "sl": float(risk_ticket.get("stop_mt5") or 0.0),
                         "tp": float(risk_ticket.get("target_mt5") or 0.0),
                         "tp1": float(risk_ticket.get("tp1_mt5") or 0.0),
                         "magic": 797979,
-                        "comment": f"K79-{risk_ticket['side']}",
+                        "comment": f"K79-{self.symbol[:3]}-{risk_ticket['side']}",
                     },
                     signal_id=sig_id,
                 )
@@ -451,8 +466,8 @@ class TradingAssistantCore:
                         payload={
                             "side": sub_o.get("side", risk_ticket["side"]),
                             "order_type": sub_o.get("execution_type", "MARKET"),
-                            "symbol": sub_o.get("symbol", "XAUUSD"),
-                            "lot": float(sub_o.get("lot_size") or 0.10),
+                            "symbol": sub_o.get("symbol", self.symbol),
+                            "lot": float(sub_o.get("lot_size") or (0.01 if is_btc else 0.10)),
                             "price": float(sub_o.get("entry_mt5") or cur_p),
                             "sl": float(sub_o.get("stop_mt5") or 0.0),
                             "tp": float(sub_o.get("target_mt5") or 0.0),
@@ -476,8 +491,8 @@ class TradingAssistantCore:
                             payload={
                                 "side": sub_o.get("side", act_ord["side"] if act_ord else "BUY"),
                                 "order_type": sub_o.get("execution_type", "MARKET"),
-                                "symbol": sub_o.get("symbol", "XAUUSD"),
-                                "lot": float(sub_o.get("lot_size") or 0.10),
+                                "symbol": sub_o.get("symbol", self.symbol),
+                                "lot": float(sub_o.get("lot_size") or (0.01 if is_btc else 0.10)),
                                 "price": float(sub_o.get("entry_mt5") or cur_p),
                                 "sl": float(sub_o.get("stop_mt5") or 0.0),
                                 "tp": float(sub_o.get("target_mt5") or 0.0),
@@ -558,7 +573,7 @@ class TradingAssistantCore:
                 for t in tickets_to_close:
                     self.ea_bridge.enqueue_action(
                         action_type="CLOSE_ORDER",
-                        payload={"ticket": int(t), "symbol": "XAUUSD"},
+                        payload={"ticket": int(t), "symbol": self.symbol},
                     )
 
         signal_tracker = evaluate_signal_performance(
@@ -763,7 +778,8 @@ class TradingAssistantCore:
         live_quote = feed.get("live_quote")
         state = {
             "type": "full_state",
-            "symbol": "XAUUSD",
+            "symbol": self.symbol,
+            "is_crypto": is_btc,
             "timeframe": tf,
             "trading_style": self.trading_style,
             "data_source": feed["source"],
@@ -845,9 +861,10 @@ class TradingAssistantCore:
 # ---------------------------------------------------------------------------
 
 class WebSocketClient:
-    def __init__(self, writer: asyncio.StreamWriter) -> None:
+    def __init__(self, writer: asyncio.StreamWriter, symbol: str = "XAUUSD") -> None:
         self.writer = writer
         self.closed = False
+        self.symbol = (symbol or "XAUUSD").upper()
 
     async def send_json(self, data: Dict[str, Any]) -> None:
         if self.closed:
@@ -920,17 +937,31 @@ class AssistantServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 8000) -> None:
         self.host = host
         self.port = port
-        self.core = TradingAssistantCore()
+        self.cores: Dict[str, TradingAssistantCore] = {
+            "XAUUSD": TradingAssistantCore("XAUUSD"),
+            "BTCUSD": TradingAssistantCore("BTCUSD"),
+        }
+        self.core = self.cores["XAUUSD"]
         self.clients: Set[WebSocketClient] = set()
         self.auto_replay = False
         self._last_ws_broadcast_ts = 0.0
 
-    async def broadcast(self, message: Dict[str, Any]) -> None:
+    def get_core(self, symbol: Optional[str] = None) -> TradingAssistantCore:
+        sym = (symbol or "XAUUSD").upper()
+        if "BTC" in sym:
+            return self.cores["BTCUSD"]
+        return self.cores.get(sym, self.cores["XAUUSD"])
+
+    async def broadcast(self, message: Dict[str, Any], symbol: Optional[str] = None) -> None:
+        target_sym = (symbol or message.get("symbol") or (message.get("risk_ticket") or {}).get("symbol") or "XAUUSD").upper()
+        norm_sym = "BTCUSD" if "BTC" in target_sym else "XAUUSD"
         dead: List[WebSocketClient] = []
         for c in list(self.clients):
-            await c.send_json(message)
-            if c.closed:
-                dead.append(c)
+            c_sym = getattr(c, "symbol", "XAUUSD")
+            if symbol == "*" or c_sym == norm_sym:
+                await c.send_json(message)
+                if c.closed:
+                    dead.append(c)
         for c in dead:
             self.clients.discard(c)
 
@@ -942,16 +973,17 @@ class AssistantServer:
             ask: Optional[float],
             ts: int,
         ) -> None:
-            if self.core.hub.replay_mode or not self.clients:
+            gold_core = self.cores["XAUUSD"]
+            if gold_core.hub.replay_mode or not self.clients:
                 return
             now = time.time()
             if now - self._last_ws_broadcast_ts < 0.25:
                 return
             self._last_ws_broadcast_ts = now
 
-            offset = float(self.core.config.get("broker_price_offset") or 0.0)
-            ingested = self.core.hub.ingest_live_price(
-                timeframe=self.core.timeframe,
+            offset = float(gold_core.config.get("broker_price_offset") or 0.0)
+            ingested = gold_core.hub.ingest_live_price(
+                timeframe=gold_core.timeframe,
                 price=price,
                 bid=bid,
                 ask=ask,
@@ -961,49 +993,53 @@ class AssistantServer:
             if not ingested:
                 return
             b = ingested["bar"]
-            ev = self.core.order_manager.update_price_tick(
+            ev = gold_core.order_manager.update_price_tick(
                 current_price=float(b["c"]),
                 high=float(b["h"]),
                 low=float(b["l"]),
                 ts=int(b["t"]),
+                contract_size=100.0,
+                config=gold_core.config,
+                symbol="XAUUSD",
             )
             if ingested["new_bar_closed"] or ev:
-                state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-                await self.broadcast(state)
+                state = await asyncio.to_thread(gold_core.compute_full_state, None, True, False)
+                await self.broadcast(state, symbol="XAUUSD")
             else:
                 await self.broadcast(
                     {
                         "type": "tick",
-                        "timeframe": self.core.timeframe,
+                        "symbol": "XAUUSD",
+                        "timeframe": gold_core.timeframe,
                         "bar": ingested["bar"],
                         "bid": ingested["bid"],
                         "ask": ingested["ask"],
                         "spread_points": ingested["spread_points"],
-                        "active_order": self.core.order_manager.get_active_order_dict(float(b["c"])),
+                        "active_order": gold_core.order_manager.get_active_order_dict(float(b["c"])),
                         "source": "tradingview_ws (OANDA:XAUUSD)",
-                    }
+                    },
+                    symbol="XAUUSD",
                 )
 
         await stream_tradingview_gold_ws(on_tv_tick)
 
     async def binance_ws_loop(self) -> None:
         """Fallback Stream: real-time gold trades from wss://stream.binance.com:9443/ws/paxgusdt@trade when TradingView WS is idle."""
+        gold_core = self.cores["XAUUSD"]
         async def on_trade(trade_price: float, trade_ts: int) -> None:
-            if self.core.hub.replay_mode or not self.clients:
+            if gold_core.hub.replay_mode or not self.clients:
                 return
-            # Only use Binance fallback stream if TradingView primary stream hasn't pushed recently
-            if str(self.core.hub.source).startswith("tradingview_ws"):
+            if str(gold_core.hub.source).startswith("tradingview_ws"):
                 return
             now = time.time()
-            # Throttle WebSocket push to at most 4 frames/sec for smooth browser rendering
             if now - self._last_ws_broadcast_ts < 0.25:
                 return
             self._last_ws_broadcast_ts = now
 
-            spot_equivalent = trade_price + self.core.hub.basis_shift
-            offset = float(self.core.config.get("broker_price_offset") or 0.0)
-            ingested = self.core.hub.ingest_live_price(
-                timeframe=self.core.timeframe,
+            spot_equivalent = trade_price + gold_core.hub.basis_shift
+            offset = float(gold_core.config.get("broker_price_offset") or 0.0)
+            ingested = gold_core.hub.ingest_live_price(
+                timeframe=gold_core.timeframe,
                 price=spot_equivalent,
                 ts=trade_ts,
                 offset_usd=offset,
@@ -1011,30 +1047,86 @@ class AssistantServer:
             if not ingested:
                 return
             b = ingested["bar"]
-            ev = self.core.order_manager.update_price_tick(
+            ev = gold_core.order_manager.update_price_tick(
                 current_price=float(b["c"]),
                 high=float(b["h"]),
                 low=float(b["l"]),
                 ts=int(b["t"]),
+                contract_size=100.0,
+                config=gold_core.config,
+                symbol="XAUUSD",
             )
             if ingested["new_bar_closed"] or ev:
-                state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-                await self.broadcast(state)
+                state = await asyncio.to_thread(gold_core.compute_full_state, None, True, False)
+                await self.broadcast(state, symbol="XAUUSD")
             else:
                 await self.broadcast(
                     {
                         "type": "tick",
-                        "timeframe": self.core.timeframe,
+                        "symbol": "XAUUSD",
+                        "timeframe": gold_core.timeframe,
                         "bar": ingested["bar"],
-                        "active_order": self.core.order_manager.get_active_order_dict(float(b["c"])),
+                        "active_order": gold_core.order_manager.get_active_order_dict(float(b["c"])),
                         "source": ingested["source"],
-                    }
+                    },
+                    symbol="XAUUSD",
                 )
 
         await stream_binance_gold_ws(on_trade)
 
+    async def binance_btc_ws_loop(self) -> None:
+        """Stream real-time BTC trades from wss://stream.binance.com:9443/ws/btcusdt@trade."""
+        btc_core = self.cores["BTCUSD"]
+        last_btc_broadcast = 0.0
+
+        async def on_btc_trade(trade_price: float, trade_ts: int) -> None:
+            nonlocal last_btc_broadcast
+            if btc_core.hub.replay_mode or not self.clients:
+                return
+            now = time.time()
+            if now - last_btc_broadcast < 0.25:
+                return
+            last_btc_broadcast = now
+
+            offset = float(btc_core.config.get("broker_price_offset_btc") or 0.0)
+            ingested = btc_core.hub.ingest_live_price(
+                timeframe=btc_core.timeframe,
+                price=trade_price,
+                ts=trade_ts,
+                offset_usd=offset,
+            )
+            if not ingested:
+                return
+            b = ingested["bar"]
+            ev = btc_core.order_manager.update_price_tick(
+                current_price=float(b["c"]),
+                high=float(b["h"]),
+                low=float(b["l"]),
+                ts=int(b["t"]),
+                contract_size=1.0,
+                config=btc_core.config,
+                symbol="BTCUSD",
+            )
+            if ingested["new_bar_closed"] or ev:
+                state = await asyncio.to_thread(btc_core.compute_full_state, None, True, False)
+                await self.broadcast(state, symbol="BTCUSD")
+            else:
+                await self.broadcast(
+                    {
+                        "type": "tick",
+                        "symbol": "BTCUSD",
+                        "timeframe": btc_core.timeframe,
+                        "bar": ingested["bar"],
+                        "active_order": btc_core.order_manager.get_active_order_dict(float(b["c"])),
+                        "source": "binance_ws (btcusdt@trade)",
+                    },
+                    symbol="BTCUSD",
+                )
+
+        await stream_binance_btc_ws(on_btc_trade)
+
     async def tick_loop(self) -> None:
-        """Poll real Spot XAU/USD Bid/Ask every 2.0s in Live Mode (or step Replay in Replay Mode)."""
+        """Poll real spot Bid/Ask and trigger updates for subscribed symbol clients."""
         loop_counter = 0
         while True:
             await asyncio.sleep(2.0)
@@ -1042,91 +1134,120 @@ class AssistantServer:
                 continue
             loop_counter += 1
 
-            # 1. Replay Mode handling
-            if self.core.hub.replay_mode:
-                if self.auto_replay and loop_counter % 2 == 0:
-                    self.core.hub.step_replay(1)
-                    state = await asyncio.to_thread(self.core.compute_full_state)
-                    await self.broadcast(state)
-                elif self.core.last_state and self.core.last_state.get("bars"):
-                    last_bar = self.core.last_state["bars"][-1]
-                    tick = self.core.hub.simulate_live_tick(last_bar, offset_usd=0.0)
-                    await self.broadcast(
-                        {
-                            "type": "tick",
-                            "timeframe": self.core.timeframe,
-                            "bar": tick,
-                            "source": "offline_replay",
-                        }
-                    )
-                continue
+            for sym_name, core_inst in list(self.cores.items()):
+                has_sub = any(getattr(c, "symbol", "XAUUSD") == sym_name for c in self.clients)
+                if not has_sub and not core_inst.order_manager.has_active_order():
+                    continue
 
-            # 2. Live Mode: if TradingView WS is active, periodically refresh full state every 20s;
-            #    otherwise use Swissquote / Binance fallback quote polling
-            if str(self.core.hub.source).startswith("tradingview_ws"):
-                if loop_counter % 10 == 0:
-                    state = await asyncio.to_thread(
-                        self.core.compute_full_state, None, True, False
-                    )
-                    await self.broadcast(state)
-                continue
-
-            spot = None
-            if HAS_MT5_LIB and _mt5_initialized:
-                spot = await asyncio.to_thread(fetch_mt5_live_tick, self.core.hub.preferred_symbol)
-            if not spot and self.core.ea_bridge.account_info.get("price"):
-                acc = self.core.ea_bridge.account_info
-                spot = {
-                    "price": float(acc["price"]),
-                    "bid": float(acc.get("bid") or acc["price"]),
-                    "ask": float(acc.get("ask") or acc["price"]),
-                    "spread_points": float(acc.get("spread_points") or 0.0),
-                    "source": f"mt5_broker ({acc.get('symbol', 'XAUUSD')})",
-                    "ts": int(time.time()),
-                }
-            elif not spot and str(self.core.hub.source).startswith("mt5_broker"):
-                spot = await asyncio.to_thread(fetch_mt5_live_tick, self.core.hub.preferred_symbol)
-            if not spot:
-                spot = await asyncio.to_thread(fetch_live_spot_xauusd)
-
-            if spot:
-                self.core.hub.latest_spot_quote = spot
-                is_mt5_feed = str(spot.get("source", "")).startswith("mt5_broker")
-                offset = 0.0 if is_mt5_feed else float(self.core.config.get("broker_price_offset") or 0.0)
-                ingested = self.core.hub.ingest_live_price(
-                    timeframe=self.core.timeframe,
-                    price=spot["price"],
-                    bid=spot["bid"],
-                    ask=spot["ask"],
-                    ts=spot["ts"],
-                    offset_usd=offset,
-                )
-                if ingested:
-                    b = ingested["bar"]
-                    ev = self.core.order_manager.update_price_tick(
-                        current_price=float(b["c"]),
-                        high=float(b["h"]),
-                        low=float(b["l"]),
-                        ts=int(b["t"]),
-                    )
-                    if ingested["new_bar_closed"] or ev or loop_counter % 10 == 0:
-                        # Recompute full SMC + Monte Carlo state when candle closes, order event occurs, or every 20s
-                        state = await asyncio.to_thread(
-                            self.core.compute_full_state, None, ingested["new_bar_closed"], False
+                is_btc = "BTC" in sym_name
+                # 1. Replay Mode handling
+                if core_inst.hub.replay_mode:
+                    if self.auto_replay and loop_counter % 2 == 0:
+                        core_inst.hub.step_replay(1)
+                        state = await asyncio.to_thread(core_inst.compute_full_state)
+                        await self.broadcast(state, symbol=sym_name)
+                    elif core_inst.last_state and core_inst.last_state.get("bars"):
+                        last_bar = core_inst.last_state["bars"][-1]
+                        tick = core_inst.hub.simulate_live_tick(last_bar, offset_usd=0.0)
+                        await self.broadcast(
+                            {
+                                "type": "tick",
+                                "symbol": sym_name,
+                                "timeframe": core_inst.timeframe,
+                                "bar": tick,
+                                "source": "offline_replay",
+                            },
+                            symbol=sym_name,
                         )
-                        await self.broadcast(state)
+                    continue
+
+                # 2. Live Mode
+                spot = None
+                if HAS_MT5_LIB and _mt5_initialized:
+                    spot = await asyncio.to_thread(fetch_mt5_live_tick, core_inst.hub.preferred_symbol)
+                if not spot and not is_btc:
+                    if core_inst.ea_bridge.account_info.get("price") and not "BTC" in str(core_inst.ea_bridge.account_info.get("symbol", "")).upper():
+                        acc = core_inst.ea_bridge.account_info
+                        spot = {
+                            "price": float(acc["price"]),
+                            "bid": float(acc.get("bid") or acc["price"]),
+                            "ask": float(acc.get("ask") or acc["price"]),
+                            "spread_points": float(acc.get("spread_points") or 0.0),
+                            "source": f"mt5_broker ({acc.get('symbol', 'XAUUSD')})",
+                            "ts": int(time.time()),
+                        }
+                    elif not spot:
+                        spot = await asyncio.to_thread(fetch_live_spot_xauusd)
+
+                if spot:
+                    core_inst.hub.latest_spot_quote = spot
+                    is_mt5_feed = str(spot.get("source", "")).startswith("mt5_broker")
+                    offset = 0.0 if is_mt5_feed else float(core_inst.config.get("broker_price_offset_btc" if is_btc else "broker_price_offset") or 0.0)
+                    ingested = core_inst.hub.ingest_live_price(
+                        timeframe=core_inst.timeframe,
+                        price=spot["price"],
+                        bid=spot["bid"],
+                        ask=spot["ask"],
+                        ts=spot["ts"],
+                        offset_usd=offset,
+                    )
+                    if ingested:
+                        b = ingested["bar"]
+                        ev = core_inst.order_manager.update_price_tick(
+                            current_price=float(b["c"]),
+                            high=float(b["h"]),
+                            low=float(b["l"]),
+                            ts=int(b["t"]),
+                            contract_size=1.0 if is_btc else 100.0,
+                            config=core_inst.config,
+                            symbol=sym_name,
+                        )
+                        if ingested["new_bar_closed"] or ev or loop_counter % 10 == 0:
+                            state = await asyncio.to_thread(
+                                core_inst.compute_full_state, None, ingested["new_bar_closed"], False
+                            )
+                            await self.broadcast(state, symbol=sym_name)
+                        else:
+                            await self.broadcast(
+                                {
+                                    "type": "tick",
+                                    "symbol": sym_name,
+                                    "timeframe": core_inst.timeframe,
+                                    "bar": ingested["bar"],
+                                    "bid": ingested["bid"],
+                                    "ask": ingested["ask"],
+                                    "spread_points": ingested["spread_points"],
+                                    "active_order": core_inst.order_manager.get_active_order_dict(float(b["c"])),
+                                    "source": spot["source"],
+                                },
+                                symbol=sym_name,
+                            )
+                elif core_inst.last_state and core_inst.last_state.get("bars"):
+                    last_b = core_inst.last_state["bars"][-1]
+                    tick = core_inst.hub.simulate_live_tick(last_b, offset_usd=0.0)
+                    ev = core_inst.order_manager.update_price_tick(
+                        current_price=float(tick["c"]),
+                        high=float(tick["h"]),
+                        low=float(tick["l"]),
+                        ts=int(tick["t"]),
+                        contract_size=1.0 if is_btc else 100.0,
+                        config=core_inst.config,
+                        symbol=sym_name,
+                    )
+                    if ev or loop_counter % 10 == 0:
+                        state = await asyncio.to_thread(core_inst.compute_full_state, None, False, False)
+                        await self.broadcast(state, symbol=sym_name)
                     else:
                         await self.broadcast(
                             {
                                 "type": "tick",
-                                "timeframe": self.core.timeframe,
-                                "bar": ingested["bar"],
-                                "bid": ingested["bid"],
-                                "ask": ingested["ask"],
-                                "spread_points": ingested["spread_points"],
-                                "active_order": self.core.order_manager.get_active_order_dict(float(b["c"])),
-                                "source": spot["source"],
-                            }
+                                "symbol": sym_name,
+                                "timeframe": core_inst.timeframe,
+                                "bar": tick,
+                                "active_order": core_inst.order_manager.get_active_order_dict(float(tick["c"])),
+                                "source": core_inst.last_state.get("data_source", "live"),
+                            },
+                            symbol=sym_name,
                         )
 
     async def handle_client(
@@ -1173,9 +1294,12 @@ class AssistantServer:
                 writer.write(handshake.encode("utf-8"))
                 await writer.drain()
 
-                client = WebSocketClient(writer)
+                ws_sym = (query.get("symbol") or ["XAUUSD"])[0].upper()
+                sym_norm = "BTCUSD" if "BTC" in ws_sym else "XAUUSD"
+                client = WebSocketClient(writer, symbol=sym_norm)
                 self.clients.add(client)
-                state = self.core.last_state or self.core.compute_full_state()
+                target_core = self.get_core(sym_norm)
+                state = target_core.last_state or target_core.compute_full_state()
                 await client.send_json(state)
 
                 while not client.closed:
@@ -1203,33 +1327,39 @@ class AssistantServer:
             except Exception:
                 pass
 
-    def dispatch_order_to_mt5(self) -> Dict[str, Any]:
+    def dispatch_order_to_mt5(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         """Manually or explicitly dispatch the current setup / active order into MT5 EA queue."""
-        act = self.core.order_manager.active_order
-        last_st = self.core.last_state or {}
+        core = self.get_core(symbol)
+        act = core.order_manager.active_order
+        last_st = core.last_state or {}
         rt = last_st.get("risk_ticket") or {}
+        is_btc = "BTC" in core.symbol
         cur_p = float(
-            (self.core.hub.latest_spot or {}).get("price")
+            (core.hub.latest_spot or {}).get("price")
             or (act.get("entry_mt5") if act else 0.0)
             or (rt.get("entry_mt5") or 0.0)
-            or (self.core.hub.fixture_bars[-1]["c"] if self.core.hub.fixture_bars else 2650.0)
+            or (core.hub.fixture_bars[-1]["c"] if core.hub.fixture_bars else (90500.0 if is_btc else 2650.0))
         )
         side = (act.get("side") if act else None) or rt.get("side") or "BUY"
 
         # If no active order exists, register one so Web UI tracks it and displays PnL
         if not act:
-            stop_p = float(rt.get("stop_mt5") or (cur_p - 5.0 if side == "BUY" else cur_p + 5.0))
-            target_p = float(rt.get("target_mt5") or (cur_p + 10.0 if side == "BUY" else cur_p - 10.0))
-            tp1_p = float(rt.get("tp1_mt5") or (cur_p + 5.0 if side == "BUY" else cur_p - 5.0))
-            lot = float(rt.get("lot_size") or 0.10)
-            self.core.order_manager.register_trade_setup(
+            sl_dist = 150.0 if is_btc else 5.0
+            tp_dist = 300.0 if is_btc else 10.0
+            stop_p = float(rt.get("stop_mt5") or (cur_p - sl_dist if side == "BUY" else cur_p + sl_dist))
+            target_p = float(rt.get("target_mt5") or (cur_p + tp_dist if side == "BUY" else cur_p - tp_dist))
+            tp1_p = float(rt.get("tp1_mt5") or (cur_p + sl_dist if side == "BUY" else cur_p - sl_dist))
+            lot = float(rt.get("lot_size") or (0.01 if is_btc else 0.10))
+            core.order_manager.register_trade_setup(
                 risk_ticket={
+                    "symbol": core.symbol,
                     "side": side,
                     "entry_mt5": cur_p,
                     "stop_mt5": stop_p,
                     "tp1_mt5": tp1_p,
                     "target_mt5": target_p,
                     "lot_size": lot,
+                    "contract_size": 1.0 if is_btc else 100.0,
                     "actual_risk_usd": float(rt.get("actual_risk_usd") or 50.0),
                     "potential_profit_usd": float(rt.get("potential_profit_usd") or 100.0),
                     "reward_risk": 2.0,
@@ -1238,31 +1368,32 @@ class AssistantServer:
                 },
                 trade_setup=last_st.get("smc", {}).get("trade_setup") or {},
                 current_price=cur_p,
-                timeframe=self.core.timeframe,
-                trading_style=self.core.trading_style,
+                timeframe=core.timeframe,
+                trading_style=core.trading_style,
                 force_replace=True,
+                symbol=core.symbol,
             )
-            act = self.core.order_manager.active_order
+            act = core.order_manager.active_order
 
         sig_id = (act.get("order_id") if act else None) or rt.get("fingerprint") or f"manual_{int(time.time())}"
         # Discard so manual dispatch can re-queue even if already queued
-        self.core.ea_bridge.executed_signal_ids.discard(sig_id)
+        core.ea_bridge.executed_signal_ids.discard(sig_id)
 
         exec_type = (act.get("execution_type") if act else None) or "MARKET"
-        sym = self.core.hub.preferred_symbol or "XAUUSD"
-        action = self.core.ea_bridge.enqueue_action(
+        sym = core.symbol
+        action = core.ea_bridge.enqueue_action(
             action_type="OPEN_ORDER",
             payload={
                 "side": side,
                 "order_type": exec_type,
                 "symbol": sym,
-                "lot": float((act.get("lot_size") if act else None) or rt.get("lot_size") or 0.10),
+                "lot": float((act.get("lot_size") if act else None) or rt.get("lot_size") or (0.01 if is_btc else 0.10)),
                 "price": float((act.get("entry_mt5") if act else None) or cur_p),
                 "sl": float((act.get("stop_mt5") if act else None) or rt.get("stop_mt5") or 0.0),
                 "tp": float((act.get("target_mt5") if act else None) or rt.get("target_mt5") or 0.0),
                 "tp1": float((act.get("tp1_mt5") if act else None) or rt.get("tp1_mt5") or 0.0),
                 "magic": 797979,
-                "comment": f"K79-{side}-MANUAL",
+                "comment": f"K79-{core.symbol[:3]}-{side}-MANUAL",
                 "manual": True,
             },
             signal_id=sig_id,
@@ -1274,8 +1405,11 @@ class AssistantServer:
         side: str = "BUY",
         order_type: str = "MARKET",
         lot: Optional[float] = None,
+        symbol: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Dispatch an instant test BUY/SELL (Market or Limit) order directly into MT5 EA queue."""
+        core = self.get_core(symbol)
+        is_btc = "BTC" in core.symbol
         side = str(side or "BUY").upper()
         if side not in ("BUY", "SELL"):
             side = "BUY"
@@ -1284,55 +1418,60 @@ class AssistantServer:
             order_type = "MARKET"
 
         cur_p = float(
-            (self.core.hub.latest_spot or {}).get("price")
-            or (self.core.hub.fixture_bars[-1]["c"] if self.core.hub.fixture_bars else 2650.0)
+            (core.hub.latest_spot or {}).get("price")
+            or (core.hub.fixture_bars[-1]["c"] if core.hub.fixture_bars else (90500.0 if is_btc else 2650.0))
         )
 
         test_lot = float(lot) if lot and float(lot) > 0 else 0.01
+        sl_dist = 150.0 if is_btc else 4.0
+        tp_dist = 300.0 if is_btc else 8.0
+        limit_offset = 100.0 if is_btc else 2.50
+        contract_size = 1.0 if is_btc else 100.0
 
         # Calculate entry, SL, TP based on type
         if order_type == "MARKET":
             entry_p = round(cur_p, 2)
             if side == "BUY":
-                sl_p = round(cur_p - 4.00, 2)
-                tp_p = round(cur_p + 8.00, 2)
-                tp1_p = round(cur_p + 4.00, 2)
+                sl_p = round(cur_p - sl_dist, 2)
+                tp_p = round(cur_p + tp_dist, 2)
+                tp1_p = round(cur_p + sl_dist, 2)
             else:
-                sl_p = round(cur_p + 4.00, 2)
-                tp_p = round(cur_p - 8.00, 2)
-                tp1_p = round(cur_p - 4.00, 2)
+                sl_p = round(cur_p + sl_dist, 2)
+                tp_p = round(cur_p - tp_dist, 2)
+                tp1_p = round(cur_p - sl_dist, 2)
         else:  # LIMIT
-            # For BUY LIMIT: place entry $2.50 below market so it sits as pending order waiting to be filled
-            # For SELL LIMIT: place entry $2.50 above market
             if side == "BUY":
-                entry_p = round(cur_p - 2.50, 2)
-                sl_p = round(entry_p - 4.00, 2)
-                tp_p = round(entry_p + 8.00, 2)
-                tp1_p = round(entry_p + 4.00, 2)
+                entry_p = round(cur_p - limit_offset, 2)
+                sl_p = round(entry_p - sl_dist, 2)
+                tp_p = round(entry_p + tp_dist, 2)
+                tp1_p = round(entry_p + sl_dist, 2)
             else:
-                entry_p = round(cur_p + 2.50, 2)
-                sl_p = round(entry_p + 4.00, 2)
-                tp_p = round(entry_p - 8.00, 2)
-                tp1_p = round(entry_p - 4.00, 2)
+                entry_p = round(cur_p + limit_offset, 2)
+                sl_p = round(entry_p + sl_dist, 2)
+                tp_p = round(entry_p - tp_dist, 2)
+                tp1_p = round(entry_p - sl_dist, 2)
 
         exec_desc = f"{side} NOW (Market Test)" if order_type == "MARKET" else f"{side} LIMIT (Pending Test)"
 
         # Register trade setup so Web UI tracks it and displays PnL
-        self.core.order_manager.register_trade_setup(
+        core.order_manager.register_trade_setup(
             risk_ticket={
+                "symbol": core.symbol,
                 "side": side,
                 "entry_mt5": entry_p,
                 "stop_mt5": sl_p,
                 "tp1_mt5": tp1_p,
                 "target_mt5": tp_p,
                 "lot_size": test_lot,
-                "actual_risk_usd": round(test_lot * 100 * 4.0, 2),
-                "potential_profit_usd": round(test_lot * 100 * 8.0, 2),
+                "contract_size": contract_size,
+                "actual_risk_usd": round(test_lot * contract_size * sl_dist, 2),
+                "potential_profit_usd": round(test_lot * contract_size * tp_dist, 2),
                 "reward_risk": 2.0,
                 "order_type": exec_desc,
                 "execution_type": order_type,
             },
             trade_setup={
+                "symbol": core.symbol,
                 "side": side,
                 "setup_type": f"TEST_{order_type}",
                 "entry": entry_p,
@@ -1343,22 +1482,23 @@ class AssistantServer:
                 "confidence": "TEST_SIGNAL",
             },
             current_price=cur_p,
-            timeframe=self.core.timeframe,
-            trading_style=self.core.trading_style,
+            timeframe=core.timeframe,
+            trading_style=core.trading_style,
             force_replace=True,
+            symbol=core.symbol,
         )
-        act = self.core.order_manager.active_order
+        act = core.order_manager.active_order
 
         # Generate unique signal_id for MT5 tracking
-        sig_id = f"test_{side.lower()}_{order_type.lower()}_{int(time.time() * 1000)}"
+        sig_id = f"test_{core.symbol.lower()}_{side.lower()}_{order_type.lower()}_{int(time.time() * 1000)}"
         if act:
             act["order_id"] = sig_id
 
         # Discard previous executed record so manual dispatch always queues fresh
-        self.core.ea_bridge.executed_signal_ids.discard(sig_id)
+        core.ea_bridge.executed_signal_ids.discard(sig_id)
 
-        sym = self.core.hub.preferred_symbol or "XAUUSD"
-        action = self.core.ea_bridge.enqueue_action(
+        sym = core.symbol
+        action = core.ea_bridge.enqueue_action(
             action_type="OPEN_ORDER",
             payload={
                 "side": side,
@@ -1370,150 +1510,153 @@ class AssistantServer:
                 "tp": tp_p,
                 "tp1": tp1_p,
                 "magic": 797979,
-                "comment": f"K79-TEST-{side[:1]}{order_type[:1]}",
+                "comment": f"K79-TEST-{core.symbol[:3]}-{side[:1]}{order_type[:1]}",
                 "manual": True,
             },
             signal_id=sig_id,
         )
         return {
             "status": "ok",
-            "message": f"ส่งคำสั่งทดสอบ {side} ({order_type}) ขนาด {test_lot} Lot ไปยัง MT5 แล้ว",
+            "message": f"ส่งคำสั่งทดสอบ {core.symbol} {side} ({order_type}) ขนาด {test_lot} Lot ไปยัง MT5 แล้ว",
             "action": action,
             "active_order": act,
         }
 
     async def handle_ws_command(self, client: WebSocketClient, cmd: Dict[str, Any]) -> None:
+        cmd_sym = cmd.get("symbol") or getattr(client, "symbol", "XAUUSD")
+        core = self.get_core(cmd_sym)
         action = str(cmd.get("action") or "")
         if action == "change_tf":
             tf = str(cmd.get("timeframe") or "M5")
-            state = await asyncio.to_thread(self.core.compute_full_state, tf, True, False)
-            await self.broadcast(state)
+            state = await asyncio.to_thread(core.compute_full_state, tf, True, False)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "change_style":
             style = str(cmd.get("trading_style") or "intraday").lower()
             tf = cmd.get("timeframe")
-            if self.core.order_manager.has_active_order():
-                act = self.core.order_manager.active_order
+            if core.order_manager.has_active_order():
+                act = core.order_manager.active_order
                 if act and act.get("status") == "PENDING" and act.get("trading_style") != style:
-                    self.core.order_manager.cancel_active_order(reason="STYLE_CHANGED")
-            state = await asyncio.to_thread(self.core.compute_full_state, tf, True, True, style)
-            await self.broadcast(state)
+                    core.order_manager.cancel_active_order(reason="STYLE_CHANGED")
+            state = await asyncio.to_thread(core.compute_full_state, tf, True, True, style)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "step_replay":
             self.auto_replay = False
             steps = int(cmd.get("steps") or 1)
-            self.core.hub.step_replay(steps)
-            state = await asyncio.to_thread(self.core.compute_full_state)
-            await self.broadcast(state)
+            core.hub.step_replay(steps)
+            state = await asyncio.to_thread(core.compute_full_state)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "reset_replay":
             self.auto_replay = False
-            self.core.hub.reset_replay(int(cmd.get("cursor") or 234))
-            state = await asyncio.to_thread(self.core.compute_full_state, None, False, True)
-            await self.broadcast(state)
+            core.hub.reset_replay(int(cmd.get("cursor") or 234))
+            state = await asyncio.to_thread(core.compute_full_state, None, False, True)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "toggle_auto_replay":
-            self.core.hub.replay_mode = True
+            core.hub.replay_mode = True
             self.auto_replay = not self.auto_replay
-            await self.broadcast({"type": "auto_replay_status", "auto_replay": self.auto_replay})
+            await self.broadcast({"type": "auto_replay_status", "auto_replay": self.auto_replay}, symbol=core.symbol)
         elif action == "live_mode":
             self.auto_replay = False
-            self.core.hub.replay_mode = False
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, True)
-            await self.broadcast(state)
+            core.hub.replay_mode = False
+            state = await asyncio.to_thread(core.compute_full_state, None, True, True)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "analyze_now":
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, True)
-            await self.broadcast(state)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, True)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "cancel_active_order":
             reason = str(cmd.get("reason") or "MANUAL_CANCEL")
-            act = self.core.order_manager.active_order
+            act = core.order_manager.active_order
             if act and act.get("broker_ticket"):
-                self.core.ea_bridge.enqueue_action(
+                core.ea_bridge.enqueue_action(
                     action_type="CLOSE_ORDER",
-                    payload={"ticket": int(act["broker_ticket"])},
+                    payload={"ticket": int(act["broker_ticket"]), "symbol": core.symbol},
                 )
-            self.core.order_manager.cancel_active_order(reason=reason)
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            core.order_manager.cancel_active_order(reason=reason)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "close_active_order":
-            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
-            act = self.core.order_manager.active_order
+            cp = float(cmd.get("current_price") or core.hub.latest_spot.get("price") or 0.0)
+            act = core.order_manager.active_order
             if act and act.get("broker_ticket"):
-                self.core.ea_bridge.enqueue_action(
+                core.ea_bridge.enqueue_action(
                     action_type="CLOSE_ORDER",
-                    payload={"ticket": int(act["broker_ticket"])},
+                    payload={"ticket": int(act["broker_ticket"]), "symbol": core.symbol},
                 )
-            self.core.order_manager.close_active_order(reason="MANUAL_CLOSE", current_price=cp)
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            core.order_manager.close_active_order(reason="MANUAL_CLOSE", current_price=cp)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "fill_active_order_now":
-            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
-            self.core.order_manager.fill_now(current_price=cp)
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            cp = float(cmd.get("current_price") or core.hub.latest_spot.get("price") or 0.0)
+            core.order_manager.fill_now(current_price=cp)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "set_breakeven":
-            self.core.order_manager.set_breakeven()
-            act = self.core.order_manager.active_order
+            core.order_manager.set_breakeven()
+            act = core.order_manager.active_order
             if act and act.get("broker_ticket"):
-                self.core.ea_bridge.enqueue_action(
+                core.ea_bridge.enqueue_action(
                     action_type="MODIFY_ORDER",
                     payload={
                         "ticket": int(act["broker_ticket"]),
+                        "symbol": core.symbol,
                         "new_sl": float(act.get("entry_mt5") or 0.0),
                         "new_tp": float(act.get("target_mt5") or 0.0),
                     },
                 )
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "send_order_to_mt5":
-            self.dispatch_order_to_mt5()
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            self.dispatch_order_to_mt5(symbol=core.symbol)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "dispatch_test_order":
             side = str(cmd.get("side") or "BUY")
             order_type = str(cmd.get("order_type") or "MARKET")
             lot = float(cmd.get("lot")) if cmd.get("lot") else None
-            self.dispatch_test_order(side=side, order_type=order_type, lot=lot)
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            self.dispatch_test_order(side=side, order_type=order_type, lot=lot, symbol=core.symbol)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "scan_new_setup":
-            self.core.order_manager.cancel_active_order(reason="SCAN_NEW_SETUP")
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, True)
-            await self.broadcast(state)
+            core.order_manager.cancel_active_order(reason="SCAN_NEW_SETUP")
+            state = await asyncio.to_thread(core.compute_full_state, None, True, True)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "toggle_cross_asset":
-            ca_cfg = self.core.config.setdefault("cross_asset", {})
+            ca_cfg = core.config.setdefault("cross_asset", {})
             req_enable = cmd.get("enabled")
             new_val = not bool(ca_cfg.get("enabled", False)) if req_enable is None else bool(req_enable)
             ca_cfg["enabled"] = new_val
-            self.core.save_config()
-            state = await asyncio.to_thread(self.core.compute_full_state)
-            await self.broadcast(state)
+            core.save_config()
+            state = await asyncio.to_thread(core.compute_full_state)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "add_sub_order":
-            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            cp = float(cmd.get("current_price") or core.hub.latest_spot.get("price") or 0.0)
             purpose = str(cmd.get("purpose") or "AUTO")
             exec_type = str(cmd.get("execution_type") or "MARKET")
             entry_p = float(cmd.get("entry_price") or cp)
             lot = float(cmd.get("lot_size")) if cmd.get("lot_size") else None
-            self.core.order_manager.add_sub_order(
+            core.order_manager.add_sub_order(
                 purpose=purpose,
                 execution_type=exec_type,
                 current_price=cp,
                 entry_price=entry_p,
                 lot_size=lot,
             )
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "close_order_by_id":
-            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            cp = float(cmd.get("current_price") or core.hub.latest_spot.get("price") or 0.0)
             oid = str(cmd.get("order_id") or "")
-            self.core.order_manager.close_order_by_id(order_id=oid, current_price=cp)
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            core.order_manager.close_order_by_id(order_id=oid, current_price=cp)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "close_all_active_orders":
-            cp = float(cmd.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
-            self.core.ea_bridge.enqueue_action(
+            cp = float(cmd.get("current_price") or core.hub.latest_spot.get("price") or 0.0)
+            core.ea_bridge.enqueue_action(
                 action_type="CLOSE_ALL",
-                payload={"symbol": "XAUUSD", "magic": 797979},
+                payload={"symbol": core.symbol, "magic": 797979},
             )
-            self.core.order_manager.close_all_orders(current_price=cp)
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            core.order_manager.close_all_orders(current_price=cp)
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
 
     async def handle_http_request(
         self,
@@ -1523,62 +1666,74 @@ class AssistantServer:
         query: Dict[str, List[str]],
         body_bytes: bytes,
     ) -> None:
+        sym_req = (query.get("symbol") or query.get("sym") or ["XAUUSD"])[0]
+        core = self.get_core(sym_req)
+
         if path == "/api/state" and method == "GET":
-            tf = (query.get("tf") or [self.core.timeframe])[0]
-            state = self.core.compute_full_state(timeframe=tf)
+            tf = (query.get("tf") or [core.timeframe])[0]
+            state = core.compute_full_state(timeframe=tf)
             await self.send_http_json(writer, 200, state)
             return
 
         if path == "/api/config" and method == "POST":
             payload = safe_json_loads(body_bytes)
-            state = self.core.update_settings(payload)
-            await self.broadcast(state)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            state = target_core.update_settings(payload)
+            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, state)
             return
 
         if path == "/api/replay" and method == "POST":
             payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
             mode = payload.get("mode", "step")
             if mode == "reset":
                 self.auto_replay = False
-                self.core.hub.reset_replay(int(payload.get("cursor") or 234))
+                target_core.hub.reset_replay(int(payload.get("cursor") or 234))
             elif mode == "live":
                 self.auto_replay = False
-                self.core.hub.replay_mode = False
+                target_core.hub.replay_mode = False
             else:
                 self.auto_replay = False
-                self.core.hub.step_replay(int(payload.get("steps") or 1))
-            state = self.core.compute_full_state(force_refresh=(mode == "live"), force_ai=True)
-            await self.broadcast(state)
+                target_core.hub.step_replay(int(payload.get("steps") or 1))
+            state = target_core.compute_full_state(force_refresh=(mode == "live"), force_ai=True)
+            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, state)
             return
 
         if path == "/api/analyze" and method == "POST":
-            state = self.core.compute_full_state(force_ai=True)
-            await self.broadcast(state)
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            state = target_core.compute_full_state(force_ai=True)
+            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, state)
             return
 
         if path == "/api/order/action" and method == "POST":
             payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
             action = str(payload.get("action") or "")
-            cp = float(payload.get("current_price") or self.core.hub.latest_spot.get("price") or 0.0)
+            cp = float(payload.get("current_price") or target_core.hub.latest_spot.get("price") or 0.0)
             if action == "cancel":
-                self.core.order_manager.cancel_active_order(reason="MANUAL_CANCEL")
+                target_core.order_manager.cancel_active_order(reason="MANUAL_CANCEL")
             elif action == "close":
-                self.core.order_manager.close_active_order(reason="MANUAL_CLOSE", current_price=cp)
+                target_core.order_manager.close_active_order(reason="MANUAL_CLOSE", current_price=cp)
             elif action == "fill_now":
-                self.core.order_manager.fill_now(current_price=cp)
+                target_core.order_manager.fill_now(current_price=cp)
             elif action == "set_breakeven":
-                self.core.order_manager.set_breakeven()
+                target_core.order_manager.set_breakeven()
             elif action == "scan_new_setup":
-                self.core.order_manager.cancel_active_order(reason="SCAN_NEW_SETUP")
+                target_core.order_manager.cancel_active_order(reason="SCAN_NEW_SETUP")
             elif action == "add_sub_order":
                 purpose = str(payload.get("purpose") or "AUTO")
                 exec_type = str(payload.get("execution_type") or "MARKET")
                 entry_p = float(payload.get("entry_price") or cp)
                 lot = float(payload.get("lot_size")) if payload.get("lot_size") else None
-                self.core.order_manager.add_sub_order(
+                target_core.order_manager.add_sub_order(
                     purpose=purpose,
                     execution_type=exec_type,
                     current_price=cp,
@@ -1587,39 +1742,39 @@ class AssistantServer:
                 )
             elif action == "close_by_id":
                 oid = str(payload.get("order_id") or "")
-                # Find matching sub order broker_ticket if any
-                for o in self.core.order_manager.active_orders:
+                for o in target_core.order_manager.active_orders:
                     if o.get("order_id") == oid and o.get("broker_ticket"):
-                        self.core.ea_bridge.enqueue_action(
-                            "CLOSE_ORDER", {"ticket": o["broker_ticket"]}
+                        target_core.ea_bridge.enqueue_action(
+                            "CLOSE_ORDER", {"ticket": o["broker_ticket"], "symbol": target_core.symbol}
                         )
-                self.core.order_manager.close_order_by_id(order_id=oid, current_price=cp)
+                target_core.order_manager.close_order_by_id(order_id=oid, current_price=cp)
             elif action == "close_all":
-                self.core.ea_bridge.enqueue_action(
-                    "CLOSE_ALL", {"symbol": "XAUUSD", "magic": 797979}
+                target_core.ea_bridge.enqueue_action(
+                    "CLOSE_ALL", {"symbol": target_core.symbol, "magic": 797979}
                 )
-                self.core.order_manager.close_all_orders(current_price=cp)
+                target_core.order_manager.close_all_orders(current_price=cp)
 
             if action in ("close", "cancel"):
-                self.core.ea_bridge.enqueue_action(
-                    "CLOSE_ALL", {"symbol": "XAUUSD", "magic": 797979}
+                target_core.ea_bridge.enqueue_action(
+                    "CLOSE_ALL", {"symbol": target_core.symbol, "magic": 797979}
                 )
             elif action == "set_breakeven":
-                act_ord = self.core.order_manager.active_order
+                act_ord = target_core.order_manager.active_order
                 if act_ord and act_ord.get("broker_ticket"):
-                    self.core.ea_bridge.enqueue_action(
+                    target_core.ea_bridge.enqueue_action(
                         "MODIFY_ORDER",
                         {
                             "ticket": act_ord["broker_ticket"],
+                            "symbol": target_core.symbol,
                             "new_sl": act_ord.get("breakeven_sl_mt5", act_ord["entry_mt5"]),
                             "new_tp": act_ord.get("target_mt5", 0.0),
                         },
                     )
 
             state = await asyncio.to_thread(
-                self.core.compute_full_state, None, True, action == "scan_new_setup"
+                target_core.compute_full_state, None, True, action == "scan_new_setup"
             )
-            await self.broadcast(state)
+            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, state)
             return
 
@@ -1640,52 +1795,54 @@ class AssistantServer:
 
         if path == "/api/ea/heartbeat" and method == "POST":
             payload = safe_json_loads(body_bytes)
-            cached_bars = (self.core.hub.cached_bars_by_tf.get(self.core.timeframe) or [])
+            ea_sym = str(payload.get("symbol") or "XAUUSD").upper()
+            target_core = self.get_core(ea_sym)
+            cached_bars = (target_core.hub.cached_bars_by_tf.get(target_core.timeframe) or [])
             ref_px = float(cached_bars[-1].get("c")) if cached_bars and cached_bars[-1].get("c") else None
-            info = self.core.ea_bridge.record_heartbeat(payload, reference_feed_price=ref_px)
+            info = target_core.ea_bridge.record_heartbeat(payload, reference_feed_price=ref_px)
             # Sync balance / equity, live spread & auto-calibrated broker offset
             if info.get("equity") and float(info["equity"]) > 0:
-                self.core.config["account_balance"] = float(info["equity"])
+                target_core.config["account_balance"] = float(info["equity"])
             if info.get("spread_points") and float(info["spread_points"]) > 0:
-                self.core.config["broker_spread_points"] = float(info["spread_points"])
+                target_core.config["broker_spread_points"] = float(info["spread_points"])
             if (
-                self.core.config.get("auto_sync_broker_offset")
-                and len(self.core.ea_bridge.basis_samples) >= 3
+                target_core.config.get("auto_sync_broker_offset")
+                and len(target_core.ea_bridge.basis_samples) >= 3
             ):
-                self.core.config["broker_price_offset"] = float(info.get("dynamic_offset_usd") or 0.0)
+                target_core.config["broker_price_offset"] = float(info.get("dynamic_offset_usd") or 0.0)
             if info.get("symbol"):
-                self.core.hub.preferred_symbol = str(info["symbol"]).strip()
+                target_core.hub.preferred_symbol = str(info["symbol"]).strip()
             # Ingest live broker price / tick directly from MT5 EA heartbeat
             if info.get("price") and float(info["price"]) > 0:
                 cur_p = float(info["price"])
                 bid_p = float(info.get("bid") or cur_p)
                 ask_p = float(info.get("ask") or cur_p)
-                self.core.hub.latest_spot = {
+                target_core.hub.latest_spot = {
                     "price": cur_p,
                     "bid": bid_p,
                     "ask": ask_p,
                     "spread_points": float(info.get("spread_points") or 0.0),
-                    "source": f"mt5_broker ({info.get('symbol', 'XAUUSD')})",
+                    "source": f"mt5_broker ({info.get('symbol', target_core.symbol)})",
                     "time": int(time.time()),
                     "ts": int(time.time()),
                 }
             # Reconcile tracked orders against MT5 open positions & pending orders
-            self.core.order_manager.reconcile_mt5_positions(
+            target_core.order_manager.reconcile_mt5_positions(
                 open_positions=info.get("open_positions") or [],
                 pending_orders=info.get("pending_orders") or [],
                 current_price=float(info.get("price") or 0.0),
             )
             # Broadcast state so web UI sees live MT5 status immediately
-            state = self.core.last_state or {}
+            state = target_core.last_state or {}
             if state:
-                state["ea_bridge"] = self.core.ea_bridge.get_status_dict()
-                await self.broadcast(state)
+                state["ea_bridge"] = target_core.ea_bridge.get_status_dict()
+                await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(
                 writer,
                 200,
                 {
                     "status": "ok",
-                    "auto_trading_enabled": self.core.ea_bridge.auto_trading_enabled,
+                    "auto_trading_enabled": target_core.ea_bridge.auto_trading_enabled,
                     "server_time": int(time.time()),
                 },
             )
@@ -1693,63 +1850,74 @@ class AssistantServer:
 
         if path == "/api/ea/execution" and method == "POST":
             payload = safe_json_loads(body_bytes)
-            rec = self.core.ea_bridge.record_execution(payload)
-            self.core.order_manager.bind_execution_report(rec)
-            state = await asyncio.to_thread(self.core.compute_full_state)
-            await self.broadcast(state)
+            ea_sym = str(payload.get("symbol") or "XAUUSD").upper()
+            target_core = self.get_core(ea_sym)
+            rec = target_core.ea_bridge.record_execution(payload)
+            target_core.order_manager.bind_execution_report(rec)
+            state = await asyncio.to_thread(target_core.compute_full_state)
+            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, {"status": "ok", "execution": rec})
             return
 
         if path == "/api/ea/toggle_auto" and method == "POST":
             payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
             req_enable = payload.get("enabled")
             if req_enable is None:
-                new_val = self.core.ea_bridge.toggle_auto_trading()
+                new_val = target_core.ea_bridge.toggle_auto_trading()
             else:
-                new_val = self.core.ea_bridge.set_auto_trading(bool(req_enable))
-            state = await asyncio.to_thread(self.core.compute_full_state)
-            await self.broadcast(state)
+                new_val = target_core.ea_bridge.set_auto_trading(bool(req_enable))
+            state = await asyncio.to_thread(target_core.compute_full_state)
+            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(
                 writer,
                 200,
                 {
                     "status": "ok",
                     "auto_trading_enabled": new_val,
-                    "ea_bridge": self.core.ea_bridge.get_status_dict(),
+                    "ea_bridge": target_core.ea_bridge.get_status_dict(),
                 },
             )
             return
 
         if path == "/api/ea/send_order" and method == "POST":
-            res = self.dispatch_order_to_mt5()
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            res = self.dispatch_order_to_mt5(symbol=sym)
+            target_core = self.get_core(sym)
+            state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, res)
             return
 
         if path == "/api/ea/test_order" and method == "POST":
             payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
             side = str(payload.get("side") or "BUY")
             order_type = str(payload.get("order_type") or "MARKET")
             lot = float(payload.get("lot")) if payload.get("lot") else None
-            res = self.dispatch_test_order(side=side, order_type=order_type, lot=lot)
-            state = await asyncio.to_thread(self.core.compute_full_state, None, True, False)
-            await self.broadcast(state)
+            res = self.dispatch_test_order(side=side, order_type=order_type, lot=lot, symbol=sym)
+            target_core = self.get_core(sym)
+            state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, res)
             return
 
         if path == "/api/cross_asset/toggle" and method == "POST":
             payload = safe_json_loads(body_bytes)
-            ca_cfg = self.core.config.setdefault("cross_asset", {})
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            ca_cfg = target_core.config.setdefault("cross_asset", {})
             req_enable = payload.get("enabled")
             if req_enable is None:
                 new_val = not bool(ca_cfg.get("enabled", False))
             else:
                 new_val = bool(req_enable)
             ca_cfg["enabled"] = new_val
-            self.core.save_config()
-            state = await asyncio.to_thread(self.core.compute_full_state)
-            await self.broadcast(state)
+            target_core.save_config()
+            state = await asyncio.to_thread(target_core.compute_full_state)
+            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(
                 writer,
                 200,
@@ -1762,10 +1930,12 @@ class AssistantServer:
             return
 
         if path == "/api/ea/status" and method == "GET":
-            await self.send_http_json(writer, 200, self.core.ea_bridge.get_status_dict())
+            sym = (query.get("symbol") or ["XAUUSD"])[0]
+            target_core = self.get_core(sym)
+            await self.send_http_json(writer, 200, target_core.ea_bridge.get_status_dict())
             return
 
-        rel_path = "index.html" if path in ("/", "") else path.lstrip("/")
+        rel_path = "btc.html" if path in ("/btc", "/btc.html") else ("index.html" if path in ("/", "") else path.lstrip("/"))
         file_path = os.path.abspath(os.path.join(WEB_DIR, rel_path))
         if not file_path.startswith(WEB_DIR) or not os.path.isfile(file_path):
             await self.send_http_json(writer, 404, {"error": f"Not found: {path}"})
@@ -1805,7 +1975,8 @@ class AssistantServer:
         writer.close()
 
     async def serve_forever(self) -> None:
-        self.core.compute_full_state(force_refresh=True)
+        for c in self.cores.values():
+            c.compute_full_state(force_refresh=True)
         listen_host = None if self.host in ("0.0.0.0", "", None) else self.host
         try:
             server = await asyncio.start_server(
@@ -1852,6 +2023,7 @@ class AssistantServer:
         tick_task = asyncio.create_task(self.tick_loop())
         tv_task = asyncio.create_task(self.tv_ws_loop())
         ws_task = asyncio.create_task(self.binance_ws_loop())
+        btc_ws_task = asyncio.create_task(self.binance_btc_ws_loop())
 
         import socket
         try:
@@ -1863,8 +2035,9 @@ class AssistantServer:
             lan_ip = "127.0.0.1"
 
         print("=" * 64)
-        print("🚀 KAIROS-79 (Precision Gold Timing & Risk System) Online")
-        print(f"🌐 Web Dashboard (Local):    http://localhost:{self.port}")
+        print("🚀 KAIROS-79 (Precision Gold & Bitcoin Timing System) Online")
+        print(f"🟡 Gold (XAU/USD) Dashboard:  http://localhost:{self.port}/")
+        print(f"₿  Bitcoin (BTC/USD) Page:    http://localhost:{self.port}/btc")
         print(f"🌐 Web Dashboard (LAN/VPS):  http://{lan_ip}:{self.port}")
         print(f"🤖 MT5 EA Bridge URL:        http://{lan_ip}:{self.port} (or http://127.0.0.1:{self.port})")
         print(f"Active Data Feed:            {self.core.last_state.get('data_source') if self.core.last_state else 'initializing'}")
@@ -1876,6 +2049,7 @@ class AssistantServer:
             tick_task.cancel()
             tv_task.cancel()
             ws_task.cancel()
+            btc_ws_task.cancel()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
