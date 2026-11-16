@@ -78,7 +78,7 @@ def evaluate_risk_and_size(
     is_scalp = trading_style in ("scalping", "micro_scalp", "robot_scalper")
     min_rr = float(config.get("min_reward_risk") or 1.5)
     if is_robot:
-        min_rr = min(min_rr, 0.60)
+        min_rr = min(min_rr, 0.45)
     elif is_scalp:
         min_rr = min(min_rr, 1.15)
     min_sl_atr = float(config.get("min_sl_atr_mult") or 0.8)

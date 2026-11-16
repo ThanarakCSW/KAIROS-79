@@ -107,6 +107,16 @@ class TradingAssistantCore:
         if new_val:
             self.timeframe = "M1"
             self.config["default_timeframe"] = "M1"
+            # Cancel any stale pending orders from other modes so robot can trade immediately
+            if self.order_manager.has_active_order():
+                act = self.order_manager.active_order
+                if act and act.get("status") == "PENDING":
+                    self.order_manager.cancel_active_order(reason="ROBOT_MODE_ACTIVATED")
+        else:
+            if self.order_manager.has_active_order():
+                act = self.order_manager.active_order
+                if act and act.get("status") == "PENDING" and act.get("trading_style") == "robot_scalper":
+                    self.order_manager.cancel_active_order(reason="ROBOT_MODE_DEACTIVATED")
         save_config(self.config)
         return new_val
 
@@ -123,7 +133,10 @@ class TradingAssistantCore:
             self.trading_style = trading_style
             self.config["trading_style"] = trading_style
 
-        is_robot = bool((self.config.get("robot_scalper") or {}).get("enabled", False))
+        is_robot = (
+            bool((self.config.get("robot_scalper") or {}).get("enabled", False))
+            and (trading_style is None or trading_style == "robot_scalper")
+        ) or (trading_style == "robot_scalper")
         effective_style = "robot_scalper" if is_robot else self.trading_style
 
         # In robot mode, prioritize M1 as the primary timeframe for fast execution unless explicitly requested
@@ -343,11 +356,11 @@ class TradingAssistantCore:
         min_conf = int((self.config.get("ai") or {}).get("auto_trigger_min_confluence") or 55)
         if self.order_manager.has_active_order():
             act = self.order_manager.active_order
-            if act and act.get("status") == "PENDING" and act.get("trading_style") != self.trading_style:
+            if act and act.get("status") == "PENDING" and act.get("trading_style") != effective_style:
                 self.order_manager.cancel_active_order(reason="STYLE_CHANGED")
 
         active_ord = self.order_manager.get_active_order_dict(cur_p) if self.order_manager.has_active_order() else None
-        is_same_style_order = bool(active_ord and active_ord.get("trading_style") == self.trading_style)
+        is_same_style_order = bool(active_ord and active_ord.get("trading_style") == effective_style)
 
         if is_same_style_order:
             # Autonomously scan and execute recovery (แก้ไม้) or scale-in (ทำกำไรเพิ่ม)
@@ -831,7 +844,7 @@ class TradingAssistantCore:
             "symbol": self.symbol,
             "is_crypto": is_btc,
             "timeframe": tf,
-            "trading_style": self.trading_style,
+            "trading_style": effective_style,
             "data_source": feed["source"],
             "live_quote": live_quote,
             "replay_mode": self.hub.replay_mode,
