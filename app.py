@@ -107,6 +107,7 @@ class TradingAssistantCore:
         if new_val:
             self.timeframe = "M1"
             self.config["default_timeframe"] = "M1"
+            self.ea_bridge.set_auto_trading(True)
             # Cancel any stale pending orders from other modes so robot can trade immediately
             if self.order_manager.has_active_order():
                 act = self.order_manager.active_order
@@ -130,6 +131,7 @@ class TradingAssistantCore:
         if new_val:
             self.timeframe = "M1"
             self.config["default_timeframe"] = "M1"
+            self.ea_bridge.set_auto_trading(True)
             # Cancel any stale pending orders from other modes so test can trade immediately
             if self.order_manager.has_active_order():
                 act = self.order_manager.active_order
@@ -404,8 +406,10 @@ class TradingAssistantCore:
                 config=self.config,
                 ts=cur_ts,
             )
-            if auto_event and not order_event:
-                order_event = auto_event
+            if auto_event:
+                if not order_event:
+                    order_event = auto_event
+                active_ord = self.order_manager.get_active_order_dict(cur_p)
 
             if active_ord:
                 cur_lev = max(1.0, float(self.config.get("leverage") or 100.0))
@@ -522,42 +526,15 @@ class TradingAssistantCore:
                     signal_id=sig_id,
                 )
 
-            # Case 2: Multi-orders (scale-in / recovery) needing dispatch
-            if order_event and order_event.get("type") in ("MULTI_ORDER_ADDED", "AUTO_ORDER_ADDED", "SUB_ORDER_ADDED"):
-                sub_o = order_event.get("order") or {}
-                if not sub_o and order_event.get("order_id"):
-                    sub_o = next(
-                        (o for o in self.order_manager.active_orders if o.get("order_id") == order_event.get("order_id")),
-                        {},
-                    )
-                sub_id = sub_o.get("order_id")
-                if (
-                    sub_id
-                    and sub_id not in self.ea_bridge.executed_signal_ids
-                    and not sub_o.get("broker_ticket")
-                    and not sub_o.get("ea_dispatch_status")
-                ):
-                    self.ea_bridge.enqueue_action(
-                        action_type="OPEN_ORDER",
-                        payload={
-                            "side": sub_o.get("side", risk_ticket["side"]),
-                            "order_type": sub_o.get("execution_type", "MARKET"),
-                            "symbol": sub_o.get("symbol", self.symbol),
-                            "lot": float(sub_o.get("lot_size") or (0.01 if is_btc else 0.10)),
-                            "price": float(sub_o.get("entry_mt5") or cur_p),
-                            "sl": float(sub_o.get("stop_mt5") or 0.0),
-                            "tp": float(sub_o.get("target_mt5") or 0.0),
-                            "magic": 797979,
-                            "comment": f"K79-{sub_o.get('purpose', 'MULTI')}",
-                        },
-                        signal_id=sub_id,
-                    )
-            elif len(self.order_manager.active_orders) > 1:
+            # Case 2: Multi-orders (scale-in / recovery / rapid-fire) needing dispatch
+            if len(self.order_manager.active_orders) > 1:
                 for sub_o in self.order_manager.active_orders[1:]:
                     sub_id = sub_o.get("order_id")
+                    is_in_q = any(a.get("signal_id") == sub_id for a in self.ea_bridge.action_queue)
                     if (
                         sub_id
                         and sub_id not in self.ea_bridge.executed_signal_ids
+                        and not is_in_q
                         and not sub_o.get("broker_ticket")
                         and not sub_o.get("ea_dispatch_status")
                         and sub_o.get("status") in ("PENDING", "FILLED")
@@ -1379,11 +1356,16 @@ class AssistantServer:
                             symbol=sym_name,
                         )
 
-                # Periodic autonomous setup scan: evaluate setups every 2-16 seconds when auto trading is ON and no active order
+                # Periodic autonomous setup scan: evaluate setups every 2-16 seconds when auto trading is ON
                 is_rapid_on = bool((core_inst.config.get("rapid_fire_test") or {}).get("enabled", False))
                 is_robot_on = bool((core_inst.config.get("robot_scalper") or {}).get("enabled", False))
                 scan_mod = 1 if is_rapid_on else (2 if is_robot_on else (3 if core_inst.trading_style == "micro_scalp" else 8))
-                if core_inst.ea_bridge.auto_trading_enabled and not core_inst.order_manager.has_active_order() and loop_counter % scan_mod == 0:
+                should_scan = (
+                    core_inst.ea_bridge.auto_trading_enabled
+                    and (is_rapid_on or is_robot_on or not core_inst.order_manager.has_active_order())
+                    and (loop_counter % scan_mod == 0)
+                )
+                if should_scan:
                     try:
                         state = await asyncio.to_thread(core_inst.compute_full_state, None, False, False)
                         if has_sub:

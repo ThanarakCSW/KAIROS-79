@@ -247,15 +247,20 @@ class OrderLifecycleManager:
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         lot_size: Optional[float] = None,
+        max_allowed: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """Add a secondary order for DCA/Recovery (แก้ไม้) or Scale-in (ทำกำไรเพิ่ม).
-        Supports up to 5 concurrent active orders."""
+        Supports up to 10 concurrent active orders in rapid fire demo mode, or 5 in normal modes."""
         if not self.has_active_order():
-            return None
-        if len(self.active_orders) >= 5:
             return None
 
         primary = self.active_orders[0]
+        is_rapid_order = bool(primary.get("is_rapid_fire")) or str(primary.get("trading_style") or "").lower() == "rapid_fire_test"
+        is_robot_order = bool(primary.get("is_robot_scalper")) or str(primary.get("trading_style") or "").lower() == "robot_scalper"
+        default_limit = 10 if is_rapid_order else 5
+        order_cap = max_allowed if max_allowed is not None else default_limit
+        if len(self.active_orders) >= order_cap:
+            return None
         side = primary["side"]
         now_ts = int(time.time())
         idx = len(self.active_orders) + 1
@@ -406,11 +411,12 @@ class OrderLifecycleManager:
         stop_p = float(primary.get("stop_mt5") or 0.0)
         target_p = float(primary.get("target_mt5") or 0.0)
 
-        # Check distance from all existing active orders to prevent clustering
-        for o in self.active_orders:
-            o_entry = float(o.get("filled_price") or o.get("entry_mt5") or current_price)
-            if abs(current_price - o_entry) < min_spacing:
-                return None
+        # Check distance from all existing active orders to prevent clustering (skip for rapid-fire demo)
+        if not is_rapid_order:
+            for o in self.active_orders:
+                o_entry = float(o.get("filled_price") or o.get("entry_mt5") or current_price)
+                if abs(current_price - o_entry) < min_spacing:
+                    return None
 
         st = structure or {}
         st_smc = smc or {}
@@ -464,6 +470,42 @@ class OrderLifecycleManager:
                             f"ปิดทุกไม้อัตโนมัติเพื่อรักษาเงินทุน"
                         )
                     return ev
+
+        # ---------------- 0.9 Rapid-Fire Demo High-Frequency Order Placement ----------------
+        if is_rapid_order and len(self.active_orders) < max_orders:
+            rf_cfg = (config or {}).get("rapid_fire_test") or {}
+            target_dist = float(rf_cfg.get("target_tp_usd") or 0.80)
+            sl_dist = float(rf_cfg.get("hard_sl_usd") or 1.50)
+            sub_sl = r2(current_price - sl_dist if side == "BUY" else current_price + sl_dist)
+            sub_tp = r2(current_price + target_dist if side == "BUY" else current_price - target_dist)
+            lot = 0.01
+
+            trigger_reason = f"🧪 ยิงทดสอบ Throughput Demo (ไม้ที่ {len(self.active_orders) + 1}/{max_orders})"
+            sub = self.add_sub_order(
+                purpose="RAPID_FIRE",
+                execution_type="MARKET",
+                current_price=current_price,
+                lot_size=lot,
+                stop_loss=sub_sl,
+                take_profit=sub_tp,
+                max_allowed=max_orders,
+            )
+            if sub:
+                sub["trigger_reason"] = trigger_reason
+                sub["management_note_th"] = f"🧪 ยิงทดสอบ Throughput Demo @ {current_price:.2f}"
+                self.last_order_add_ts = now_ts
+                self.last_event = {
+                    "type": "AUTO_ORDER_ADDED",
+                    "order_id": sub["order_id"],
+                    "purpose": "RAPID_FIRE",
+                    "purpose_th": "ยิงทดสอบ Demo",
+                    "side": side,
+                    "entry_price": current_price,
+                    "trigger_reason": trigger_reason,
+                    "message": f"🧪 ยิงคำสั่งทดสอบ Throughput MT5: {side} @ {current_price:.2f}",
+                }
+                self.save_to_disk()
+                return self.last_event
 
         # ---------------- 1. Recovery Opportunity (แก้ไม้ DCA) ----------------
         max_recovery_orders = int(cfg.get("max_recovery_orders") or 1)
