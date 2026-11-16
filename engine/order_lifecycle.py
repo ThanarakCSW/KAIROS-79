@@ -749,6 +749,54 @@ class OrderLifecycleManager:
                 order["highest_pnl_r"] = max(float(order.get("highest_pnl_r") or flt_r), flt_r)
                 order["lowest_pnl_r"] = min(float(order.get("lowest_pnl_r") or flt_r), flt_r)
 
+                # 0. Fast Dynamic Breakeven for Scalping / Micro-Scalp
+                is_scalp_order = str(order.get("trading_style") or "").lower() in ("scalping", "micro_scalp")
+                if is_scalp_order and flt_r >= 0.50 and not order.get("sl_moved_breakeven"):
+                    order["sl_moved_breakeven"] = True
+                    order["stop_mt5"] = be_sl
+                    order["management_note_th"] = (
+                        f"⚡ สเกลป์เร็ว: กำไรถึง +{flt_r:.2f}R ดัน SL บังทุน ({be_sl}) ล็อคความปลอดภัยทันที"
+                    )
+                    last_event = {
+                        "type": "BREAKEVEN_LOCKED",
+                        "order_id": order["order_id"],
+                        "side": side,
+                        "be_sl": be_sl,
+                        "broker_ticket": order.get("broker_ticket"),
+                        "order": dict(order),
+                        "message": f"⚡ สเกลป์เร็ว: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl})",
+                    }
+
+                # 0.5 Time-Decay Auto-Exit for Scalping / Micro-Scalp (Stale Position Guard)
+                filled_ts = int(order.get("filled_ts") or order.get("registered_ts") or now_ts)
+                holding_seconds = max(0, now_ts - filled_ts)
+                ms_cfg = (config or {}).get("micro_scalp") or {}
+                max_hold_sec = float(ms_cfg.get("time_decay_seconds") or 720.0)
+                if is_scalp_order and holding_seconds >= max_hold_sec and -0.40 <= flt_r <= 0.40:
+                    order["status"] = "CLOSED_TIME_DECAY"
+                    order["closed_ts"] = now_ts
+                    order["close_price"] = current_price
+                    order["close_reason"] = "TIME_DECAY_EXIT"
+                    order["realized_pnl_r"] = flt_r
+                    order["realized_pnl_usd"] = flt_usd
+                    mins_held = int(holding_seconds / 60)
+                    order["management_note_th"] = (
+                        f"⏱️ ตัดปิดไม้ตามเวลา (Time-Decay Exit) หลังถือครองครบ {mins_held} นาทีโดยราคาไม่วิ่งต่อ "
+                        f"เพื่อดึง Margin คืนและเปิดรับสัญญาณใหม่ ({flt_r:+.2f}R)"
+                    )
+                    self.order_history.append(dict(order))
+                    last_event = {
+                        "type": "TRADE_CLOSED_TIME_DECAY",
+                        "order_id": order["order_id"],
+                        "side": side,
+                        "pnl_r": flt_r,
+                        "pnl_usd": flt_usd,
+                        "broker_ticket": order.get("broker_ticket"),
+                        "order": dict(order),
+                        "message": f"⏱️ ปิดไม้ตามเวลา (Time-Decay Exit): {side} {order_sym} ({flt_r:+.2f}R)",
+                    }
+                    continue
+
                 active_sl = float(order.get("stop_mt5") or (be_sl if order.get("sl_moved_breakeven") else stop))
 
                 # 1. Full Target TP2
@@ -772,6 +820,8 @@ class OrderLifecycleManager:
                         "order_id": order["order_id"],
                         "side": side,
                         "pnl_r": rr,
+                        "broker_ticket": order.get("broker_ticket"),
+                        "order": dict(order),
                         "message": f"🏆 ชนะแตะเป้า TP2 สมบูรณ์! {side} {order_sym} (+{rr:.2f}R)",
                     }
                     continue
@@ -801,6 +851,8 @@ class OrderLifecycleManager:
                         "side": side,
                         "pnl_r": flt_r,
                         "pnl_usd": flt_usd,
+                        "broker_ticket": order.get("broker_ticket"),
+                        "order": dict(order),
                         "message": f"🛡️ ปิดตัดขาดทุนเมื่อเสียเปรียบ: {side} @ {invalidation} ({flt_r:+.2f}R)",
                     }
                     continue
@@ -824,6 +876,8 @@ class OrderLifecycleManager:
                             "order_id": order["order_id"],
                             "side": side,
                             "pnl_r": locked_r,
+                            "broker_ticket": order.get("broker_ticket"),
+                            "order": dict(order),
                             "message": f"🔒 ชน Trailing Stop ล็อกกำไร (+{locked_r:.2f}R)",
                         }
                     elif order.get("sl_moved_breakeven"):
@@ -836,6 +890,8 @@ class OrderLifecycleManager:
                             "order_id": order["order_id"],
                             "side": side,
                             "pnl_r": 0.50,
+                            "broker_ticket": order.get("broker_ticket"),
+                            "order": dict(order),
                             "message": f"🟢 ชน SL บังทุน ล็อกกำไรไม้แรก (+0.50R)",
                         }
                     else:
@@ -848,6 +904,8 @@ class OrderLifecycleManager:
                             "order_id": order["order_id"],
                             "side": side,
                             "pnl_r": -1.00,
+                            "broker_ticket": order.get("broker_ticket"),
+                            "order": dict(order),
                             "message": f"🔴 ออเดอร์ชน Stop Loss ที่ {stop} (-1.00R)",
                         }
                     order["closed_ts"] = now_ts

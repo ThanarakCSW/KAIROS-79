@@ -35,6 +35,10 @@
       </div>
 
       <div class="topbar-right">
+        <button id="tradingModeBadge" class="meta-pill pill-mode-scalp" title="คลิกเพื่อสลับโหมด: เทรดสั้นความถี่สูง (Micro-Scalp) / เทรดรอบปกติ (Intraday)">
+          ⚡ MICRO-SCALP (เข้าเร็วออกเร็ว)
+        </button>
+
         <span id="autoEnginePill" class="meta-pill pill-auto-active" title="ระบบทำงานแบบ Automation 100%: วิเคราะห์เบื้องหลัง • เปิดออเดอร์ • แก้ไม้ DCA • ทบกำไร • เลื่อน SL บังทุนอัตโนมัติ">
           🤖 FULL AUTOMATION ACTIVE
         </span>
@@ -162,6 +166,18 @@
       </div>
 
       <form id="settingsForm" class="modal-form" novalidate>
+        <div class="form-row">
+          <label class="full-field">
+            <span>⚡ โหมดกลยุทธ์การเทรด (Trading Mode)</span>
+            <select id="cfgTradingStyle" class="styled-select">
+              <option value="micro_scalp">⚡ สเกลป์ความเร็วสูง / เข้าเร็วออกเร็ว / ออกออเดอร์ถี่ (High-Frequency Micro-Scalp)</option>
+              <option value="scalping">⚡ สเกลป์ปกติ (Fast Scalp M5/M1)</option>
+              <option value="intraday">🎯 เทรดรอบตามแนวโน้มโครงสร้าง (Intraday SMC)</option>
+            </select>
+            <small>โหมดสเกลป์ความเร็วสูงจะใช้กราฟ M1 เข้าเร็วแบบ Market Order ดัน SL บังทุน +0.5R พร้อมระบบ Time-Decay Exit อัตโนมัติ</small>
+          </label>
+        </div>
+
         <div class="form-row">
           <label>
             <span>ขนาดพอร์ต Equity ($)</span>

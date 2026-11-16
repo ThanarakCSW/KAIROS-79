@@ -466,7 +466,8 @@ def build_trade_setup(
     sr_zones = list(structure_res.get("sr_zones", []))
     htf_zones = list((mtf_res or {}).get("htf_sr_zones") or [])
     scalp_info = structure_res.get("scalping") or {}
-    is_scalp = str(trading_style).lower() == "scalping"
+    is_micro = str(trading_style).lower() == "micro_scalp"
+    is_scalp = str(trading_style).lower() in ("scalping", "micro_scalp")
 
     # Prioritize 100% fresh unmitigated Order Blocks ahead of price (never recommend a zone that already passed)
     max_ob_dist = atr_val * (1.2 if is_scalp else 2.2)
@@ -639,40 +640,53 @@ def build_trade_setup(
         confluence_score = session_sweep_setup["confluence_score"]
         confluence_factors = list(session_sweep_setup["confluence_factors"])
     elif is_scalp and scalp_info:
-        # In Scalping mode, prioritize fast momentum and tight EMA 9/21 pullbacks
-        setup_archetype = "SCALPING_MOMENTUM"
-        archetype_label_th = "⚡ สัญญาณสเกลป์ความเร็วสูง (Fast Scalp)"
+        # In Scalping / Micro-Scalp mode, prioritize fast momentum, Micro-FVG fill, and tight EMA 9/21 pullbacks
+        micro_fvg = scalp_info.get("micro_fvg")
         bias = scalp_info.get("scalp_bias", "BULLISH")
         side = "BUY" if bias == "BULLISH" else "SELL"
         e9 = float(scalp_info.get("ema9") or current_price)
-        scalp_ob = next(
-            (o for o in candidate_obs if o["bias"] == bias and o["distance_usd"] <= atr_val * 0.85),
-            None,
-        )
-        if scalp_ob:
-            zone_low, zone_high = scalp_ob["low"], scalp_ob["high"]
-            if side == "BUY":
-                target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price <= zone_high else zone_high
-                entry = min(round(current_price - max(0.15, atr_val * 0.10), 2), target_lvl)
-            else:
-                target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price >= zone_low else zone_low
-                entry = max(round(current_price + max(0.15, atr_val * 0.10), 2), target_lvl)
-        else:
-            if side == "BUY":
-                pullback_lvl = min(e9, current_price - max(0.20, atr_val * 0.15))
-                entry = round(pullback_lvl, 2)
-                zone_low = entry - atr_val * 0.25
-                zone_high = entry + atr_val * 0.08
-            else:
-                pullback_lvl = max(e9, current_price + max(0.20, atr_val * 0.15))
-                entry = round(pullback_lvl, 2)
-                zone_low = entry - atr_val * 0.08
-                zone_high = entry + atr_val * 0.25
-        confluence_score = int(scalp_info.get("scalp_score") or 58)
+        confluence_score = int(scalp_info.get("scalp_score") or 62)
         confluence_factors = [
             f"⚡ EMA9/21 Scalp Ribbon ({scalp_info.get('ribbon_state', '-')})",
             *list(scalp_info.get("triggers") or []),
         ]
+
+        if micro_fvg:
+            setup_archetype = "MICRO_FVG_SCALP"
+            archetype_label_th = "⚡ M1 Micro-FVG Scalp (เติมสภาพคล่องความเร็วสูง)" if is_micro else "⚡ Micro-FVG Scalp"
+            f_top = float(micro_fvg["top"])
+            f_bot = float(micro_fvg["bottom"])
+            zone_low = r2(f_bot)
+            zone_high = r2(f_top)
+            entry = r2(current_price)
+            confluence_score = max(confluence_score, 82)
+            confluence_factors.append(f"Micro-FVG Imbalance ({f_bot:.2f} - {f_top:.2f})")
+        else:
+            setup_archetype = "MICRO_SCALP_MOMENTUM" if is_micro else "SCALPING_MOMENTUM"
+            archetype_label_th = "⚡ สัญญาณสเกลป์ความเร็วสูง (High-Frequency Micro-Scalp)" if is_micro else "⚡ สัญญาณสเกลป์ความเร็วสูง (Fast Scalp)"
+            scalp_ob = next(
+                (o for o in candidate_obs if o["bias"] == bias and o["distance_usd"] <= atr_val * 0.85),
+                None,
+            )
+            if scalp_ob:
+                zone_low, zone_high = scalp_ob["low"], scalp_ob["high"]
+                if side == "BUY":
+                    target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price <= zone_high else zone_high
+                    entry = min(round(current_price - max(0.15, atr_val * 0.10), 2), target_lvl)
+                else:
+                    target_lvl = round((zone_low + zone_high) / 2.0, 2) if current_price >= zone_low else zone_low
+                    entry = max(round(current_price + max(0.15, atr_val * 0.10), 2), target_lvl)
+            else:
+                if side == "BUY":
+                    pullback_lvl = min(e9, current_price - max(0.15, atr_val * 0.10))
+                    entry = round(pullback_lvl, 2)
+                    zone_low = entry - atr_val * 0.20
+                    zone_high = entry + atr_val * 0.08
+                else:
+                    pullback_lvl = max(e9, current_price + max(0.15, atr_val * 0.10))
+                    entry = round(pullback_lvl, 2)
+                    zone_low = entry - atr_val * 0.08
+                    zone_high = entry + atr_val * 0.20
     elif chosen_ob and chosen_ob["distance_usd"] <= atr_val * 1.6:
         setup_archetype = "ORDER_BLOCK_PULLBACK"
         archetype_label_th = "🏛️ SMC Order Block Pullback"
@@ -744,9 +758,9 @@ def build_trade_setup(
         and sweeps[-1]["implication"].startswith(bias)
         and (len(structure_res.get("swings", {}).get("all", [])) > 0)
     )
-    has_scalp_trigger = is_scalp and int(scalp_info.get("scalp_score") or 0) >= 55
+    has_scalp_trigger = is_scalp and (int(scalp_info.get("scalp_score") or 0) >= 55 or is_micro)
 
-    should_market_enter = is_in_zone or has_recent_sweep or has_scalp_trigger
+    should_market_enter = is_in_zone or has_recent_sweep or has_scalp_trigger or is_micro
     if should_market_enter:
         execution_type = "MARKET"
         order_type = f"{side} NOW (Market)"
@@ -867,10 +881,10 @@ def build_trade_setup(
         confluence_factors.append(f"Chart Pattern: {pat_name} ({pat_status})")
 
     # Stop Loss placement: beyond distal edge of zone + ATR buffer + Broker Spread
-    sl_buffer = max(atr_val * (0.25 if is_scalp else 0.50), spread_usd * (1.5 if is_scalp else 2.5))
-    min_sl_atr = 0.65 if is_scalp else 1.05
-    min_target_rr = 1.25 if is_scalp else 1.60
-    default_target_rr = 1.45 if is_scalp else 2.20
+    sl_buffer = max(atr_val * (0.18 if is_micro else (0.25 if is_scalp else 0.50)), spread_usd * (1.2 if is_micro else (1.5 if is_scalp else 2.5)))
+    min_sl_atr = 0.50 if is_micro else (0.65 if is_scalp else 1.05)
+    min_target_rr = 1.15 if is_micro else (1.25 if is_scalp else 1.60)
+    default_target_rr = 1.35 if is_micro else (1.45 if is_scalp else 2.20)
     combined_sr = sr_zones + htf_zones + hist_sr
     if preset_stop is not None and preset_target is not None:
         stop = preset_stop
@@ -891,10 +905,13 @@ def build_trade_setup(
                 raw_stop = max(raw_stop, e21 - sl_buffer)
         stop = r2(raw_stop)
         risk = max(0.35, entry - stop)
-        if is_scalp and risk > atr_val * 1.0:
+        if is_micro and risk > atr_val * 0.75:
+            stop = r2(entry - atr_val * 0.65)
+            risk = max(0.35, entry - stop)
+        elif is_scalp and risk > atr_val * 1.0:
             stop = r2(entry - atr_val * 0.85)
             risk = max(0.35, entry - stop)
-        tp1 = r2(entry + risk * (0.80 if is_scalp else 1.0))
+        tp1 = r2(entry + risk * (0.75 if is_micro else (0.80 if is_scalp else 1.0)))
 
         up_targets = [
             p["price"]
@@ -929,10 +946,13 @@ def build_trade_setup(
                 raw_stop = min(raw_stop, e21 + sl_buffer + spread_usd)
         stop = r2(raw_stop)
         risk = max(0.35, stop - entry)
-        if is_scalp and risk > atr_val * 1.0:
+        if is_micro and risk > atr_val * 0.75:
+            stop = r2(entry + atr_val * 0.65)
+            risk = max(0.35, stop - entry)
+        elif is_scalp and risk > atr_val * 1.0:
             stop = r2(entry + atr_val * 0.85)
             risk = max(0.35, stop - entry)
-        tp1 = r2(entry - risk * (0.80 if is_scalp else 1.0))
+        tp1 = r2(entry - risk * (0.75 if is_micro else (0.80 if is_scalp else 1.0)))
 
         dn_targets = [
             p["price"]
@@ -968,23 +988,28 @@ def build_trade_setup(
 
     sym_u = (symbol or "XAUUSD").upper()
     is_btc = "BTC" in sym_u
-    style_label = (
-        "⚡ โหมดเทรดสั้น (BTC Scalping)"
-        if (is_scalp and is_btc)
-        else (
+    if is_micro:
+        style_label = (
+            "⚡ โหมดเทรดสั้นความถี่สูง (BTC Micro-Scalp)"
+            if is_btc
+            else "⚡ โหมดเทรดสั้นความถี่สูง (Gold Micro-Scalp)"
+        )
+    elif is_scalp:
+        style_label = (
+            "⚡ โหมดเทรดสั้น (BTC Scalping)"
+            if is_btc
+            else "⚡ โหมดเทรดสั้น (Gold Scalping)"
+        )
+    else:
+        style_label = (
             "🎯 โหมดเทรดรอบปกติ (BTC SMC)"
             if is_btc
-            else (
-                "⚡ โหมดเทรดสั้น (Gold Scalping)"
-                if is_scalp
-                else "🎯 โหมดเทรดรอบปกติ (Intraday SMC)"
-            )
+            else "🎯 โหมดเทรดรอบปกติ (Intraday SMC)"
         )
-    )
 
     return {
         "symbol": sym_u,
-        "trading_style": "scalping" if is_scalp else "intraday",
+        "trading_style": "micro_scalp" if is_micro else ("scalping" if is_scalp else "intraday"),
         "style_label_th": style_label,
         "setup_archetype": setup_archetype,
         "archetype_label_th": archetype_label_th,

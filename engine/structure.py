@@ -1539,6 +1539,43 @@ def analyze_scalping_signals(
         triggers.append(f"StochRSI/RSI7 Hook DOWN (K={stoch_k:.0f}, RSI7={rsi7:.0f})")
         triggers_th.append(f"StochRSI ({stoch_k:.0f}) & RSI7 ({rsi7:.0f}) หักหัวลงจากโซนซื้อมากเกินไป")
 
+    # 5. Micro Fair Value Gap (Micro-FVG) Imbalance Detection (M1/M5 Scalping)
+    micro_fvg = None
+    if n >= 4:
+        for idx in range(n - 2, max(0, n - 8), -1):
+            b1 = bars[idx - 1]
+            b3 = bars[idx + 1]
+            h1, l1 = float(b1["h"]), float(b1["l"])
+            h3, l3 = float(b3["h"]), float(b3["l"])
+            if l3 > h1 + max(0.10, safe_atr * 0.15):
+                fvg_mid = (l3 + h1) / 2.0
+                if lo_last <= l3 + safe_atr * 0.10 and cl_last >= h1:
+                    bull_points += 26
+                    micro_fvg = {
+                        "type": "BULLISH_MICRO_FVG",
+                        "top": r2(l3),
+                        "bottom": r2(h1),
+                        "mid": r2(fvg_mid),
+                        "bar_idx": idx,
+                    }
+                    triggers.append(f"Micro-FVG Retest Fill ({h1:.2f} - {l3:.2f})")
+                    triggers_th.append(f"ราคาย่อเติมสภาพคล่อง Micro-FVG ({h1:.2f} - {l3:.2f}) แล้วเด้งกลับ")
+                    break
+            elif h3 < l1 - max(0.10, safe_atr * 0.15):
+                fvg_mid = (l1 + h3) / 2.0
+                if hi_last >= h3 - safe_atr * 0.10 and cl_last <= l1:
+                    bear_points += 26
+                    micro_fvg = {
+                        "type": "BEARISH_MICRO_FVG",
+                        "top": r2(l1),
+                        "bottom": r2(h3),
+                        "mid": r2(fvg_mid),
+                        "bar_idx": idx,
+                    }
+                    triggers.append(f"Micro-FVG Retest Fill ({h3:.2f} - {l1:.2f})")
+                    triggers_th.append(f"ราคาเด้งเติมสภาพคล่อง Micro-FVG ({h3:.2f} - {l1:.2f}) แล้วถูกตบลง")
+                    break
+
     scalp_bias = "BULLISH" if bull_points >= bear_points else "BEARISH"
     scalp_score = min(100, max(52, 48 + max(bull_points, bear_points)))
 
@@ -1557,6 +1594,7 @@ def analyze_scalping_signals(
         "vwap_band_state": vwap_band_state,
         "squeeze_state": squeeze_state,
         "micro_sweep": micro_sweep,
+        "micro_fvg": micro_fvg,
         "triggers": triggers or [f"Fast {ribbon_state} (EMA9={e9:.2f}, EMA21={e21:.2f})"],
         "triggers_th": triggers_th or [f"เคลื่อนไหวตามเส้นความเร็วสูง EMA9 ({e9:.2f}) / EMA21 ({e21:.2f})"],
     }

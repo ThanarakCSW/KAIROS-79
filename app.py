@@ -86,7 +86,7 @@ class TradingAssistantCore:
         self.ea_bridge = EABridgeManager(CONFIG_PATH)
         self.timeframe = str(self.config.get("default_timeframe") or "M5").upper()
         self.trading_style = str(self.config.get("trading_style") or "intraday").lower()
-        if self.trading_style not in ("intraday", "scalping"):
+        if self.trading_style not in ("intraday", "scalping", "micro_scalp"):
             self.trading_style = "intraday"
         self.last_state: Optional[Dict[str, Any]] = None
         self.last_alert_fingerprint: Optional[str] = None
@@ -100,7 +100,7 @@ class TradingAssistantCore:
     ) -> Dict[str, Any]:
         tf = (timeframe or self.timeframe).upper()
         self.timeframe = tf
-        if trading_style in ("intraday", "scalping"):
+        if trading_style in ("intraday", "scalping", "micro_scalp"):
             self.trading_style = trading_style
             self.config["trading_style"] = trading_style
 
@@ -143,7 +143,7 @@ class TradingAssistantCore:
         )
         replays_cnt = max(35000, int(self.config.get("simulation_replays") or 35000))
         self.config["simulation_replays"] = replays_cnt
-        bars_ahead_cnt = 18 if self.trading_style == "scalping" else int(self.config.get("simulation_bars_ahead") or 36)
+        bars_ahead_cnt = 14 if self.trading_style == "micro_scalp" else (18 if self.trading_style == "scalping" else int(self.config.get("simulation_bars_ahead") or 36))
         sim_seed = int(self.config.get("simulation_seed") or 19)
         min_win_prob = float(self.config.get("min_win_prob_pct") or 50.0)
         self.config["min_win_prob_pct"] = min_win_prob
@@ -859,6 +859,17 @@ class TradingAssistantCore:
             self.config.setdefault("multi_order", {}).update(payload["multi_order"])
         if "cross_asset" in payload and isinstance(payload["cross_asset"], dict):
             self.config.setdefault("cross_asset", {}).update(payload["cross_asset"])
+        if "trading_style" in payload and payload["trading_style"] is not None:
+            style = str(payload["trading_style"]).lower()
+            if style in ("intraday", "scalping", "micro_scalp"):
+                self.trading_style = style
+                self.config["trading_style"] = style
+                if style == "micro_scalp":
+                    self.timeframe = "M1"
+                    self.config["default_timeframe"] = "M1"
+                elif style == "scalping":
+                    self.timeframe = "M5"
+                    self.config["default_timeframe"] = "M5"
         if "gemini_api_key" in payload:
             raw_key = str(payload["gemini_api_key"]).strip()
             if " " not in raw_key and not raw_key.startswith("[MT5"):
@@ -1286,8 +1297,9 @@ class AssistantServer:
                             symbol=sym_name,
                         )
 
-                # Periodic autonomous setup scan: evaluate setups every 16 seconds when auto trading is ON and no active order
-                if core_inst.ea_bridge.auto_trading_enabled and not core_inst.order_manager.has_active_order() and loop_counter % 8 == 0:
+                # Periodic autonomous setup scan: evaluate setups every 6-16 seconds when auto trading is ON and no active order
+                scan_mod = 3 if core_inst.trading_style == "micro_scalp" else 8
+                if core_inst.ea_bridge.auto_trading_enabled and not core_inst.order_manager.has_active_order() and loop_counter % scan_mod == 0:
                     try:
                         state = await asyncio.to_thread(core_inst.compute_full_state, None, False, False)
                         if has_sub:
@@ -1720,7 +1732,7 @@ class AssistantServer:
             await self.send_http_json(writer, 200, state)
             return
 
-        if path == "/api/config" and method == "POST":
+        if path in ("/api/config", "/api/settings") and method == "POST":
             payload = safe_json_loads(body_bytes)
             sym = payload.get("symbol") or sym_req
             target_core = self.get_core(sym)

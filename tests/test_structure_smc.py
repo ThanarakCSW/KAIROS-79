@@ -341,6 +341,50 @@ class TestStructureAndSMC(unittest.TestCase):
         self.assertGreater(setup_mp["target"], setup_mp["entry"])
         self.assertIn("Micro-Pullback", setup_mp["archetype_label_th"])
 
+    def test_micro_scalp_m1_fvg_and_high_frequency_mode(self):
+        """Verify M1 Micro-FVG detection and high-frequency micro-scalp trade plan generation."""
+        from engine.smc import build_trade_setup
+
+        mock_structure_micro = {
+            "current_price": 2650.00,
+            "atr14": 1.8,
+            "trend": {"bias": "BULLISH", "regime": "TRENDING", "ema_alignment": "BULLISH"},
+            "swings": {"all": []},
+            "institutional_levels": {},
+            "scalping": {
+                "scalp_bias": "BULLISH",
+                "scalp_score": 85,
+                "ribbon_state": "BULL_RIBBON",
+                "ema9": 2649.80,
+                "ema21": 2648.50,
+                "micro_fvg": {
+                    "type": "BULLISH_MICRO_FVG",
+                    "top": 2650.20,
+                    "bottom": 2649.10,
+                    "mid": 2649.65,
+                },
+                "triggers": ["Micro-FVG Retest Fill (2649.10 - 2650.20)"],
+            },
+        }
+        setup = build_trade_setup(
+            structure_res=mock_structure_micro,
+            obs=[],
+            fvgs=[],
+            breaks=[],
+            sweeps=[],
+            liquidity_pools=[],
+            spread_usd=0.20,
+            trading_style="micro_scalp",
+            symbol="XAUUSD",
+        )
+        self.assertEqual(setup["trading_style"], "micro_scalp")
+        self.assertEqual(setup["setup_archetype"], "MICRO_FVG_SCALP")
+        self.assertEqual(setup["execution_type"], "MARKET")
+        self.assertEqual(setup["side"], "BUY")
+        self.assertIn("Micro-Scalp", setup["style_label_th"])
+        self.assertGreaterEqual(setup["reward_risk"], 1.15)
+        self.assertLessEqual(setup["risk_usd"], 1.8 * 0.75 + 0.1)
+
 
 if __name__ == "__main__":
     unittest.main()

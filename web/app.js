@@ -618,12 +618,29 @@
     }
     if (el("cfgRiskPct")) el("cfgRiskPct").value = cfg.risk_per_trade_pct ?? 2.0;
     if (el("cfgSpread")) el("cfgSpread").value = cfg.broker_spread_points ?? 25;
+    if (el("cfgTradingStyle")) el("cfgTradingStyle").value = cfg.trading_style || "micro_scalp";
   }
 
   function renderDashboard(state) {
     currentState = state;
     const st = state.structure || {};
     const quote = state.live_quote;
+
+    // Render trading style / mode badge
+    const modeBadge = el("tradingModeBadge");
+    const style = String(state.trading_style || (state.config && state.config.trading_style) || "micro_scalp").toLowerCase();
+    if (modeBadge) {
+      if (style === "micro_scalp") {
+        modeBadge.textContent = "⚡ MICRO-SCALP (เข้าเร็วออกเร็ว)";
+        modeBadge.className = "meta-pill pill-mode-scalp";
+      } else if (style === "scalping") {
+        modeBadge.textContent = "⚡ FAST SCALP (M5)";
+        modeBadge.className = "meta-pill pill-mode-scalp";
+      } else {
+        modeBadge.textContent = "🎯 INTRADAY SMC";
+        modeBadge.className = "meta-pill pill-mode-intraday";
+      }
+    }
 
     if (el("livePrice")) {
       el("livePrice").textContent = fmtPrice(st.current_price);
@@ -734,12 +751,35 @@
       });
     });
 
+    const modeBtn = el("tradingModeBadge");
+    if (modeBtn) {
+      modeBtn.addEventListener("click", async () => {
+        const curStyle = String(currentState?.trading_style || "micro_scalp").toLowerCase();
+        const nextStyle = curStyle === "micro_scalp" ? "intraday" : "micro_scalp";
+        try {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: "change_style", trading_style: nextStyle, symbol: CURRENT_SYMBOL }));
+          } else {
+            await fetch("/api/settings", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ symbol: CURRENT_SYMBOL, trading_style: nextStyle }),
+            });
+          }
+          showToast(`⚡ สลับโหมดการเทรดเป็น: ${nextStyle === "micro_scalp" ? "สเกลป์ความเร็วสูง (Micro-Scalp)" : "เทรดรอบปกติ (Intraday SMC)"}`);
+        } catch (_) {
+          showToast("❌ สลับโหมดไม่สำเร็จ");
+        }
+      });
+    }
+
     const form = el("settingsForm");
     if (form) {
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         const payload = {
           symbol: CURRENT_SYMBOL,
+          trading_style: el("cfgTradingStyle")?.value || "micro_scalp",
           account_balance: Number(el("cfgBalance")?.value || 5000),
           leverage: Number(el("cfgLeverage")?.value || 1000),
           risk_per_trade_pct: Number(el("cfgRiskPct")?.value || 2.0),

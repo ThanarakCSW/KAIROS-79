@@ -73,12 +73,15 @@ def evaluate_risk_and_size(
     lot_step = float(config.get("lot_step") or 0.01)
 
     trading_style = str(trade_setup.get("trading_style") or config.get("trading_style") or "intraday").lower()
-    is_scalp = trading_style == "scalping"
+    is_micro = trading_style == "micro_scalp"
+    is_scalp = trading_style in ("scalping", "micro_scalp")
     min_rr = float(config.get("min_reward_risk") or 1.5)
     if is_scalp:
         min_rr = min(min_rr, 1.15)
     min_sl_atr = float(config.get("min_sl_atr_mult") or 0.8)
-    if is_scalp:
+    if is_micro:
+        min_sl_atr = min(min_sl_atr, 0.50)
+    elif is_scalp:
         min_sl_atr = min(min_sl_atr, 0.65)
     max_sweep_pct = float(config.get("max_sweep_risk_pct") or 20.0)
     min_win_prob = float(config.get("min_win_prob_pct") or 0.0)
@@ -240,7 +243,13 @@ def evaluate_risk_and_size(
 
     # 7. Spread vs SL check, Max Spread cap & Rollover danger
     max_spread_usd = float(config.get("max_spread_usd") or 0.0)
-    if max_spread_usd > 0.0 and spread_usd > max_spread_usd:
+    if is_micro:
+        micro_spread_cap = 15.0 if is_crypto else 0.30
+        if spread_usd > micro_spread_cap:
+            reject_reasons.append(
+                f"Spread สูงเกินเกณฑ์สำหรับการเทรดสั้นความถี่สูง (${spread_usd:.2f} > ${micro_spread_cap:.2f}) — ชะลอการเปิดออเดอร์เพื่อป้องกันต้นทุนแฝง"
+            )
+    elif max_spread_usd > 0.0 and spread_usd > max_spread_usd:
         reject_reasons.append(
             f"Spread สูงเกินเพดาน (${spread_usd:.2f} > ${max_spread_usd:.2f}) — งดเปิดออเดอร์เพื่อเลี่ยงต้นทุนแฝง"
         )

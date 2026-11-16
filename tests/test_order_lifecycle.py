@@ -568,6 +568,65 @@ class TestOrderLifecycle(unittest.TestCase):
         self.assertIsNotNone(ev2)
         self.assertEqual(ev2["type"], "ORDER_CANCELLED")
         self.assertEqual(ev2["reason"], "EXPIRED_TIMEOUT")
+
+    def test_micro_scalp_fast_breakeven_and_time_decay_exit(self):
+        """Verify micro-scalp triggers fast breakeven lock at +0.5R and time-decay exit after 12 minutes."""
+        now_ts = int(time.time())
+        risk_ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2648.50,
+            "tp1_mt5": 2651.80,
+            "target_mt5": 2652.50,
+            "lot_size": 0.50,
+            "actual_risk_usd": 75.00,
+            "execution_type": "MARKET",
+            "order_type": "BUY NOW (Market)",
+            "breakeven_sl_mt5": 2650.15,
+        }
+        smc_setup = {
+            "side": "BUY",
+            "confluence_score": 85,
+            "trading_style": "micro_scalp",
+            "setup_archetype": "MICRO_SCALP",
+        }
+        order = self.manager.register_trade_setup(
+            risk_ticket, smc_setup, current_price=2650.00, trading_style="micro_scalp"
+        )
+        self.assertEqual(order["status"], "FILLED")
+        self.assertEqual(order["trading_style"], "micro_scalp")
+
+        # 1. Price moves to +0.55R profit (2650.85) -> fast breakeven triggered
+        ev1 = self.manager.update_price_tick(
+            current_price=2650.85,
+            high=2650.90,
+            low=2650.50,
+            ts=now_ts + 60,
+            contract_size=100.0,
+        )
+        self.assertIsNotNone(ev1)
+        self.assertEqual(ev1["type"], "BREAKEVEN_LOCKED")
+        self.assertTrue(order["sl_moved_breakeven"])
+        self.assertEqual(order["stop_mt5"], 2650.15)
+
+        # 2. Reset order for time-decay test
+        order2 = self.manager.register_trade_setup(
+            risk_ticket, smc_setup, current_price=2650.00, trading_style="micro_scalp", force_replace=True
+        )
+        self.assertEqual(order2["status"], "FILLED")
+        # Simulate 13 minutes elapsed (780 seconds > 720 seconds threshold) and flat price (2650.10)
+        ev_decay = self.manager.update_price_tick(
+            current_price=2650.10,
+            high=2650.40,
+            low=2649.80,
+            ts=now_ts + 780,
+            contract_size=100.0,
+            config={"micro_scalp": {"time_decay_seconds": 720}},
+        )
+        self.assertIsNotNone(ev_decay)
+        self.assertEqual(ev_decay["type"], "TRADE_CLOSED_TIME_DECAY")
+        self.assertFalse(self.manager.has_active_order())
+        self.assertEqual(self.manager.order_history[-1]["close_reason"], "TIME_DECAY_EXIT")
         self.assertFalse(self.manager.has_active_order())
 
 

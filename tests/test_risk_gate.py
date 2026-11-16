@@ -172,6 +172,38 @@ class TestRiskGate(unittest.TestCase):
         self.assertEqual(res_trades["verdict"], "REJECT")
         self.assertTrue(any("โควต้าจำนวนเทรด" in r for r in res_trades["reject_reasons"]))
 
+    def test_micro_scalp_risk_gate_and_spread_guardian(self):
+        """Verify micro_scalp style accepts tight 1.2 R:R and enforces strict spread cap ($0.30 on Gold)."""
+        scalp_setup = {
+            "symbol": "XAUUSD",
+            "side": "BUY",
+            "status": "ACTIVE_IN_ZONE",
+            "entry": 2650.00,
+            "stop": 2648.50, # 1.50 USD SL
+            "target": 2651.80, # 1.80 USD TP (R:R = 1.20)
+            "sl_atr_ratio": 0.55,
+            "trading_style": "micro_scalp",
+        }
+        scalp_sim = {
+            "expected_value_r": 0.35,
+            "probabilities": {
+                "win_pct": 58.0,
+                "stop_pct": 38.0,
+                "sweep_risk_pct": 4.0,
+            },
+        }
+        # 1. Normal spread (20 points = $0.20 <= $0.30 cap) -> PASS
+        cfg_scalp = dict(self.config, broker_spread_points=20.0, point_size=0.01)
+        res_pass = evaluate_risk_and_size(scalp_setup, scalp_sim, self.news_clear, cfg_scalp)
+        self.assertEqual(res_pass["verdict"], "PASS")
+        self.assertEqual(res_pass["reward_risk"], 1.20)
+
+        # 2. Elevated spread (35 points = $0.35 > $0.30 cap) -> REJECT by Spread Guardian
+        cfg_wide = dict(self.config, broker_spread_points=35.0, point_size=0.01)
+        res_rej = evaluate_risk_and_size(scalp_setup, scalp_sim, self.news_clear, cfg_wide)
+        self.assertEqual(res_rej["verdict"], "REJECT")
+        self.assertTrue(any("Spread สูงเกินเกณฑ์สำหรับการเทรดสั้นความถี่สูง" in r for r in res_rej["reject_reasons"]))
+
 
 if __name__ == "__main__":
     unittest.main()

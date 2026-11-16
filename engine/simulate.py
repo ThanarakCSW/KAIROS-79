@@ -116,7 +116,7 @@ def run_simulation(
     choice = rng.choice
 
     trading_style = str(trade_setup.get("trading_style") or "intraday").lower()
-    is_scalp = trading_style == "scalping"
+    is_scalp = trading_style in ("scalping", "micro_scalp")
     outcome_bars_ahead = bars_ahead if is_scalp else max(bars_ahead, 144)
 
     tp_hits = 0
@@ -365,8 +365,9 @@ def optimize_setup_for_win_prob(
     """Evaluate the setup using 100% unmanipulated empirical Monte Carlo statistics (no artificial target shrinking).
     Only if a deeper limit entry inside the fresh zone (keeping the same structural SL and TP) genuinely achieves >50% win probability
     is it selected; otherwise returns WATCHING_FOR_50PCT_EDGE so the user is never rushed into a low-probability trade."""
-    is_scalp = str(trade_setup.get("trading_style") or "intraday").lower() == "scalping"
-    eff_bars_ahead = 18 if is_scalp else bars_ahead
+    style_str = str(trade_setup.get("trading_style") or "intraday").lower()
+    is_scalp = style_str in ("scalping", "micro_scalp")
+    eff_bars_ahead = 14 if style_str == "micro_scalp" else (18 if is_scalp else bars_ahead)
     base_sim = run_simulation(
         bars=bars,
         trade_setup=trade_setup,

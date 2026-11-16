@@ -19,7 +19,13 @@
   "broker_spread_points": 25.0,
   "point_size": 0.01,
   "default_timeframe": "M5",
-  "trading_style": "intraday",
+  "trading_style": "micro_scalp",
+  "micro_scalp": {
+    "enabled": true,
+    "time_decay_seconds": 720,
+    "max_spread_usd": 0.30,
+    "min_reward_risk": 1.15
+  },
   "min_win_prob_pct": 50.0,
   "simulation_replays": 35000,
   "simulation_bars_ahead": 36,
