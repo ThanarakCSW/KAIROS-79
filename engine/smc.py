@@ -1005,6 +1005,26 @@ def build_trade_setup(
         confluence_score = max(confluence_score, 78)
         confluence_factors.append("🤖 สัญญาณหุ่นยนต์เก็บกำไรสั้นความถี่สูง (Robot Range Harvester)")
         confluence_factors.append(f"🎯 เป้าหมายสั้น ${robot_tp_dist:.2f} | Hard Stop ${robot_sl_dist:.2f}")
+        confluence_factors.append("⚡ วิเคราะห์ Timeframe 1M เป็นหลักเพื่อความเร็วในการเข้าออกออเดอร์")
+        confluence_factors.append("🔒 ออกไม้คงที่ 0.01 Lot ต่อออเดอร์ (เน้นซอยไม้กระจายความเสี่ยง)")
+
+        # Check MTF higher timeframe S/R alignment (M5, M15, H1, H4)
+        htf_supports = [z for z in htf_zones if z.get("role") == "support" and float(z.get("mid", 0)) <= entry]
+        htf_resistances = [z for z in htf_zones if z.get("role") == "resistance" and float(z.get("mid", 0)) >= entry]
+        if side == "BUY" and htf_supports:
+            nearest_s = min(htf_supports, key=lambda z: abs(entry - float(z.get("mid", 0))))
+            if abs(entry - float(nearest_s.get("mid", 0))) <= atr_val * 1.5:
+                confluence_score = min(100, confluence_score + 8)
+                confluence_factors.append(
+                    f"🏛️ วิเคราะห์ร่วม MTF: ได้แรงหนุนจากแนวรับ {nearest_s['timeframe']} ({nearest_s['mid']:.2f})"
+                )
+        elif side == "SELL" and htf_resistances:
+            nearest_r = min(htf_resistances, key=lambda z: abs(float(z.get("mid", 0)) - entry))
+            if abs(float(nearest_r.get("mid", 0)) - entry) <= atr_val * 1.5:
+                confluence_score = min(100, confluence_score + 8)
+                confluence_factors.append(
+                    f"🏛️ วิเคราะห์ร่วม MTF: ได้แรงกดดันจากแนวต้าน {nearest_r['timeframe']} ({nearest_r['mid']:.2f})"
+                )
 
     rr = round(reward / max(0.01, risk), 2)
     dist_to_entry = abs(current_price - entry)

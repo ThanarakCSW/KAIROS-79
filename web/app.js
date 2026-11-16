@@ -660,11 +660,11 @@
       if (isRobotOn) {
         robotBtn.textContent = "🤖 ROBOT HARVESTER: ON";
         robotBtn.className = "meta-pill pill-robot-active";
-        robotBtn.title = "โหมดหุ่นยนต์เปิดอยู่: เน้นออกไม้ถี่ เก็บกำไรสั้นต่อเนื่อง พร้อมระบบตัดวงจร Basket Drawdown 2.5% (คลิกเพื่อปิด)";
+        robotBtn.title = "โหมดหุ่นยนต์เปิดอยู่: ล็อก 0.01 Lot/ไม้ (ซอยไม้เมื่อขยายพอร์ต) • วิเคราะห์ 1M ควบแนวรับต้าน MTF • ตัดวงจร 2.5% (คลิกเพื่อปิด)";
       } else {
         robotBtn.textContent = "🤖 ROBOT MODE: OFF";
         robotBtn.className = "meta-pill pill-robot-inactive";
-        robotBtn.title = "คลิกเพื่อเปิดโหมดหุ่นยนต์ (Robot Scalper): เน้นออกออเดอร์ถี่ เก็บกำไรสั้นต่อเนื่อง พร้อมระบบตัดวงจรขาดทุน 2.5%";
+        robotBtn.title = "คลิกเพื่อเปิดโหมดหุ่นยนต์ (Robot Scalper): ล็อก 0.01 Lot/ไม้ (ซอยไม้เมื่อขยายพอร์ต) • วิเคราะห์ 1M ควบแนวรับต้าน MTF • Basket SL 2.5%";
       }
     }
 
@@ -818,7 +818,7 @@
             });
           }
           if (nextRobotVal) {
-            showToast("🤖 เปิดโหมดหุ่นยนต์เก็บกำไรถี่ (Robot Scalper ON) • Basket SL 2.5%");
+            showToast("🤖 เปิดโหมดหุ่นยนต์ (ล็อก 0.01 Lot/ไม้ • วิเคราะห์ 1M ควบแนวรับต้าน MTF • Basket SL 2.5%)");
           } else {
             showToast("🛑 ปิดโหมดหุ่นยนต์แล้ว (Robot Scalper OFF) • คืนสู่โหมดปกติ");
           }

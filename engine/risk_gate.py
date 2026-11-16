@@ -124,8 +124,15 @@ def evaluate_risk_and_size(
 
     risk_budget_usd = round(balance * (risk_pct / 100.0), 2)
     loss_per_1lot = sl_distance_usd * contract_size
-    raw_lot = risk_budget_usd / loss_per_1lot if loss_per_1lot > 0 else 0.0
-    lot_size = floor_lot(raw_lot, lot_step=lot_step, max_lot=max_lot)
+    if is_robot:
+        robot_cfg = config.get("robot_scalper") or {}
+        # Strictly locked to 0.01 lot per order as requested by user
+        # Volume expansion must be done by splitting into multiple orders ("ซอยไม้")
+        cfg_lot = float(robot_cfg.get("lot_size") or 0.01)
+        lot_size = min(cfg_lot, 0.01) if min_lot <= 0.01 else min_lot
+    else:
+        raw_lot = risk_budget_usd / loss_per_1lot if loss_per_1lot > 0 else 0.0
+        lot_size = floor_lot(raw_lot, lot_step=lot_step, max_lot=max_lot)
 
     leverage = max(1.0, float(config.get("leverage") or 100.0))
     margin_required_usd = round((lot_size * contract_size * entry_mt5) / leverage, 2)
@@ -214,6 +221,10 @@ def evaluate_risk_and_size(
     if lot_size < min_lot:
         reject_reasons.append(
             f"งบความเสี่ยง ${risk_budget_usd:.2f} ไม่พอสำหรับระยะ SL ${sl_distance_usd:.2f} (ขั้นต่ำ 0.01 Lot ใช้ความเสี่ยง ${0.01 * loss_per_1lot:.2f})"
+        )
+    elif is_robot:
+        passed_checks.append(
+            f"ขนาดไม้คงที่ {lot_size:.2f} Lot ต่อออเดอร์ตามวินัยหุ่นยนต์ (เน้นการซอยไม้เพื่อกระจายความเสี่ยง)"
         )
     else:
         passed_checks.append(

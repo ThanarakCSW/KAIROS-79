@@ -104,6 +104,9 @@ class TradingAssistantCore:
         else:
             new_val = bool(enabled)
         rs_cfg["enabled"] = new_val
+        if new_val:
+            self.timeframe = "M1"
+            self.config["default_timeframe"] = "M1"
         save_config(self.config)
         return new_val
 
@@ -122,6 +125,11 @@ class TradingAssistantCore:
 
         is_robot = bool((self.config.get("robot_scalper") or {}).get("enabled", False))
         effective_style = "robot_scalper" if is_robot else self.trading_style
+
+        # In robot mode, prioritize M1 as the primary timeframe for fast execution unless explicitly requested
+        if is_robot and (not timeframe or timeframe == "M5"):
+            tf = "M1"
+            self.timeframe = "M1"
 
         is_btc = "BTC" in self.symbol
         feed = self.hub.get_bars(tf, force_refresh=force_refresh, symbol=self.symbol)

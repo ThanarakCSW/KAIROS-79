@@ -280,7 +280,8 @@ class OrderLifecycleManager:
 
         sl = r2(stop_loss or primary.get("stop_mt5"))
         tp = r2(take_profit or primary.get("target_mt5"))
-        lot = float(lot_size or primary.get("lot_size") or 0.10)
+        is_robot_order = bool(primary.get("is_robot_scalper")) or str(primary.get("trading_style") or "").lower() == "robot_scalper"
+        lot = 0.01 if is_robot_order else float(lot_size or primary.get("lot_size") or 0.10)
         actual_risk = max(1.0, float(primary.get("actual_risk_usd") or 50.0))
 
         sub_sym = str(primary.get("symbol") or "XAUUSD").upper()
@@ -370,21 +371,31 @@ class OrderLifecycleManager:
         if not cfg.get("auto_mode_enabled", True):
             return None
 
-        max_orders = int(cfg.get("max_concurrent_orders") or 3)
+        primary = self.active_orders[0]
+        side = primary["side"]
+        is_robot_order = bool(primary.get("is_robot_scalper")) or str(primary.get("trading_style") or "").lower() == "robot_scalper"
+        rs_cfg = (config or {}).get("robot_scalper") or {}
+        is_btc = "BTC" in str(primary.get("symbol", "")).upper()
+
+        if is_robot_order and rs_cfg:
+            max_orders = int(rs_cfg.get("max_concurrent_orders") or 5)
+            min_spacing = float(rs_cfg.get("min_spacing_usd_btc" if is_btc else "min_spacing_usd") or (80.0 if is_btc else 1.50))
+            cooldown = 10
+        else:
+            max_orders = int(cfg.get("max_concurrent_orders") or 3)
+            min_spacing = float(cfg.get("min_spacing_usd") or max(2.50, 0.8 * atr))
+            cooldown = int(cfg.get("cooldown_seconds") or 30)
+
         if len(self.active_orders) >= max_orders:
             return None
 
         now_ts = int(ts or time.time())
-        cooldown = int(cfg.get("cooldown_seconds") or 30)
         if (now_ts - getattr(self, "last_order_add_ts", 0)) < cooldown:
             return None
 
-        primary = self.active_orders[0]
-        side = primary["side"]
         primary_entry = float(primary.get("filled_price") or primary.get("entry_mt5") or current_price)
         stop_p = float(primary.get("stop_mt5") or 0.0)
         target_p = float(primary.get("target_mt5") or 0.0)
-        min_spacing = float(cfg.get("min_spacing_usd") or max(2.50, 0.8 * atr))
 
         # Check distance from all existing active orders to prevent clustering
         for o in self.active_orders:
@@ -523,7 +534,7 @@ class OrderLifecycleManager:
                         trigger_reason = "เกิดไส้เทียนบนปฏิเสธราคา (Wick Rejection)"
 
                 if trigger_reason:
-                    lot = float(primary.get("lot_size") or 0.10)
+                    lot = 0.01 if is_robot_order else float(primary.get("lot_size") or 0.10)
                     sub = self.add_sub_order(
                         purpose="RECOVERY",
                         execution_type="MARKET",
@@ -593,7 +604,7 @@ class OrderLifecycleManager:
                             break
 
                 if trigger_reason:
-                    lot = float(primary.get("lot_size") or 0.10)
+                    lot = 0.01 if is_robot_order else float(primary.get("lot_size") or 0.10)
                     sub = self.add_sub_order(
                         purpose="SCALE_IN",
                         execution_type="MARKET",

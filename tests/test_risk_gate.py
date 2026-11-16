@@ -224,9 +224,10 @@ class TestRiskGate(unittest.TestCase):
                 "sweep_risk_pct": 3.0,
             },
         }
-        cfg_robot = dict(self.config, broker_spread_points=18.0, point_size=0.01)
+        cfg_robot = dict(self.config, account_balance=50000.0, broker_spread_points=18.0, point_size=0.01)
         res = evaluate_risk_and_size(robot_setup, robot_sim, self.news_clear, cfg_robot)
         self.assertEqual(res["verdict"], "PASS")
+        self.assertEqual(res["lot_size"], 0.01)
         self.assertEqual(res["reward_risk"], 0.64)
         self.assertTrue(res["is_robot_scalper"])
 

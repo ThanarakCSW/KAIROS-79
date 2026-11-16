@@ -630,7 +630,7 @@ class TestOrderLifecycle(unittest.TestCase):
         self.assertFalse(self.manager.has_active_order())
 
     def test_robot_scalper_fast_breakeven_and_basket_drawdown_cut(self):
-        """Verify robot scalper locks breakeven at +0.40R and cuts entire basket on 2.5% drawdown."""
+        """Verify robot scalper locks breakeven at +0.40R, enforces 0.01 lot sub-orders, and cuts basket on 2.5% drawdown."""
         now_ts = int(time.time())
         risk_ticket = {
             "side": "BUY",
@@ -638,8 +638,8 @@ class TestOrderLifecycle(unittest.TestCase):
             "stop_mt5": 2647.20,
             "tp1_mt5": 2652.50,
             "target_mt5": 2653.80,
-            "lot_size": 0.50,
-            "actual_risk_usd": 140.00,
+            "lot_size": 0.01,
+            "actual_risk_usd": 2.80,
             "execution_type": "MARKET",
             "order_type": "BUY NOW (Market)",
             "breakeven_sl_mt5": 2650.15,
@@ -652,9 +652,10 @@ class TestOrderLifecycle(unittest.TestCase):
             "setup_archetype": "ROBOT_HARVESTER",
         }
         cfg = {
-            "account_balance": 5000.0,
+            "account_balance": 500.0,
             "robot_scalper": {
                 "enabled": True,
+                "lot_size": 0.01,
                 "fast_breakeven_trigger_r": 0.40,
                 "max_basket_drawdown_pct": 2.5,
             },
@@ -665,12 +666,13 @@ class TestOrderLifecycle(unittest.TestCase):
             risk_ticket, smc_setup, current_price=2650.00, trading_style="robot_scalper"
         )
         self.assertEqual(order["status"], "FILLED")
+        self.assertEqual(order["lot_size"], 0.01)
         self.assertTrue(order["is_robot_scalper"])
 
-        # 2. Price rises to +0.42R profit (2651.20)
+        # 2. Price rises to +0.41R profit (2651.15)
         ev_be = self.manager.update_price_tick(
-            current_price=2651.20,
-            high=2651.30,
+            current_price=2651.15,
+            high=2651.20,
             low=2650.50,
             ts=now_ts + 10,
             contract_size=100.0,
@@ -681,25 +683,26 @@ class TestOrderLifecycle(unittest.TestCase):
         self.assertTrue(order["sl_moved_breakeven"])
         self.assertIn("หุ่นยนต์เก็บสั้น", order["management_note_th"])
 
-        # 3. Add second robot order to simulate a multi-order basket
+        # 3. Add second robot order to simulate sub-order (ซอยไม้)
         sub = self.manager.add_sub_order(
             purpose="SCALE_IN",
             execution_type="MARKET",
-            current_price=2651.00,
-            lot_size=0.50,
+            current_price=2651.50,
+            lot_size=0.10,  # Requesting 0.10 should be strictly overridden to 0.01 by robot rules
         )
         self.assertIsNotNone(sub)
+        self.assertEqual(sub["lot_size"], 0.01)
         self.assertTrue(sub["is_robot_scalper"])
         self.assertEqual(len(self.manager.active_orders), 2)
 
-        # 4. Severe adverse market drop -> total basket drawdown >= 2.5% of $5,000 ($125)
-        # Price drops to 2648.50:
-        # Order 1 (0.50 lot from 2650.00): (2648.50 - 2650.00) * 0.50 * 100 = -$75.00
-        # Order 2 (0.50 lot from 2651.00): (2648.50 - 2651.00) * 0.50 * 100 = -$125.00
-        # Total floating = -$200.00 -> 4.0% loss >= 2.5% cap
+        # 4. Severe adverse market drop -> total basket drawdown >= 2.5% of $500 ($12.50)
+        # Price drops to 2643.00:
+        # Order 1 (0.01 lot from 2650.00): (2643.00 - 2650.00) * 0.01 * 100 = -$7.00
+        # Order 2 (0.01 lot from 2651.50): (2643.00 - 2651.50) * 0.01 * 100 = -$8.50
+        # Total floating = -$15.50 -> 3.1% loss >= 2.5% cap
         ev_cut = self.manager.check_robot_basket_drawdown(
-            current_price=2648.50,
-            account_balance=5000.0,
+            current_price=2643.00,
+            account_balance=500.0,
             config=cfg,
             symbol="XAUUSD",
         )

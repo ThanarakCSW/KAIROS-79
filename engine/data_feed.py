@@ -1060,6 +1060,8 @@ class MarketDataHub:
         """Return offset-adjusted bars for M5, M15, H1, and H4 for Multi-Timeframe analysis."""
         p_tf = primary_tf.upper()
         result: Dict[str, List[Dict[str, Any]]] = {}
+        if p_tf == "M1" and primary_bars is not None:
+            result["M1"] = primary_bars
         is_offline = self.replay_mode or self.source.startswith("offline")
         end_idx = max(60, min(len(self.fixture_bars), self.replay_cursor))
         sliced_m5 = [dict(b) for b in self.fixture_bars[:end_idx]]

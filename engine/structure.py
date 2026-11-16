@@ -1997,7 +1997,7 @@ def analyze_multi_timeframe(
 ) -> Dict[str, Any]:
     """Analyze M5, M15, H1, and H4 simultaneously to extract Multi-Timeframe trend alignment and cross-TF S/R zones."""
     tf_order = ["M5", "M15", "H1", "H4"]
-    tf_weights = {"M5": 1, "M15": 2, "H1": 3, "H4": 4}
+    tf_weights = {"M1": 0.5, "M5": 1, "M15": 2, "H1": 3, "H4": 4}
     primary_tf = primary_tf.upper()
 
     timeframes_summary: Dict[str, Dict[str, Any]] = {}
@@ -2072,9 +2072,10 @@ def analyze_multi_timeframe(
         if z1["is_mtf_confluence"]:
             z1["strength"] = min(100, z1["strength"] + 15)
 
-    # Sort HTF zones: prioritize higher timeframes (H4/H1/M15) and close proximity
+    # Sort HTF zones: prioritize higher timeframes (H4/H1/M15/M5) and close proximity
+    primary_weight = tf_weights.get(primary_tf, 0.5 if primary_tf == "M1" else 1)
     htf_zones = [
-        z for z in all_htf_zones if tf_weights.get(z["timeframe"], 1) >= tf_weights.get(primary_tf, 1)
+        z for z in all_htf_zones if tf_weights.get(z["timeframe"], 1) >= primary_weight
     ]
     htf_zones.sort(key=lambda z: (-int(z["is_mtf_confluence"]), -z["tf_weight"], z["distance_usd"]))
 
