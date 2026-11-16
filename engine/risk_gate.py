@@ -142,16 +142,30 @@ def evaluate_risk_and_size(
 
     # 0. Strict >50% TP Win Probability & Advance Entry check (when configured)
     win_prob_passed = True
+    break_even_pct = float(probs.get("break_even_win_pct") or round(100.0 / (1.0 + rr), 1))
+    target_win_prob = min_win_prob if is_scalp else max(break_even_pct, round(min_win_prob * (break_even_pct / 50.0), 1))
+
     if min_win_prob > 0.0:
-        if win_pct <= min_win_prob:
-            win_prob_passed = False
-            reject_reasons.append(
-                f"สถิติจริงจาก 15,000 เส้นทางพบโอกาสถึง TP เพียง {win_pct:.1f}% (ยังไม่เกิน {min_win_prob:.0f}%) — ห้ามรีบเปิดออเดอร์ ให้รอดักโซนล่วงหน้า"
-            )
+        if is_scalp:
+            if win_pct <= min_win_prob:
+                win_prob_passed = False
+                reject_reasons.append(
+                    f"สถิติจริงจาก Monte Carlo พบโอกาสชนะ {win_pct:.1f}% (ยังไม่เกิน {min_win_prob:.0f}%) — ห้ามรีบเปิดออเดอร์ ให้รอดักโซนล่วงหน้า"
+                )
+            else:
+                passed_checks.append(
+                    f"โอกาสชนะจากสถิติจริง {win_pct:.1f}% (ผ่านเกณฑ์ > {min_win_prob:.0f}%)"
+                )
         else:
-            passed_checks.append(
-                f"โอกาสถึง TP จากสถิติจริง {win_pct:.1f}% (ผ่านเกณฑ์ > {min_win_prob:.0f}%)"
-            )
+            if win_pct < target_win_prob or ev_r <= 0.0:
+                win_prob_passed = False
+                reject_reasons.append(
+                    f"สถิติจริงพบโอกาสชนะ {win_pct:.1f}% (ต่ำกว่าเกณฑ์คุ้มทุน {target_win_prob:.1f}% สำหรับ R:R 1:{rr:.2f}) — ห้ามรีบเปิดออเดอร์ ให้รอดักโซนล่วงหน้า"
+                )
+            else:
+                passed_checks.append(
+                    f"โอกาสชนะ {win_pct:.1f}% เหนือกว่าเกณฑ์คุ้มทุน ({target_win_prob:.1f}%) สำหรับ R:R 1:{rr:.2f} (EV = {ev_r:+.2f}R)"
+                )
 
     is_market_entry = (
         trade_setup.get("execution_type") == "MARKET"
@@ -198,11 +212,13 @@ def evaluate_risk_and_size(
             f"ขนาดไม้ {lot_size:.2f} Lot คุมความเสี่ยงที่ ${actual_risk_usd:.2f} ({actual_risk_usd / balance * 100:.2f}% ของพอร์ต)"
         )
 
-    # 4. News blackout check (+- 30 mins of USD Red News)
-    if news_status.get("in_news_blackout"):
-        titles = ", ".join(e["title"] for e in news_status.get("blackout_events", []))
+    # 4. News blackout & Pre-news shield check
+    if news_status.get("in_news_blackout") or news_status.get("is_imminent_news"):
+        events = news_status.get("blackout_events") or news_status.get("imminent_news_events") or []
+        titles = ", ".join(e.get("title", "") for e in events) or "USD Red News"
+        mins = news_status.get("blackout_minutes") or news_status.get("pre_news_minutes") or 15
         reject_reasons.append(
-            f"ติดช่วงประกาศข่าวกล่องแดง USD ภายใน ±{news_status.get('blackout_minutes', 30)} นาที ({titles})"
+            f"ติดช่วงประกาศข่าวกล่องแดง USD ภายในระยะ {mins} นาที ({titles}) — หยุดการเปิดออเดอร์ใหม่เพื่อคุมความเสี่ยง"
         )
     else:
         passed_checks.append("ปลอดข่าวกล่องแดง USD ในระยะ ±30 นาที")

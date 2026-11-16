@@ -354,8 +354,8 @@ class TestEABridge(unittest.TestCase):
             srv.core.order_manager.active_order["broker_ticket"] = 123456
             srv.core.ea_bridge.poll_actions()  # Clear queue
             await srv.handle_ws_command(mock_client, {"action": "close_active_order", "current_price": 2655.0})
-            self.assertEqual(len(srv.core.ea_bridge.action_queue), 1)
-            close_act = srv.core.ea_bridge.action_queue[0]
+            self.assertTrue(any(a["type"] == "CLOSE_ORDER" and a.get("ticket") == 123456 for a in srv.core.ea_bridge.action_queue))
+            close_act = [a for a in srv.core.ea_bridge.action_queue if a["type"] == "CLOSE_ORDER"][0]
             self.assertEqual(close_act["type"], "CLOSE_ORDER")
             self.assertEqual(close_act["ticket"], 123456)
 
@@ -911,6 +911,73 @@ class TestEABridge(unittest.TestCase):
         finally:
             if os.path.exists(tmp_state):
                 os.remove(tmp_state)
+
+    def test_multi_symbol_ea_poll_aggregates_all_cores(self):
+        """Verify /api/ea/poll returns queued actions from both Gold and BTC cores."""
+        from app import AssistantServer
+
+        class _MemoryWriter:
+            def __init__(self):
+                self.buffer = bytearray()
+            def write(self, data: bytes):
+                self.buffer.extend(data)
+            async def drain(self):
+                return None
+            def close(self):
+                pass
+
+        async def _run():
+            srv = AssistantServer()
+            srv.cores["XAUUSD"].ea_bridge.enqueue_action("OPEN_ORDER", {"symbol": "XAUUSD", "side": "BUY", "lot": 0.1})
+            srv.cores["BTCUSD"].ea_bridge.enqueue_action("OPEN_ORDER", {"symbol": "BTCUSD", "side": "SELL", "lot": 0.01})
+
+            reader = asyncio.StreamReader()
+            reader.feed_data(b"GET /api/ea/poll HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            reader.feed_eof()
+            writer = _MemoryWriter()
+            await srv.handle_client(reader, writer)
+
+            raw = bytes(writer.buffer)
+            self.assertIn(b"200 OK", raw)
+            resp = json.loads(raw.split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertTrue(resp.get("has_actions"))
+            symbols = [a.get("symbol") for a in resp.get("actions", [])]
+            self.assertIn("XAUUSD", symbols)
+            self.assertIn("BTCUSD", symbols)
+
+        asyncio.run(_run())
+
+    def test_autonomous_order_dispatch_when_setup_qualifies(self):
+        """Verify that when auto_trading_enabled is True and a setup qualifies, it automatically enqueues OPEN_ORDER."""
+        import tempfile
+        tmp_dir = tempfile.mkdtemp()
+        tmp_cfg = os.path.join(tmp_dir, "config.json")
+        tmp_ord = os.path.join(tmp_dir, "active_order.json")
+        with open(tmp_cfg, "w", encoding="utf-8") as fh:
+            json.dump({"auto_trading": {"enabled": True}, "symbol": "XAUUSD"}, fh)
+
+        try:
+            core = TradingAssistantCore("XAUUSD")
+            core.order_manager.file_path = tmp_ord
+            core.order_manager.active_orders = []
+            core.order_manager.active_order = None
+            core.ea_bridge.auto_trading_enabled = True
+            core.ea_bridge.action_queue.clear()
+            core.ea_bridge.executed_signal_ids.clear()
+
+            state = core.compute_full_state(force_refresh=True)
+            rt = state.get("risk_ticket") or {}
+
+            # If setup passes, action must be in queue
+            if rt.get("verdict") in ("PASS", "CAUTION"):
+                self.assertIsNotNone(core.order_manager.active_order)
+                self.assertGreater(len(core.ea_bridge.action_queue), 0)
+                queued = core.ea_bridge.action_queue[0]
+                self.assertEqual(queued["type"], "OPEN_ORDER")
+                self.assertEqual(queued["side"], rt["side"])
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

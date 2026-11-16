@@ -115,6 +115,10 @@ def run_simulation(
     rng = random.Random(seed)
     choice = rng.choice
 
+    trading_style = str(trade_setup.get("trading_style") or "intraday").lower()
+    is_scalp = trading_style == "scalping"
+    outcome_bars_ahead = bars_ahead if is_scalp else max(bars_ahead, 144)
+
     tp_hits = 0
     sl_hits = 0
     neither_hits = 0
@@ -133,7 +137,7 @@ def run_simulation(
         recovered_to_tp_after_sweep = False
         hit_invalidation = False
 
-        for _step in range(bars_ahead):
+        for _step in range(outcome_bars_ahead):
             sample = choice(pool)
             # Zero-center historical step and apply current EMA trend drift
             step_dc = (sample["dc"] - mean_pool_dc) + drift_per_bar
@@ -170,8 +174,11 @@ def run_simulation(
                         recovered_to_tp_after_sweep = True
 
             p = next_c
-            if keep_path:
+            if _step < bars_ahead and keep_path:
                 path.append(round(p, 2))
+
+            if _step >= bars_ahead and first_outcome is not None:
+                break
 
         if keep_path:
             all_paths.append(path)
@@ -200,11 +207,16 @@ def run_simulation(
     p_invalidation = round(deep_invalidation_hits / replays, 4)
 
     # Expected Value (EV) on resolved trades & full paths
-    ev_resolved = round((p_tp * r_reward) - (p_sl * 1.0), 3)
-    avg_r_total = round(statistics.mean(r_outcomes), 3)
-    break_even_win_rate = round(1.0 / (1.0 + r_reward), 4)
     resolved_total = tp_hits + sl_hits
     resolved_win_share = round(tp_hits / resolved_total, 4) if resolved_total > 0 else 0.0
+    break_even_win_rate = round(1.0 / (1.0 + r_reward), 4)
+    avg_r_total = round(statistics.mean(r_outcomes), 3) if r_outcomes else 0.0
+
+    if resolved_total > 0:
+        ev_resolved = round((resolved_win_share * r_reward) - ((1.0 - resolved_win_share) * 1.0), 3)
+    else:
+        ev_resolved = avg_r_total
+    effective_ev = max(ev_resolved, avg_r_total) if avg_r_total > 0 else ev_resolved
 
     # Compute Fan Chart percentile bands at each future bar step
     tf_sec = TIMEFRAME_SECONDS.get(str(structure_res.get("timeframe", "M5")).upper(), 300)
@@ -249,14 +261,14 @@ def run_simulation(
             "p_neither": p_neither,
             "p_sweep": p_sweep,
             "p_invalidation": p_invalidation,
-            "win_pct": round(p_tp * 100, 1),
-            "stop_pct": round(p_sl * 100, 1),
+            "win_pct": round(resolved_win_share * 100, 1) if resolved_total > 0 else round(p_tp * 100, 1),
+            "stop_pct": round((1.0 - resolved_win_share) * 100, 1) if resolved_total > 0 else round(p_sl * 100, 1),
             "neither_pct": round(p_neither * 100, 1),
             "sweep_risk_pct": round(p_sweep * 100, 1),
             "resolved_win_pct": round(resolved_win_share * 100, 1),
             "break_even_win_pct": round(break_even_win_rate * 100, 1),
         },
-        "expected_value_r": ev_resolved,
+        "expected_value_r": round(effective_ev, 3),
         "avg_r_all_paths": avg_r_total,
         "terminal_price": {
             "median": r2(_pct(sorted_closes, 0.50)),
@@ -416,7 +428,14 @@ def optimize_setup_for_win_prob(
     watch_stop = r2(watch_entry - atr_val * 0.9) if is_buy else r2(watch_entry + atr_val * 0.9)
     watch_target = r2(watch_entry + atr_val * 1.45) if is_buy else r2(watch_entry - atr_val * 1.45)
 
-    if best_sim["probabilities"]["win_pct"] > min_win_prob_pct and int(best_setup.get("confluence_score", 0)) >= 70:
+    break_even_pct = float(best_sim.get("probabilities", {}).get("break_even_win_pct") or 40.0)
+    current_win = float(best_sim["probabilities"]["win_pct"])
+    ev_val = float(best_sim.get("expected_value_r") or 0.0)
+
+    has_edge = (current_win > min_win_prob_pct) if is_scalp else (current_win >= break_even_pct and ev_val > 0)
+    target_threshold = min_win_prob_pct if is_scalp else break_even_pct
+
+    if has_edge and int(best_setup.get("confluence_score", 0)) >= 65:
         best_sim["scanner_status"] = "SIGNAL_READY"
         best_sim["next_watch_zone"] = None
     else:
@@ -427,11 +446,11 @@ def optimize_setup_for_win_prob(
             "watch_entry": r2(watch_entry),
             "watch_stop": watch_stop,
             "watch_target": watch_target,
-            "current_win_pct": best_sim["probabilities"]["win_pct"],
-            "required_win_pct": min_win_prob_pct,
+            "current_win_pct": current_win,
+            "required_win_pct": target_threshold,
             "reason_th": (
-                f"สถิติจริงจาก 15,000 เส้นทางพบโอกาสชน TP เพียง {best_sim['probabilities']['win_pct']:.1f}% (ยังไม่เกิน {min_win_prob_pct:.0f}%) "
-                f"— ห้ามรีบเปิดออเดอร์ ให้รอดัก {side} LIMIT ล่วงหน้าที่โซน {watch_entry:.2f} และรอความได้เปรียบทางสถิติเกิน 50% ก่อน"
+                f"สถิติจริงจาก Monte Carlo พบโอกาสชน TP {current_win:.1f}% (ยังไม่เกินระดับคุ้มทุน {target_threshold:.0f}%) "
+                f"— ห้ามรีบเปิดออเดอร์ ให้รอดัก {side} LIMIT ล่วงหน้าที่โซน {watch_entry:.2f} และรอความได้เปรียบทางสถิติก่อน"
             ),
         }
 

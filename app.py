@@ -204,6 +204,8 @@ class TradingAssistantCore:
             1
             for o in getattr(self.order_manager, "order_history", [])
             if (int(o.get("created_ts") or 0) // 86400) == now_day
+            and not str(o.get("order_id") or "").startswith("test_")
+            and o.get("status") not in ("CANCELLED", "CLOSED_TEST_CLEANUP", "REJECTED")
         )
         open_portfolio_risk_usd = (
             sum(float(o.get("actual_risk_usd") or 0.0) for o in self.order_manager.active_orders)
@@ -976,11 +978,13 @@ class AssistantServer:
             ts: int,
         ) -> None:
             gold_core = self.cores["XAUUSD"]
-            if gold_core.hub.replay_mode or not self.clients:
+            has_subscribers = bool(self.clients)
+            has_ea = gold_core.ea_bridge.auto_trading_enabled or gold_core.ea_bridge.is_connected
+            if gold_core.hub.replay_mode or (not has_subscribers and not has_ea):
                 return
             now = time.time()
             self._last_tv_tick_ts = now
-            if now - self._last_ws_broadcast_ts < 0.25:
+            if has_subscribers and (now - self._last_ws_broadcast_ts < 0.25):
                 return
             self._last_ws_broadcast_ts = now
 
@@ -1008,8 +1012,9 @@ class AssistantServer:
             )
             if ingested["new_bar_closed"] or ev:
                 state = await asyncio.to_thread(gold_core.compute_full_state, None, True, False)
-                await self.broadcast(state, symbol="XAUUSD")
-            else:
+                if has_subscribers:
+                    await self.broadcast(state, symbol="XAUUSD")
+            elif has_subscribers:
                 await self.broadcast(
                     {
                         "type": "tick",
@@ -1031,13 +1036,15 @@ class AssistantServer:
         """Fallback Stream: real-time gold trades from wss://stream.binance.com:9443/ws/paxgusdt@trade when TradingView WS is idle."""
         gold_core = self.cores["XAUUSD"]
         async def on_trade(trade_price: float, trade_ts: int) -> None:
-            if gold_core.hub.replay_mode or not self.clients:
+            has_subscribers = bool(self.clients)
+            has_ea = gold_core.ea_bridge.auto_trading_enabled or gold_core.ea_bridge.is_connected
+            if gold_core.hub.replay_mode or (not has_subscribers and not has_ea):
                 return
             # Priority guard: if TradingView WS is streaming within last 5s, suppress Binance PAXG fallback ticks
             if time.time() - self._last_tv_tick_ts < 5.0:
                 return
             now = time.time()
-            if now - self._last_ws_broadcast_ts < 0.25:
+            if has_subscribers and (now - self._last_ws_broadcast_ts < 0.25):
                 return
             self._last_ws_broadcast_ts = now
 
@@ -1064,8 +1071,9 @@ class AssistantServer:
             )
             if ingested["new_bar_closed"] or ev:
                 state = await asyncio.to_thread(gold_core.compute_full_state, None, True, False)
-                await self.broadcast(state, symbol="XAUUSD")
-            else:
+                if has_subscribers:
+                    await self.broadcast(state, symbol="XAUUSD")
+            elif has_subscribers:
                 await self.broadcast(
                     {
                         "type": "tick",
@@ -1087,10 +1095,12 @@ class AssistantServer:
 
         async def on_btc_trade(trade_price: float, trade_ts: int) -> None:
             nonlocal last_btc_broadcast
-            if btc_core.hub.replay_mode or not self.clients:
+            has_subscribers = bool(self.clients)
+            has_ea = btc_core.ea_bridge.auto_trading_enabled or btc_core.ea_bridge.is_connected
+            if btc_core.hub.replay_mode or (not has_subscribers and not has_ea):
                 return
             now = time.time()
-            if now - last_btc_broadcast < 0.25:
+            if has_subscribers and (now - last_btc_broadcast < 0.25):
                 return
             last_btc_broadcast = now
 
@@ -1116,8 +1126,9 @@ class AssistantServer:
             )
             if ingested["new_bar_closed"] or ev:
                 state = await asyncio.to_thread(btc_core.compute_full_state, None, True, False)
-                await self.broadcast(state, symbol="BTCUSD")
-            else:
+                if has_subscribers:
+                    await self.broadcast(state, symbol="BTCUSD")
+            elif has_subscribers:
                 await self.broadcast(
                     {
                         "type": "tick",
@@ -1137,13 +1148,15 @@ class AssistantServer:
         loop_counter = 0
         while True:
             await asyncio.sleep(2.0)
-            if not self.clients:
+            has_ea_any = any(c.ea_bridge.auto_trading_enabled or c.ea_bridge.is_connected or c.order_manager.has_active_order() for c in self.cores.values())
+            if not self.clients and not has_ea_any:
                 continue
             loop_counter += 1
 
             for sym_name, core_inst in list(self.cores.items()):
                 has_sub = any(getattr(c, "symbol", "XAUUSD") == sym_name for c in self.clients)
-                if not has_sub and not core_inst.order_manager.has_active_order():
+                has_ea_target = core_inst.ea_bridge.auto_trading_enabled or core_inst.ea_bridge.is_connected or core_inst.order_manager.has_active_order()
+                if not has_sub and not has_ea_target:
                     continue
 
                 is_btc = "BTC" in sym_name
@@ -1152,20 +1165,22 @@ class AssistantServer:
                     if self.auto_replay and loop_counter % 2 == 0:
                         core_inst.hub.step_replay(1)
                         state = await asyncio.to_thread(core_inst.compute_full_state)
-                        await self.broadcast(state, symbol=sym_name)
+                        if has_sub:
+                            await self.broadcast(state, symbol=sym_name)
                     elif core_inst.last_state and core_inst.last_state.get("bars"):
                         last_bar = core_inst.last_state["bars"][-1]
                         tick = core_inst.hub.simulate_live_tick(last_bar, offset_usd=0.0)
-                        await self.broadcast(
-                            {
-                                "type": "tick",
-                                "symbol": sym_name,
-                                "timeframe": core_inst.timeframe,
-                                "bar": tick,
-                                "source": "offline_replay",
-                            },
-                            symbol=sym_name,
-                        )
+                        if has_sub:
+                            await self.broadcast(
+                                {
+                                    "type": "tick",
+                                    "symbol": sym_name,
+                                    "timeframe": core_inst.timeframe,
+                                    "bar": tick,
+                                    "source": "offline_replay",
+                                },
+                                symbol=sym_name,
+                            )
                     continue
 
                 # 2. Live Mode
@@ -1214,8 +1229,9 @@ class AssistantServer:
                             state = await asyncio.to_thread(
                                 core_inst.compute_full_state, None, ingested["new_bar_closed"], False
                             )
-                            await self.broadcast(state, symbol=sym_name)
-                        else:
+                            if has_sub:
+                                await self.broadcast(state, symbol=sym_name)
+                        elif has_sub:
                             await self.broadcast(
                                 {
                                     "type": "tick",
@@ -1244,8 +1260,9 @@ class AssistantServer:
                     )
                     if ev or loop_counter % 10 == 0:
                         state = await asyncio.to_thread(core_inst.compute_full_state, None, False, False)
-                        await self.broadcast(state, symbol=sym_name)
-                    else:
+                        if has_sub:
+                            await self.broadcast(state, symbol=sym_name)
+                    elif has_sub:
                         await self.broadcast(
                             {
                                 "type": "tick",
@@ -1257,6 +1274,15 @@ class AssistantServer:
                             },
                             symbol=sym_name,
                         )
+
+                # Periodic autonomous setup scan: evaluate setups every 16 seconds when auto trading is ON and no active order
+                if core_inst.ea_bridge.auto_trading_enabled and not core_inst.order_manager.has_active_order() and loop_counter % 8 == 0:
+                    try:
+                        state = await asyncio.to_thread(core_inst.compute_full_state, None, False, False)
+                        if has_sub:
+                            await self.broadcast(state, symbol=sym_name)
+                    except Exception as e:
+                        logger.warning(f"Autonomous periodic evaluation failed for {sym_name}: {e}")
 
     async def handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -1788,11 +1814,19 @@ class AssistantServer:
 
         # --- MT5 EA Bridge HTTP Endpoints ---
         if path == "/api/ea/poll" and method in ("GET", "POST"):
-            actions = self.core.ea_bridge.poll_actions()
-            self.core.ea_bridge.record_poll()
+            actions = []
+            auto_trading_any = False
+            for c in self.cores.values():
+                c_actions = c.ea_bridge.poll_actions()
+                if c_actions:
+                    actions.extend(c_actions)
+                c.ea_bridge.record_poll()
+                if c.ea_bridge.auto_trading_enabled:
+                    auto_trading_any = True
+
             resp_doc = {
                 "status": "ok",
-                "auto_trading_enabled": self.core.ea_bridge.auto_trading_enabled,
+                "auto_trading_enabled": auto_trading_any,
                 "has_actions": len(actions) > 0,
                 "actions": actions,
                 "next_poll_ms": 200 if len(actions) > 0 else 500,

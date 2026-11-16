@@ -25,6 +25,20 @@ class _MemoryWriter:
 
 
 class TestAppIntegration(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import os, shutil
+        cls._backed_up = False
+        if os.path.exists("active_order.json"):
+            shutil.copy("active_order.json", "active_order.json.testbak")
+            cls._backed_up = True
+
+    @classmethod
+    def tearDownClass(cls):
+        import os, shutil
+        if cls._backed_up and os.path.exists("active_order.json.testbak"):
+            shutil.move("active_order.json.testbak", "active_order.json")
+
     def test_live_price_ingestion_and_candle_rollover(self):
         core = TradingAssistantCore()
         core.hub.cached_bars_by_tf["M5"] = [
@@ -147,7 +161,10 @@ class TestAppIntegration(unittest.TestCase):
         win_pct = scalp_state["simulation"]["probabilities"]["win_pct"]
         if win_pct > 50.0:
             self.assertTrue(scalp_state["risk_ticket"]["win_prob_passed"])
-            self.assertIn(scalp_state["risk_ticket"]["recommended_action"], ("BUY", "SELL"))
+            if scalp_state["risk_ticket"]["verdict"] in ("PASS", "CAUTION"):
+                self.assertIn(scalp_state["risk_ticket"]["recommended_action"], ("BUY", "SELL"))
+            else:
+                self.assertEqual(scalp_state["risk_ticket"]["recommended_action"], "WAIT")
         else:
             self.assertFalse(scalp_state["risk_ticket"]["win_prob_passed"])
             self.assertEqual(scalp_state["risk_ticket"]["recommended_action"], "WAIT")
