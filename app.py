@@ -107,7 +107,8 @@ class TradingAssistantCore:
         is_btc = "BTC" in self.symbol
         feed = self.hub.get_bars(tf, force_refresh=force_refresh, symbol=self.symbol)
         raw_bars = feed["bars"]
-        offset = float(self.config.get("broker_price_offset_btc" if is_btc else "broker_price_offset") or 0.0)
+        is_mt5_feed = str(feed.get("source", "")).startswith("mt5_broker")
+        offset = 0.0 if is_mt5_feed else float(self.config.get("broker_price_offset_btc" if is_btc else "broker_price_offset") or 0.0)
         def_spread_pts = 1500.0 if is_btc else 25.0
         spread_pts = float(self.config.get("broker_spread_points_btc" if is_btc else "broker_spread_points") or def_spread_pts)
         point_size = float(self.config.get("point_size_btc" if is_btc else "point_size") or 0.01)
@@ -945,6 +946,7 @@ class AssistantServer:
         self.clients: Set[WebSocketClient] = set()
         self.auto_replay = False
         self._last_ws_broadcast_ts = 0.0
+        self._last_tv_tick_ts = 0.0
 
     def get_core(self, symbol: Optional[str] = None) -> TradingAssistantCore:
         sym = (symbol or "XAUUSD").upper()
@@ -977,6 +979,7 @@ class AssistantServer:
             if gold_core.hub.replay_mode or not self.clients:
                 return
             now = time.time()
+            self._last_tv_tick_ts = now
             if now - self._last_ws_broadcast_ts < 0.25:
                 return
             self._last_ws_broadcast_ts = now
@@ -989,6 +992,7 @@ class AssistantServer:
                 ask=ask,
                 ts=ts,
                 offset_usd=offset,
+                symbol="XAUUSD",
             )
             if not ingested:
                 return
@@ -1029,7 +1033,8 @@ class AssistantServer:
         async def on_trade(trade_price: float, trade_ts: int) -> None:
             if gold_core.hub.replay_mode or not self.clients:
                 return
-            if str(gold_core.hub.source).startswith("tradingview_ws"):
+            # Priority guard: if TradingView WS is streaming within last 5s, suppress Binance PAXG fallback ticks
+            if time.time() - self._last_tv_tick_ts < 5.0:
                 return
             now = time.time()
             if now - self._last_ws_broadcast_ts < 0.25:
@@ -1043,6 +1048,7 @@ class AssistantServer:
                 price=spot_equivalent,
                 ts=trade_ts,
                 offset_usd=offset,
+                symbol="XAUUSD",
             )
             if not ingested:
                 return
@@ -1094,6 +1100,7 @@ class AssistantServer:
                 price=trade_price,
                 ts=trade_ts,
                 offset_usd=offset,
+                symbol="BTCUSD",
             )
             if not ingested:
                 return
@@ -1176,7 +1183,7 @@ class AssistantServer:
                             "source": f"mt5_broker ({acc.get('symbol', 'XAUUSD')})",
                             "ts": int(time.time()),
                         }
-                    elif not spot:
+                    elif not spot and (time.time() - self._last_tv_tick_ts > 5.0):
                         spot = await asyncio.to_thread(fetch_live_spot_xauusd)
 
                 if spot:
@@ -1190,6 +1197,7 @@ class AssistantServer:
                         ask=spot["ask"],
                         ts=spot["ts"],
                         offset_usd=offset,
+                        symbol=sym_name,
                     )
                     if ingested:
                         b = ingested["bar"]
@@ -1832,11 +1840,14 @@ class AssistantServer:
                 pending_orders=info.get("pending_orders") or [],
                 current_price=float(info.get("price") or 0.0),
             )
-            # Broadcast state so web UI sees live MT5 status immediately
-            state = target_core.last_state or {}
-            if state:
-                state["ea_bridge"] = target_core.ea_bridge.get_status_dict()
-                await self.broadcast(state, symbol=target_core.symbol)
+            # Broadcast lightweight telemetry so web UI sees live MT5 status immediately without resetting chart
+            ea_status_msg = {
+                "type": "ea_heartbeat",
+                "symbol": target_core.symbol,
+                "ea_bridge": target_core.ea_bridge.get_status_dict(),
+                "active_order": target_core.order_manager.get_active_order_dict(float(info.get("price") or 0.0)),
+            }
+            await self.broadcast(ea_status_msg, symbol=target_core.symbol)
             await self.send_http_json(
                 writer,
                 200,

@@ -1240,18 +1240,26 @@ class MarketDataHub:
         ask: Optional[float] = None,
         ts: Optional[int] = None,
         offset_usd: float = 0.0,
+        symbol: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Update the active bar in `cached_bars_by_tf` with a real live price tick.
+        """Update the active bar in cache with a real live price tick.
+        Stores raw prices in memory, and applies offset_usd to the returned display bar.
         Returns info including `new_bar_closed=True` when the timeframe rolls over into a new bar."""
         tf = timeframe.upper()
-        bars = self.cached_bars_by_tf.get(tf)
+        sym = (symbol or self.preferred_symbol or "XAUUSD").upper()
+        cache_key = f"{sym}_{tf}"
+        if sym != "XAUUSD":
+            bars = self.cached_bars_by_sym_tf.get(cache_key) or self.cached_bars_by_tf.get(tf)
+        else:
+            bars = self.cached_bars_by_tf.get(tf)
         if not bars:
             return None
 
         tf_sec = TF_SECONDS.get(tf, 300)
         now_sec = int(ts or time.time())
         current_slot = (now_sec // tf_sec) * tf_sec
-        adj_price = round(float(price) + offset_usd, 2)
+        raw_price = round(float(price), 2)
+        adj_price = round(raw_price + offset_usd, 2)
 
         last_bar = bars[-1]
         new_bar_closed = False
@@ -1260,10 +1268,10 @@ class MarketDataHub:
             # Previous bar just closed! Start a new forming bar
             new_bar = {
                 "t": current_slot,
-                "o": adj_price,
-                "h": adj_price,
-                "l": adj_price,
-                "c": adj_price,
+                "o": raw_price,
+                "h": raw_price,
+                "l": raw_price,
+                "c": raw_price,
                 "v": 1,
             }
             bars.append(new_bar)
@@ -1272,17 +1280,26 @@ class MarketDataHub:
             last_bar = new_bar
             new_bar_closed = True
         else:
-            last_bar["c"] = adj_price
-            last_bar["h"] = round(max(float(last_bar["h"]), adj_price), 2)
-            last_bar["l"] = round(min(float(last_bar["l"]), adj_price), 2)
+            last_bar["c"] = raw_price
+            last_bar["h"] = round(max(float(last_bar["h"]), raw_price), 2)
+            last_bar["l"] = round(min(float(last_bar["l"]), raw_price), 2)
             last_bar["v"] = int(last_bar.get("v") or 0) + 1
 
         spread_pts = None
         if bid is not None and ask is not None:
             spread_pts = int(round(max(0.05, ask - bid) * 100))
 
+        display_bar = {
+            "t": int(last_bar["t"]),
+            "o": round(float(last_bar["o"]) + offset_usd, 2),
+            "h": round(float(last_bar["h"]) + offset_usd, 2),
+            "l": round(float(last_bar["l"]) + offset_usd, 2),
+            "c": round(float(last_bar["c"]) + offset_usd, 2),
+            "v": int(last_bar.get("v", 1)),
+        }
+
         return {
-            "bar": dict(last_bar),
+            "bar": display_bar,
             "bid": round(bid + offset_usd, 2) if bid is not None else adj_price,
             "ask": round(ask + offset_usd, 2) if ask is not None else adj_price,
             "spread_points": spread_pts,

@@ -13,6 +13,9 @@
   let activeChartMode = "ai";
   let lastTvTf = null;
   let lastReportedExecId = null;
+  let lastChartSymbol = null;
+  let lastChartTf = null;
+  let lastCandleTime = 0;
   const CURRENT_SYMBOL = window.CURRENT_SYMBOL || (window.location.pathname.includes("btc") ? "BTCUSD" : "XAUUSD");
   const BKK_OFFSET = 7 * 3600; // UTC+7 Bangkok timezone alignment with TradingView
 
@@ -166,20 +169,70 @@
     }
 
     if (lwChart && candleSeries) {
-      candleSeries.setData(
-        bars.map((b) => ({
-          time: b.t + BKK_OFFSET,
-          open: b.o,
-          high: b.h,
-          low: b.l,
-          close: b.c,
-        }))
-      );
+      const currentTf = state.timeframe || "M5";
+      const needsFullReset =
+        lastChartSymbol !== CURRENT_SYMBOL ||
+        lastChartTf !== currentTf ||
+        lastCandleTime === 0;
+
+      // Clean, deduplicate and strictly sort bars by time
+      const seenTimes = new Set();
+      const cleanBars = [];
+      for (let i = 0; i < bars.length; i++) {
+        const b = bars[i];
+        const t = (Number(b.t) || 0) + BKK_OFFSET;
+        if (!seenTimes.has(t) && t > 0) {
+          seenTimes.add(t);
+          cleanBars.push({
+            time: t,
+            open: Number(b.o),
+            high: Number(b.h),
+            low: Number(b.l),
+            close: Number(b.c),
+          });
+        }
+      }
+      cleanBars.sort((a, b) => a.time - b.time);
+
+      if (cleanBars.length > 0) {
+        if (needsFullReset) {
+          candleSeries.setData(cleanBars);
+          lastChartSymbol = CURRENT_SYMBOL;
+          lastChartTf = currentTf;
+          lastCandleTime = cleanBars[cleanBars.length - 1].time;
+        } else {
+          // Smooth incremental update: update latest bar without resetting camera or flashing canvas
+          const latestBar = cleanBars[cleanBars.length - 1];
+          if (latestBar.time >= lastCandleTime) {
+            candleSeries.update(latestBar);
+            lastCandleTime = Math.max(lastCandleTime, latestBar.time);
+          } else {
+            candleSeries.setData(cleanBars);
+            lastCandleTime = cleanBars[cleanBars.length - 1].time;
+          }
+        }
+      }
 
       const emas = (state.structure && state.structure.ema_series) || {};
-      if (emas.ema20) ema20Series.setData(emas.ema20.map((p) => ({ time: p.time + BKK_OFFSET, value: p.value })));
-      if (emas.ema50) ema50Series.setData(emas.ema50.map((p) => ({ time: p.time + BKK_OFFSET, value: p.value })));
-      if (emas.ema200) ema200Series.setData(emas.ema200.map((p) => ({ time: p.time + BKK_OFFSET, value: p.value })));
+      const cleanEma = (arr) => {
+        if (!arr || !arr.length) return [];
+        const seen = new Set();
+        const res = [];
+        for (let i = 0; i < arr.length; i++) {
+          const item = arr[i];
+          const rawT = item.time !== undefined ? item.time : item.t;
+          const rawV = item.value !== undefined ? item.value : item.v;
+          const t = (Number(rawT) || 0) + BKK_OFFSET;
+          if (!seen.has(t) && t > 0) {
+            seen.add(t);
+            res.push({ time: t, value: Number(rawV) });
+          }
+        }
+        return res.sort((a, b) => a.time - b.time);
+      };
+      if (emas.ema20 && ema20Series) ema20Series.setData(cleanEma(emas.ema20));
+      if (emas.ema50 && ema50Series) ema50Series.setData(cleanEma(emas.ema50));
+      if (emas.ema200 && ema200Series) ema200Series.setData(cleanEma(emas.ema200));
 
       const markers = [];
       const breaks = (state.smc && state.smc.structure_breaks) || [];
@@ -575,38 +628,8 @@
     }
   }
 
-  function renderDashboard(state) {
-    currentState = state;
-    renderChart(state);
-
-    const st = state.structure || {};
-    const trend = st.trend || {};
-    const smc = state.smc || {};
-    const setup = smc.trade_setup || {};
-    const sim = state.simulation || {};
-    const probs = sim.probabilities || {};
-    const tk = state.risk_ticket || {};
-    const ai = state.ai_advisory || {};
-    const news = state.news || {};
-    const session = news.session || {};
-    const quote = state.live_quote;
-
-    // Top bar
-    el("livePrice").textContent = Number(st.current_price || 0).toFixed(2);
-    if (quote && quote.bid && quote.ask) {
-      el("bidAskPill").textContent = `Bid ${Number(quote.bid).toFixed(2)} • Ask ${Number(quote.ask).toFixed(2)}`;
-    }
-    el("sessionBadge").textContent = `${session.session || "MARKET"} • ${session.bkk_time || ""}`;
-    el("feedSourceLabel").textContent = `Feed: ${state.data_source || "โบรกเกอร์ MT5"}`;
-    if (el("brokerFeedText")) {
-      const bSym = (state.data_source && state.data_source.includes("("))
-        ? state.data_source
-        : (ea.symbol ? `โบรกเกอร์ MT5 (${ea.symbol})` : `โบรกเกอร์ MT5 (${CURRENT_SYMBOL})`);
-      el("brokerFeedText").textContent = `🏛️ ${bSym}`;
-    }
-
-    // MT5 EA Bridge Status & Auto-Trading Master Switch
-    const ea = state.ea_bridge || {};
+  function updateEABridgeUI(ea, dataSource) {
+    if (!ea) return;
     const mt5Pill = el("mt5StatusPill");
     const mt5Text = el("mt5StatusText");
     if (mt5Pill && mt5Text) {
@@ -624,6 +647,13 @@
         mt5Text.textContent = "MT5: Offline";
         mt5Pill.title = "MetaTrader 5 EA ยังไม่ได้เชื่อมต่อ (เปิด MT5 บน Windows/VPS แล้วรัน KAIROS79_Bridge.mq5)";
       }
+    }
+
+    if (el("brokerFeedText")) {
+      const bSym = (dataSource && dataSource.includes("("))
+        ? dataSource
+        : (ea.symbol ? `โบรกเกอร์ MT5 (${ea.symbol})` : `โบรกเกอร์ MT5 (${CURRENT_SYMBOL})`);
+      el("brokerFeedText").textContent = `🏛️ ${bSym}`;
     }
 
     // Check for execution reports from MT5 (e.g. FILLED, FAILED_ALGO_DISABLED, REJECTED)
@@ -659,6 +689,39 @@
     if (el("cfgAutoTrading")) {
       el("cfgAutoTrading").checked = ea.auto_trading_enabled === true;
     }
+  }
+
+  function renderDashboard(state) {
+    currentState = state;
+    renderChart(state);
+
+    const st = state.structure || {};
+    const trend = st.trend || {};
+    const smc = state.smc || {};
+    const setup = smc.trade_setup || {};
+    const sim = state.simulation || {};
+    const probs = sim.probabilities || {};
+    const tk = state.risk_ticket || {};
+    const ai = state.ai_advisory || {};
+    const news = state.news || {};
+    const session = news.session || {};
+    const quote = state.live_quote;
+
+    // Top bar
+    el("livePrice").textContent = Number(st.current_price || 0).toFixed(2);
+    if (quote && quote.bid && quote.ask) {
+      el("bidAskPill").textContent = `Bid ${Number(quote.bid).toFixed(2)} • Ask ${Number(quote.ask).toFixed(2)}`;
+    }
+    el("sessionBadge").textContent = `${session.session || "MARKET"} • ${session.bkk_time || ""}`;
+    el("feedSourceLabel").textContent = `Feed: ${state.data_source || "โบรกเกอร์ MT5"}`;
+    if (el("brokerFeedText")) {
+      const bSym = (state.data_source && state.data_source.includes("("))
+        ? state.data_source
+        : (ea.symbol ? `โบรกเกอร์ MT5 (${ea.symbol})` : `โบรกเกอร์ MT5 (${CURRENT_SYMBOL})`);
+      el("brokerFeedText").textContent = `🏛️ ${bSym}`;
+    }
+
+    updateEABridgeUI(state.ea_bridge || {}, state.data_source);
 
     const tBadge = el("trendBadge");
     tBadge.textContent = `${trend.regime || "-"} (${trend.bias || "-"})`;
@@ -1331,6 +1394,7 @@
 
   function handleLiveTick(msg) {
     if (!msg.bar) return;
+    if (msg.symbol && msg.symbol !== CURRENT_SYMBOL) return;
     const b = msg.bar;
     const curP = Number(b.c);
     el("livePrice").textContent = curP.toFixed(2);
@@ -1342,22 +1406,34 @@
     } else if (currentState && currentState.active_order) {
       updateActiveOrderDisplay(currentState.active_order, curP);
     }
+
+    const barTime = (Number(b.t) || 0) + BKK_OFFSET;
     if (candleSeries) {
-      candleSeries.update({
-        time: b.t + BKK_OFFSET,
-        open: b.o,
-        high: b.h,
-        low: b.l,
-        close: b.c,
-      });
-    } else if (currentState && currentState.bars && currentState.bars.length) {
-      const bars = currentState.bars;
-      if (bars[bars.length - 1].t === b.t) {
-        bars[bars.length - 1] = b;
-      } else {
-        bars.push(b);
+      if (barTime >= lastCandleTime) {
+        candleSeries.update({
+          time: barTime,
+          open: Number(b.o),
+          high: Number(b.h),
+          low: Number(b.l),
+          close: Number(b.c),
+        });
+        lastCandleTime = Math.max(lastCandleTime, barTime);
       }
-      renderFallbackCanvas(currentState);
+    }
+
+    // Keep currentState.bars in sync with the live bar
+    if (currentState && currentState.bars && currentState.bars.length) {
+      const bars = currentState.bars;
+      const lastB = bars[bars.length - 1];
+      if (lastB.t === b.t) {
+        bars[bars.length - 1] = b;
+      } else if (b.t > lastB.t) {
+        bars.push(b);
+        if (bars.length > 2000) bars.shift();
+      }
+      if (!candleSeries) {
+        renderFallbackCanvas(currentState);
+      }
     }
   }
 
@@ -1380,6 +1456,15 @@
           renderDashboard(doc);
         } else if (doc.type === "tick") {
           handleLiveTick(doc);
+        } else if (doc.type === "ea_heartbeat") {
+          if (currentState) {
+            currentState.ea_bridge = doc.ea_bridge || {};
+            updateEABridgeUI(currentState.ea_bridge, currentState.data_source);
+            if (doc.active_order) {
+              const cp = Number(el("livePrice").textContent) || 0;
+              updateActiveOrderDisplay(doc.active_order, cp);
+            }
+          }
         }
       } catch (_) {}
     };
