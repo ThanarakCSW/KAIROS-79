@@ -173,31 +173,35 @@ class TradingAssistantCore:
         )
         structure["volume_flow"] = market_flow
 
-        # Let Gemini analyze the full chart (raw bars + MTF + Macro + SMC + 15,000-path baseline) and decide the setup
-        chosen_setup, gemini_raw = evaluate_chart_with_gemini_or_fallback(
-            bars=chart_bars,
-            structure=structure,
-            smc=smc,
-            baseline_sim=sim,
-            news=news,
-            config=self.config,
-            spread_usd=spread_usd,
-            force_call=force_ai,
-            mtf=mtf,
-            macro=macro,
-        )
-        if chosen_setup is not smc["trade_setup"]:
-            chosen_setup["trading_style"] = self.trading_style
-            opt_gemini_setup, sim = optimize_setup_for_win_prob(
+        # Only invoke Gemini AI when scanning for a new trade entry (or when explicitly forced),
+        # saving AI resources when an order is already active and managed by deterministic lifecycle rules.
+        if force_ai or not self.order_manager.has_active_order():
+            chosen_setup, gemini_raw = evaluate_chart_with_gemini_or_fallback(
                 bars=chart_bars,
-                trade_setup=chosen_setup,
-                structure_res=structure,
-                replays=replays_cnt,
-                bars_ahead=bars_ahead_cnt,
-                seed=sim_seed,
-                min_win_prob_pct=min_win_prob,
+                structure=structure,
+                smc=smc,
+                baseline_sim=sim,
+                news=news,
+                config=self.config,
+                spread_usd=spread_usd,
+                force_call=force_ai,
+                mtf=mtf,
+                macro=macro,
             )
-            smc["trade_setup"] = opt_gemini_setup
+            if chosen_setup is not smc["trade_setup"]:
+                chosen_setup["trading_style"] = self.trading_style
+                opt_gemini_setup, sim = optimize_setup_for_win_prob(
+                    bars=chart_bars,
+                    trade_setup=chosen_setup,
+                    structure_res=structure,
+                    replays=replays_cnt,
+                    bars_ahead=bars_ahead_cnt,
+                    seed=sim_seed,
+                    min_win_prob_pct=min_win_prob,
+                )
+                smc["trade_setup"] = opt_gemini_setup
+        else:
+            gemini_raw = None
 
         now_day = int(time.time()) // 86400
         trades_today_count = sum(
@@ -778,6 +782,13 @@ class TradingAssistantCore:
             self.last_alert_fingerprint = fp
             is_new_signal_alert = True
 
+        clean_history = [
+            o
+            for o in self.order_manager.order_history
+            if not str(o.get("order_id") or "").startswith("test_")
+            and o.get("close_reason") not in ("TEST_CLEANUP", "SYSTEM_INIT")
+        ][-15:]
+
         live_quote = feed.get("live_quote")
         state = {
             "type": "full_state",
@@ -793,7 +804,7 @@ class TradingAssistantCore:
             "is_new_signal_alert": is_new_signal_alert,
             "active_order": self.order_manager.get_active_order_dict(cur_p),
             "order_event": order_event,
-            "order_history": self.order_manager.order_history[-10:],
+            "order_history": clean_history,
             "bars": chart_bars,
             "structure": structure,
             "chart_patterns": structure.get("chart_patterns"),
@@ -1880,6 +1891,12 @@ class AssistantServer:
                 "symbol": target_core.symbol,
                 "ea_bridge": target_core.ea_bridge.get_status_dict(),
                 "active_order": target_core.order_manager.get_active_order_dict(float(info.get("price") or 0.0)),
+                "order_history": [
+                    o
+                    for o in target_core.order_manager.order_history
+                    if not str(o.get("order_id") or "").startswith("test_")
+                    and o.get("close_reason") not in ("TEST_CLEANUP", "SYSTEM_INIT")
+                ][-15:],
             }
             await self.broadcast(ea_status_msg, symbol=target_core.symbol)
             await self.send_http_json(

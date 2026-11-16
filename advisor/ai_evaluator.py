@@ -176,50 +176,40 @@ def call_gemini_full_chart_analyst(
             "c": b["c"],
             "v": b.get("v", 0),
         }
-        for b in bars[-40:]
+        for b in bars[-25:]
     ]
 
     chart_package = {
-        "symbol": "XAUUSD",
+        "symbol": config.get("symbol", "XAUUSD"),
         "timeframe": structure["timeframe"],
         "trading_style": smc.get("trading_style") or config.get("trading_style", "intraday"),
-        "min_win_prob_pct": config.get("min_win_prob_pct", 50.0),
         "current_price": structure["current_price"],
         "atr14": structure["atr14"],
         "broker_spread_points": config.get("broker_spread_points", 25),
         "trend_and_ema": structure["trend"],
-        "volume_and_market_flow": structure.get("volume_flow") or {},
-        "scalping_signals": structure.get("scalping") or {},
         "institutional_levels": structure.get("institutional_levels") or {},
         "rsi_divergence": structure.get("rsi_divergence") or {},
         "macro_correlation_dxy_us10y": macro or {},
-        "historical_candle_behavior": structure.get("candle_behavior") or {},
         "multi_timeframe_confluence": mtf or {},
-        "recent_swings": structure["swings"]["all"][-10:],
-        "sr_zones": structure["sr_zones"][:6],
+        "recent_swings": structure["swings"]["all"][-8:],
+        "sr_zones": structure["sr_zones"][:5],
         "smc_structures": {
-            "structure_breaks": smc["structure_breaks"][-6:],
-            "liquidity_sweeps": smc["liquidity_sweeps"][-5:],
-            "unmitigated_order_blocks": smc["order_blocks"][:5],
-            "unmitigated_fvgs": smc["fvgs"][-5:],
-            "liquidity_pools": smc["liquidity_pools"][:6],
+            "structure_breaks": smc["structure_breaks"][-4:],
+            "liquidity_sweeps": smc["liquidity_sweeps"][-4:],
+            "unmitigated_order_blocks": smc["order_blocks"][:4],
+            "unmitigated_fvgs": smc["fvgs"][-4:],
+            "liquidity_pools": smc["liquidity_pools"][:4],
             "engine_baseline_setup": smc["trade_setup"],
         },
-        "monte_carlo_15000_baseline": {
-            "replays": simulation["replays"],
-            "bars_ahead": simulation["bars_ahead"],
+        "monte_carlo_baseline": {
             "probabilities": simulation["probabilities"],
             "expected_value_r": simulation["expected_value_r"],
-            "terminal_price_percentiles": simulation["terminal_price"],
-            "scanner_status": simulation.get("scanner_status"),
-            "next_watch_zone": simulation.get("next_watch_zone"),
         },
         "news_and_session": {
             "session": news.get("session"),
             "in_news_blackout": news.get("in_news_blackout"),
-            "upcoming_usd_red_news": news.get("upcoming_usd_red_news", [])[:3],
         },
-        "recent_40_candles": recent_bars,
+        "recent_25_candles": recent_bars,
     }
 
     trading_style = str(smc.get("trading_style") or config.get("trading_style", "intraday")).lower()
@@ -227,57 +217,37 @@ def call_gemini_full_chart_analyst(
 
     if is_scalp:
         style_prompt = (
-            "โหมดวิเคราะห์ปัจจุบัน: ⚡ SCALPING (เทรดสั้น จบรอบเร็ว M1/M5)\n"
-            "กฎเฉพาะทางสำหรับ SCALPING:\n"
-            "1. เน้นทำกำไรสั้นและไว (Quick Scalp) ยึดโมเมนตัม EMA 9/21 Ribbon, Micro Liquidity Sweep และ StochRSI/RSI7\n"
-            "2. Stop Loss (SL): ต้องวางแบบแคบ กระชับ ปลอดภัย (Tight SL ประมาณ 1.0 - 2.5 USD หรือ 0.65 - 0.90 ATR) ห้ามวางกว้างแบบสวิงรายวัน\n"
-            "3. Take Profit (TP): ล็อกเป้าหมายสั้นและมีความเป็นไปได้สูง (R:R 1.25 - 1.6x หรือ 1.5 - 4.0 USD จากจุดเข้า)\n"
-            "4. จุดเข้า (Entry): สามารถแนะนำเข้าทันที (order_type: BUY/SELL NOW, status: ACTIVE_IN_ZONE) หากเกิดโมเมนตัมยืนยัน หรือดัก Pullback สั้นๆ ที่ EMA 9/21 หรือ Micro OB ใกล้ราคาปัจจุบัน\n"
+            "โหมดวิเคราะห์: ⚡ SCALPING (M1/M5) — เน้นจุดเข้าแม่นยำ SL กระชับ (0.65-0.90 ATR) และ TP สั้น R:R 1.25-1.6x"
         )
-        target_field_desc = '    "target": ตัวเลขราคา TP (เป้าหมายสั้น R:R 1.25 - 1.60x หรือ 1.5 - 4.0 USD),\n'
+        target_field_desc = '    "target": ตัวเลขราคา TP (R:R 1.25 - 1.60x),\n'
     else:
         style_prompt = (
-            "โหมดวิเคราะห์ปัจจุบัน: 🎯 INTRADAY (เทรดรอบสวิงรายวัน SMC Swing)\n"
-            "กฎเฉพาะทางสำหรับ INTRADAY:\n"
-            "1. เน้นรอบสวิงตามโครงสร้าง Institutional Order Block (OB), Fair Value Gap (FVG) และแนวรับ-ต้านหลายไทม์เฟรม M15/H1/H4\n"
-            "2. Stop Loss (SL): วางพ้นขอบโซนสวิงหลัก (Structural SL กว้างกว่า ประมาณ 3.5 - 7.0 USD หรือ 1.2 - 1.8 ATR)\n"
-            "3. Take Profit (TP): หวังผลตาม Liquidity Pools / Session High-Low / HTF Targets (R:R ตั้งแต่ 1.8 - 3.5x ขึ้นไป)\n"
-            "4. จุดเข้า (Entry): ต้องเป็นคำสั่งดักล่วงหน้า (order_type: BUY/SELL LIMIT, status: WAITING_PULLBACK) ที่โซนรับ-ต้านหลักล่วงหน้าเท่านั้น\n"
+            "โหมดวิเคราะห์: 🎯 INTRADAY SMC — เน้นรอบสวิงตาม OB/FVG และแนวรับ-ต้าน M15/H1/H4, SL พ้นโซน (1.2-1.8 ATR), TP ตาม Liquidity (R:R >= 1.6)"
         )
-        target_field_desc = '    "target": ตัวเลขราคา TP (ต้องสอดคล้องกับแนวรับ-ต้าน MTF/Liquidity และได้ R:R >= 1.6),\n'
+        target_field_desc = '    "target": ตัวเลขราคา TP (R:R >= 1.6),\n'
 
     user_prompt = (
         f"{style_prompt}\n"
-        "วิเคราะห์กราฟ XAUUSD จากข้อมูลแท่งเทียน 40 แท่งล่าสุด พฤติกรรมแท่งเทียนย้อนหลัง 60 แท่ง (historical_candle_behavior) "
-        "ความสอดคล้องและแนวรับ-ต้านจากหลายไทม์เฟรม M5, M15, H1, H4 (multi_timeframe_confluence) "
-        "โซน SMC ที่ยังไม่ถูกใช้งาน (Unmitigated OB, FVG) เส้น EMA 20/50/200 ค่า ATR(14) และผลจำลองกราฟจากสถิติจริง 15,000 เส้นทางด้านล่างนี้\n"
-        "กฎเหล็กสำคัญ:\n"
-        "1. ห้ามเมคตัวเลขหรือเร่งให้เปิดออเดอร์เด็ดขาด! อิงจากตัวเลขและสถิติจริงเท่านั้น หากโอกาสถึง TP ไม่เกิน 50% ให้สั่ง 'รอจังหวะ (WAIT)' ทันที\n"
-        "2. จุดเข้าต้องสอดคล้องกับโหมดการเทรดที่ระบุด้านบนอย่างเคร่งครัด\n"
-        "ให้คุณตัดสินใจแผนเทรดที่ดีที่สุดด้วยตัวเอง แล้วตอบกลับเป็น JSON เท่านั้นตามโครงสร้างนี้:\n"
+        "วิเคราะห์ข้อมูลกราฟและสถิติ Monte Carlo ด้านล่างเพื่อตัดสินใจเลือกแผนเข้าออเดอร์อัตโนมัติใน MT5 ที่แม่นยำที่สุด\n"
+        "ไม่ต้องเขียนบทความอธิบายยาว ให้ตอบกลับเป็น JSON กระชับเฉพาะพารามิเตอร์สำหรับยิงออเดอร์ตามโครงสร้างนี้เท่านั้น:\n"
         "{\n"
         '  "trade_decision": {\n'
         '    "side": "BUY หรือ SELL",\n'
         '    "status": "ACTIVE_IN_ZONE หรือ WAITING_PULLBACK",\n'
         '    "entry": ตัวเลขราคาจุดเข้า,\n'
-        '    "stop": ตัวเลขราคา SL (ต้องวางพ้นขอบโซนและปลอดภัยจาก ATR/Spread),\n'
+        '    "stop": ตัวเลขราคา SL,\n'
         + target_field_desc +
         '    "zone_low": ตัวเลขขอบล่างโซนเข้า,\n'
         '    "zone_high": ตัวเลขขอบบนโซนเข้า,\n'
-        '    "scenario_b_sweep_reentry": ตัวเลขจุดดักเข้าไม้สองหากโดนกวาด SL แรก,\n'
-        '    "scenario_c_invalidation": ตัวเลขราคาที่หากปิดแท่งทะลุต้องยกเลิกแผนทันที,\n'
+        '    "scenario_b_sweep_reentry": ตัวเลขจุดดักไม้แก้ (DCA) หากเกิด Liquidity Sweep,\n'
+        '    "scenario_c_invalidation": ตัวเลขจุดยกเลิกแผนหากโครงสร้างเสีย,\n'
         '    "confluence_score": ตัวเลข 0-100,\n'
-        '    "confluence_factors": ["ปัจจัยที่ 1", "ปัจจัยที่ 2", "ปัจจัยที่ 3"]\n'
+        '    "confluence_factors": ["ปัจจัยหลัก 1", "ปัจจัยหลัก 2"]\n'
         "  },\n"
-        '  "headline": "สรุปหัวข้อสัญญาณและเหตุผลหลัก 1 ประโยค",\n'
-        '  "confluence_summary": "อธิบายการวิเคราะห์กราฟ พฤติกรรมแท่งเทียนย้อนหลัง แนวรับ-ต้านหลายไทม์เฟรม (M5/M15/H1/H4) โซน SMC และความน่าจะเป็นจาก 15,000 เส้นทางอย่างละเอียด",\n'
-        '  "blind_spots": ["จุดบอดหรือความเสี่ยงข้อ 1", "จุดบอดข้อ 2"],\n'
-        '  "scenario_a_detail": "แผนการเข้าเทรดหลักใน MT5 และเงื่อนไขแท่งเทียนยืนยัน",\n'
-        '  "scenario_b_detail": "แผนรับมือหากเกิด Liquidity Sweep กวาดหางไปหาแนวรับ-ต้าน HTF ถัดไปก่อนวิ่งจริง",\n'
-        '  "scenario_c_detail": "จุด Invalidation ที่ต้องยกเลิกแผนทันที"\n'
+        '  "headline": "สรุปแผนเข้าออเดอร์สั้นๆ 1 บรรทัด"\n'
         "}\n\n"
-        "ข้อมูลกราฟทั้งหมด:\n"
-        + json.dumps(chart_package, ensure_ascii=False)
+        "ข้อมูลกราฟ:\n"
+        + json.dumps(chart_package, ensure_ascii=False, separators=(",", ":"))
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -285,7 +255,8 @@ def call_gemini_full_chart_analyst(
         "system_instruction": {"parts": [{"text": sys_prompt}]},
         "contents": [{"parts": [{"text": user_prompt}]}],
         "generationConfig": {
-            "temperature": 0.2,
+            "temperature": 0.15,
+            "maxOutputTokens": 450,
             "responseMimeType": "application/json",
         },
     }
@@ -558,9 +529,19 @@ def evaluate_chart_with_gemini_or_fallback(
     if not api_key:
         return smc["trade_setup"], None
 
+    base_setup = smc.get("trade_setup") or {}
+    min_conf = int(ai_cfg.get("auto_trigger_min_confluence") or 55)
+    if not force_call:
+        if news.get("in_news_blackout") or news.get("is_imminent_news"):
+            return base_setup, None
+        if int(base_setup.get("confluence_score") or 0) < min_conf:
+            return base_setup, None
+
     trading_style = str(smc.get("trading_style") or config.get("trading_style", "intraday")).lower()
+    setup_side = str(base_setup.get("side") or "BUY")
+    setup_entry_bucket = round(float(base_setup.get("entry") or structure.get("current_price") or 0.0), 0)
     cache_key = hashlib.sha256(
-        f"{structure['timeframe']}:{trading_style}:{structure['last_bar_time']}:{round(float(structure['current_price']), 0)}:{model}:{api_key[-6:]}".encode(
+        f"{structure['timeframe']}:{trading_style}:{structure['last_bar_time']}:{setup_side}:{setup_entry_bucket}:{model}:{api_key[-6:]}".encode(
             "utf-8"
         )
     ).hexdigest()[:20]

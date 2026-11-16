@@ -1138,6 +1138,18 @@ class OrderLifecycleManager:
         for idx, ord_item in enumerate(target_orders, 1):
             o_dict = dict(ord_item)
             o_dict["order_index"] = idx
+            purp = str(o_dict.get("purpose") or "INITIAL").upper()
+            if purp == "RECOVERY":
+                o_dict["purpose_badge_th"] = "🛡️ ไม้แก้ขาดทุน (Recovery / DCA)"
+                o_dict["purpose_desc_th"] = "ไม้แก้พอร์ตดึงทุนเฉลี่ยอัตโนมัติในโซนกลับตัวสำคัญ"
+            elif purp == "SCALE_IN":
+                o_dict["purpose_badge_th"] = "🚀 ไม้ทบเพิ่มกำไร (Scale-In)"
+                o_dict["purpose_desc_th"] = "ไม้ทบเพิ่มกำไรตามเทรนด์เมื่อออเดอร์หลักบวกและโมเมนตัมขยายตัว"
+            else:
+                o_dict["purpose"] = "INITIAL"
+                o_dict["purpose_badge_th"] = "🎯 ไม้ทำกำไรหลัก (Initial Entry)"
+                o_dict["purpose_desc_th"] = "ไม้เปิดทำกำไรหลักตามสัญญาณวิเคราะห์อัตโนมัติ"
+
             lot = float(o_dict.get("lot_size") or 0.10)
             risk_usd = max(1.0, float(o_dict.get("actual_risk_usd") or 50.0))
             entry_p = float(o_dict.get("filled_price") or o_dict.get("entry_mt5") or cp)
@@ -1168,6 +1180,9 @@ class OrderLifecycleManager:
         out["total_orders_count"] = len(orders_data)
         out["filled_orders_count"] = sum(1 for o in orders_data if o.get("status") == "FILLED")
         out["pending_orders_count"] = sum(1 for o in orders_data if o.get("status") == "PENDING")
+        out["initial_orders_count"] = sum(1 for o in orders_data if str(o.get("purpose") or "INITIAL").upper() == "INITIAL")
+        out["recovery_orders_count"] = sum(1 for o in orders_data if str(o.get("purpose") or "").upper() == "RECOVERY")
+        out["scale_in_orders_count"] = sum(1 for o in orders_data if str(o.get("purpose") or "").upper() == "SCALE_IN")
         out["total_lot_size"] = round(total_lot, 2) if total_lot > 0 else float(primary.get("lot_size") or 0.10)
         out["total_floating_pnl_usd"] = round(total_pnl_usd, 2)
         out["total_floating_pnl_r"] = round(total_pnl_r, 2)
