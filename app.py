@@ -74,15 +74,21 @@ def save_config(cfg: Dict[str, Any]) -> None:
 class TradingAssistantCore:
     """Coordinates MarketDataHub, Deterministic Engines, and Automated AI Advisor."""
 
-    def __init__(self, symbol: str = "XAUUSD") -> None:
+    def __init__(self, symbol: str = "XAUUSD", persistence_path: Optional[str] = None) -> None:
         self.symbol = (symbol or "XAUUSD").upper()
         self.config = load_config()
         self.hub = MarketDataHub()
         self.hub.preferred_symbol = self.symbol
         is_btc = "BTC" in self.symbol
-        persistence_file = "active_order_btc.json" if is_btc else "active_order.json"
-        persistence_path = os.path.join(ROOT_DIR, persistence_file)
-        self.order_manager = OrderLifecycleManager(persistence_path=persistence_path)
+        if persistence_path:
+            p_path = persistence_path
+        elif os.environ.get("K79_TEST_MODE") == "1":
+            import tempfile
+            p_path = os.path.join(tempfile.gettempdir(), f"k79_test_{self.symbol}_{os.getpid()}_{int(time.time()*1000)}.json")
+        else:
+            persistence_file = "active_order_btc.json" if is_btc else "active_order.json"
+            p_path = os.path.join(ROOT_DIR, persistence_file)
+        self.order_manager = OrderLifecycleManager(persistence_path=p_path)
         self.ea_bridge = EABridgeManager(CONFIG_PATH)
         self.timeframe = str(self.config.get("default_timeframe") or "M5").upper()
         self.trading_style = str(self.config.get("trading_style") or "intraday").lower()

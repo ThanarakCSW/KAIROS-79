@@ -1,8 +1,11 @@
 import asyncio
 import base64
 import json
+import os
 import struct
 import unittest
+
+os.environ["K79_TEST_MODE"] = "1"
 
 from advisor.ai_evaluator import _validate_gemini_trade_decision
 from app import AssistantServer, TradingAssistantCore

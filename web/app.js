@@ -446,7 +446,7 @@
         const rr = slDist > 0 && tpDist > 0 ? (tpDist / slDist).toFixed(2) : Number(o.reward_risk || 0).toFixed(2);
         const pnlClass = o.floating_pnl_usd > 0 ? "pnl-pos" : o.floating_pnl_usd < 0 ? "pnl-neg" : "";
         const signR = o.floating_pnl_r > 0 ? "+" : "";
-        const ticketLabel = o.broker_ticket ? `Ticket #${o.broker_ticket}` : "กำลังซิงค์ Ticket MT5";
+        const ticketLabel = o.broker_ticket ? `Ticket #${o.broker_ticket}` : "รอการเปิดใน MT5";
 
         const slNote = o.sl_moved_breakeven
           ? "🛡️ เลื่อนบังทุนแล้ว"
@@ -459,6 +459,10 @@
             ? `🤖 เหตุผลที่เปิดไม้นี้: ${o.trigger_reason}`
             : o.management_note_th || role.desc;
 
+        const execStatusLabel = o.broker_ticket
+          ? (isFilled ? "🚀 กำลังทำงานใน MT5 (FILLED)" : "⏳ ตั้งดักรอเกี่ยวใน MT5 (PENDING LIMIT)")
+          : "⏳ แผนวิเคราะห์เบื้องหลัง (รอส่งคำสั่งเข้า MT5)";
+
         return `
           <div class="order-detail-card ${isBuy ? "card-buy" : "card-sell"} ${role.cssClass}">
             <div class="order-card-header">
@@ -469,8 +473,8 @@
                 <span class="order-time-tag">🕒 ${o.created_bkk || "-"}</span>
               </div>
               <div class="order-head-right">
-                <span class="order-exec-status ${isFilled ? "st-filled" : "st-pending"}">
-                  ${isFilled ? "🚀 เปิดอยู่ใน MT5 (FILLED)" : "⏳ ตั้งดักรอเกี่ยวใน MT5 (PENDING LIMIT)"}
+                <span class="order-exec-status ${o.broker_ticket ? (isFilled ? "st-filled" : "st-pending") : "st-pending"}">
+                  ${execStatusLabel}
                 </span>
               </div>
             </div>
@@ -536,7 +540,8 @@
         (o) =>
           !String(o.order_id || "").startsWith("test_") &&
           o.close_reason !== "TEST_CLEANUP" &&
-          o.close_reason !== "SYSTEM_INIT"
+          o.close_reason !== "SYSTEM_INIT" &&
+          Boolean(o.broker_ticket || o.broker_deal_id)
       )
       .slice()
       .reverse();

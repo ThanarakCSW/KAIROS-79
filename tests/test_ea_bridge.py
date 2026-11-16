@@ -6,6 +6,8 @@ import json
 import os
 import unittest
 
+os.environ["K79_TEST_MODE"] = "1"
+
 from engine.ea_bridge import EABridgeManager
 from app import TradingAssistantCore
 
