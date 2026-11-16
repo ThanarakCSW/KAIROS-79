@@ -204,6 +204,32 @@ class TestRiskGate(unittest.TestCase):
         self.assertEqual(res_rej["verdict"], "REJECT")
         self.assertTrue(any("Spread สูงเกินเกณฑ์สำหรับการเทรดสั้นความถี่สูง" in r for r in res_rej["reject_reasons"]))
 
+    def test_robot_scalper_risk_gate(self):
+        """Verify robot_scalper style permits tight R:R (0.64) and tags is_robot_scalper=True."""
+        robot_setup = {
+            "symbol": "XAUUSD",
+            "side": "BUY",
+            "status": "ACTIVE_IN_ZONE",
+            "entry": 2650.00,
+            "stop": 2647.20,  # 2.80 USD hard stop
+            "target": 2651.80,  # 1.80 USD target (R:R = 1.80 / 2.80 = 0.64)
+            "sl_atr_ratio": 0.40,
+            "trading_style": "robot_scalper",
+        }
+        robot_sim = {
+            "expected_value_r": 0.20,
+            "probabilities": {
+                "win_pct": 65.0,
+                "stop_pct": 32.0,
+                "sweep_risk_pct": 3.0,
+            },
+        }
+        cfg_robot = dict(self.config, broker_spread_points=18.0, point_size=0.01)
+        res = evaluate_risk_and_size(robot_setup, robot_sim, self.news_clear, cfg_robot)
+        self.assertEqual(res["verdict"], "PASS")
+        self.assertEqual(res["reward_risk"], 0.64)
+        self.assertTrue(res["is_robot_scalper"])
+
 
 if __name__ == "__main__":
     unittest.main()

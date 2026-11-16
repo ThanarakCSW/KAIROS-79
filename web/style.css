@@ -2226,6 +2226,56 @@ body {
   border-color: #818cf8;
 }
 
+.pill-robot-inactive {
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  color: #94a3b8;
+  font-weight: 700;
+  padding: 5px 13px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pill-robot-inactive:hover {
+  background: rgba(51, 65, 85, 0.85);
+  border-color: rgba(148, 163, 184, 0.45);
+  color: #cbd5e1;
+  transform: translateY(-1px);
+}
+
+.pill-robot-active {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.3), rgba(236, 72, 153, 0.25));
+  border: 1px solid rgba(216, 180, 254, 0.75);
+  color: #f0abfc;
+  font-weight: 800;
+  padding: 5px 13px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  box-shadow: 0 0 16px rgba(168, 85, 247, 0.35);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  animation: pulse-robot-glow 2.4s infinite alternate;
+}
+
+.pill-robot-active:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 22px rgba(216, 180, 254, 0.55);
+  border-color: #f472b6;
+}
+
+@keyframes pulse-robot-glow {
+  0% {
+    box-shadow: 0 0 12px rgba(168, 85, 247, 0.25);
+  }
+  100% {
+    box-shadow: 0 0 20px rgba(236, 72, 153, 0.45);
+  }
+}
+
 .styled-select {
   background: #111827;
   color: #f3f4f6;

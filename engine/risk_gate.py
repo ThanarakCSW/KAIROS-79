@@ -73,13 +73,18 @@ def evaluate_risk_and_size(
     lot_step = float(config.get("lot_step") or 0.01)
 
     trading_style = str(trade_setup.get("trading_style") or config.get("trading_style") or "intraday").lower()
+    is_robot = trading_style == "robot_scalper" or bool((config.get("robot_scalper") or {}).get("enabled"))
     is_micro = trading_style == "micro_scalp"
-    is_scalp = trading_style in ("scalping", "micro_scalp")
+    is_scalp = trading_style in ("scalping", "micro_scalp", "robot_scalper")
     min_rr = float(config.get("min_reward_risk") or 1.5)
-    if is_scalp:
+    if is_robot:
+        min_rr = min(min_rr, 0.60)
+    elif is_scalp:
         min_rr = min(min_rr, 1.15)
     min_sl_atr = float(config.get("min_sl_atr_mult") or 0.8)
-    if is_micro:
+    if is_robot:
+        min_sl_atr = min(min_sl_atr, 0.35)
+    elif is_micro:
         min_sl_atr = min(min_sl_atr, 0.50)
     elif is_scalp:
         min_sl_atr = min(min_sl_atr, 0.65)
@@ -243,7 +248,7 @@ def evaluate_risk_and_size(
 
     # 7. Spread vs SL check, Max Spread cap & Rollover danger
     max_spread_usd = float(config.get("max_spread_usd") or 0.0)
-    if is_micro:
+    if is_robot or is_micro:
         micro_spread_cap = 15.0 if is_crypto else 0.30
         if spread_usd > micro_spread_cap:
             reject_reasons.append(
@@ -353,6 +358,7 @@ def evaluate_risk_and_size(
         "contract_size": contract_size,
         "point_size": point_size,
         "trading_style": trading_style,
+        "is_robot_scalper": is_robot,
         "side": side,
         "execution_type": "MARKET" if is_market_entry else "LIMIT",
         "order_type": trade_setup.get("order_type", f"{side} NOW (Market)" if is_market_entry else f"{side} LIMIT"),

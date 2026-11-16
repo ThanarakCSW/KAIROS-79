@@ -3,7 +3,7 @@ import os
 import unittest
 
 from engine.data_feed import resample_bars
-from engine.smc import analyze_smc
+from engine.smc import analyze_smc, build_trade_setup
 from engine.structure import analyze_multi_timeframe, analyze_structure, atr_series, ema_series
 
 FIXTURE_PATH = os.path.join(
@@ -384,6 +384,36 @@ class TestStructureAndSMC(unittest.TestCase):
         self.assertIn("Micro-Scalp", setup["style_label_th"])
         self.assertGreaterEqual(setup["reward_risk"], 1.15)
         self.assertLessEqual(setup["risk_usd"], 1.8 * 0.75 + 0.1)
+
+    def test_robot_harvester_setup_generation(self):
+        """Verify build_trade_setup generates ROBOT_HARVESTER archetype with tight $1.80 TP and $2.80 SL."""
+        mock_structure_robot = {
+            "current_price": 2650.00,
+            "atr14": 2.0,
+            "trend": {"bias": "BULLISH", "regime": "RANGING", "ema_alignment": "BULLISH"},
+            "swings": {"all": []},
+            "institutional_levels": {},
+            "scalping": {},
+        }
+        setup = build_trade_setup(
+            structure_res=mock_structure_robot,
+            obs=[],
+            fvgs=[],
+            breaks=[],
+            sweeps=[],
+            liquidity_pools=[],
+            spread_usd=0.25,
+            trading_style="robot_scalper",
+            symbol="XAUUSD",
+        )
+        self.assertEqual(setup["trading_style"], "robot_scalper")
+        self.assertEqual(setup["setup_archetype"], "ROBOT_HARVESTER")
+        self.assertIn("Robot Harvester", setup["style_label_th"])
+        self.assertEqual(setup["reward_usd"], 1.80)
+        self.assertEqual(setup["risk_usd"], 2.80)
+        self.assertEqual(setup["target"], 2651.80)
+        self.assertEqual(setup["stop"], 2647.20)
+        self.assertEqual(setup["tp1"], 2651.20)
 
 
 if __name__ == "__main__":

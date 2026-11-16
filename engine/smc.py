@@ -466,8 +466,9 @@ def build_trade_setup(
     sr_zones = list(structure_res.get("sr_zones", []))
     htf_zones = list((mtf_res or {}).get("htf_sr_zones") or [])
     scalp_info = structure_res.get("scalping") or {}
+    is_robot = str(trading_style).lower() == "robot_scalper"
     is_micro = str(trading_style).lower() == "micro_scalp"
-    is_scalp = str(trading_style).lower() in ("scalping", "micro_scalp")
+    is_scalp = str(trading_style).lower() in ("scalping", "micro_scalp", "robot_scalper")
 
     # Prioritize 100% fresh unmitigated Order Blocks ahead of price (never recommend a zone that already passed)
     max_ob_dist = atr_val * (1.2 if is_scalp else 2.2)
@@ -760,7 +761,7 @@ def build_trade_setup(
     )
     has_scalp_trigger = is_scalp and (int(scalp_info.get("scalp_score") or 0) >= 55 or is_micro)
 
-    should_market_enter = is_in_zone or has_recent_sweep or has_scalp_trigger or is_micro
+    should_market_enter = is_in_zone or has_recent_sweep or has_scalp_trigger or is_micro or is_robot
     if should_market_enter:
         execution_type = "MARKET"
         order_type = f"{side} NOW (Market)"
@@ -980,6 +981,31 @@ def build_trade_setup(
         invalidation_price = r2(stop + atr_val * 0.45)
 
     reward = abs(target - entry)
+
+    if is_robot:
+        is_btc_sym = "BTC" in str(symbol).upper()
+        robot_tp_dist = 100.0 if is_btc_sym else 1.80
+        robot_sl_dist = 180.0 if is_btc_sym else 2.80
+        robot_tp1_dist = 60.0 if is_btc_sym else 1.20
+        if side == "BUY":
+            stop = r2(entry - robot_sl_dist)
+            target = r2(entry + robot_tp_dist)
+            tp1 = r2(entry + robot_tp1_dist)
+            risk = max(0.35, entry - stop)
+            sweep_zone_price = r2(stop - atr_val * 0.7)
+            invalidation_price = r2(stop - atr_val * 0.45)
+        else:
+            stop = r2(entry + robot_sl_dist + spread_usd)
+            target = r2(entry - robot_tp_dist)
+            tp1 = r2(entry - robot_tp1_dist)
+            risk = max(0.35, stop - entry)
+            sweep_zone_price = r2(stop + atr_val * 0.7)
+            invalidation_price = r2(stop + atr_val * 0.45)
+        reward = abs(target - entry)
+        confluence_score = max(confluence_score, 78)
+        confluence_factors.append("🤖 สัญญาณหุ่นยนต์เก็บกำไรสั้นความถี่สูง (Robot Range Harvester)")
+        confluence_factors.append(f"🎯 เป้าหมายสั้น ${robot_tp_dist:.2f} | Hard Stop ${robot_sl_dist:.2f}")
+
     rr = round(reward / max(0.01, risk), 2)
     dist_to_entry = abs(current_price - entry)
     is_advance_entry = True if execution_type == "MARKET" else ((entry <= current_price) if side == "BUY" else (entry >= current_price))
@@ -988,7 +1014,15 @@ def build_trade_setup(
 
     sym_u = (symbol or "XAUUSD").upper()
     is_btc = "BTC" in sym_u
-    if is_micro:
+    if is_robot:
+        style_label = (
+            "🤖 โหมดหุ่นยนต์เก็บกำไรถี่ (BTC Robot Harvester)"
+            if is_btc
+            else "🤖 โหมดหุ่นยนต์เก็บกำไรถี่ (Gold Robot Harvester)"
+        )
+        setup_archetype = "ROBOT_HARVESTER"
+        archetype_label_th = "🤖 Robot Range Harvester (เก็บกำไรถี่)"
+    elif is_micro:
         style_label = (
             "⚡ โหมดเทรดสั้นความถี่สูง (BTC Micro-Scalp)"
             if is_btc
@@ -1009,7 +1043,7 @@ def build_trade_setup(
 
     return {
         "symbol": sym_u,
-        "trading_style": "micro_scalp" if is_micro else ("scalping" if is_scalp else "intraday"),
+        "trading_style": "robot_scalper" if is_robot else ("micro_scalp" if is_micro else ("scalping" if is_scalp else "intraday")),
         "style_label_th": style_label,
         "setup_archetype": setup_archetype,
         "archetype_label_th": archetype_label_th,

@@ -641,9 +641,30 @@
       } else if (style === "scalping") {
         modeBadge.textContent = "⚡ FAST SCALP (M5)";
         modeBadge.className = "meta-pill pill-mode-scalp";
+      } else if (style === "robot_scalper") {
+        modeBadge.textContent = "🤖 ROBOT HARVESTER";
+        modeBadge.className = "meta-pill pill-robot-active";
       } else {
         modeBadge.textContent = "🎯 INTRADAY SMC";
         modeBadge.className = "meta-pill pill-mode-intraday";
+      }
+    }
+
+    // Render Robot Scalper mode toggle button
+    const robotBtn = el("btnToggleRobot");
+    const isRobotOn = Boolean(
+      (state.robot_scalper && state.robot_scalper.enabled) ||
+      (state.config && state.config.robot_scalper && state.config.robot_scalper.enabled)
+    );
+    if (robotBtn) {
+      if (isRobotOn) {
+        robotBtn.textContent = "🤖 ROBOT HARVESTER: ON";
+        robotBtn.className = "meta-pill pill-robot-active";
+        robotBtn.title = "โหมดหุ่นยนต์เปิดอยู่: เน้นออกไม้ถี่ เก็บกำไรสั้นต่อเนื่อง พร้อมระบบตัดวงจร Basket Drawdown 2.5% (คลิกเพื่อปิด)";
+      } else {
+        robotBtn.textContent = "🤖 ROBOT MODE: OFF";
+        robotBtn.className = "meta-pill pill-robot-inactive";
+        robotBtn.title = "คลิกเพื่อเปิดโหมดหุ่นยนต์ (Robot Scalper): เน้นออกออเดอร์ถี่ เก็บกำไรสั้นต่อเนื่อง พร้อมระบบตัดวงจรขาดทุน 2.5%";
       }
     }
 
@@ -774,6 +795,35 @@
           showToast(`⚡ สลับโหมดการเทรดเป็น: ${nextStyle === "micro_scalp" ? "สเกลป์ความเร็วสูง (Micro-Scalp)" : "เทรดรอบปกติ (Intraday SMC)"}`);
         } catch (_) {
           showToast("❌ สลับโหมดไม่สำเร็จ");
+        }
+      });
+    }
+
+    const toggleRobotBtn = el("btnToggleRobot");
+    if (toggleRobotBtn) {
+      toggleRobotBtn.addEventListener("click", async () => {
+        const isRobotCurrentlyOn = Boolean(
+          (currentState?.robot_scalper && currentState.robot_scalper.enabled) ||
+          (currentState?.config && currentState.config.robot_scalper && currentState.config.robot_scalper.enabled)
+        );
+        const nextRobotVal = !isRobotCurrentlyOn;
+        try {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: "toggle_robot", enabled: nextRobotVal, symbol: CURRENT_SYMBOL }));
+          } else {
+            await fetch("/api/robot/toggle", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ symbol: CURRENT_SYMBOL, enabled: nextRobotVal }),
+            });
+          }
+          if (nextRobotVal) {
+            showToast("🤖 เปิดโหมดหุ่นยนต์เก็บกำไรถี่ (Robot Scalper ON) • Basket SL 2.5%");
+          } else {
+            showToast("🛑 ปิดโหมดหุ่นยนต์แล้ว (Robot Scalper OFF) • คืนสู่โหมดปกติ");
+          }
+        } catch (_) {
+          showToast("❌ สลับสถานะโหมดหุ่นยนต์ไม่สำเร็จ");
         }
       });
     }

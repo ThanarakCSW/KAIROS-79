@@ -26,6 +26,19 @@
     "max_spread_usd": 0.30,
     "min_reward_risk": 1.15
   },
+  "robot_scalper": {
+    "enabled": false,
+    "target_tp_usd": 1.80,
+    "hard_sl_usd": 2.80,
+    "target_tp_usd_btc": 100.0,
+    "hard_sl_usd_btc": 180.0,
+    "max_concurrent_orders": 3,
+    "min_spacing_usd": 1.50,
+    "min_spacing_usd_btc": 100.0,
+    "max_basket_drawdown_pct": 2.5,
+    "fast_breakeven_trigger_r": 0.40,
+    "scan_interval_seconds": 4
+  },
   "min_win_prob_pct": 50.0,
   "simulation_replays": 35000,
   "simulation_bars_ahead": 36,

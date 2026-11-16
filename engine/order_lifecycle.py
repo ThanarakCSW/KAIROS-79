@@ -180,6 +180,7 @@ class OrderLifecycleManager:
             "status": initial_status,
             "timeframe": timeframe,
             "trading_style": trading_style,
+            "is_robot_scalper": bool(trading_style == "robot_scalper" or risk_ticket.get("is_robot_scalper")),
             "setup_archetype": setup.get("setup_archetype") or risk_ticket.get("setup_archetype") or "ORDER_BLOCK_PULLBACK",
             "archetype_label_th": setup.get("archetype_label_th") or risk_ticket.get("archetype_label_th") or "🏛️ SMC Order Block Pullback",
             "entry_mt5": entry_mt5,
@@ -233,8 +234,6 @@ class OrderLifecycleManager:
                 else f"🔔 สัญญาณตั้งดักล่วงหน้า ({sym}): {side} LIMIT @ {entry_mt5} (SL {stop_mt5} | TP {target_mt5})"
             ),
         }
-        self.save_to_disk()
-        return order
         self.save_to_disk()
         return order
 
@@ -302,6 +301,7 @@ class OrderLifecycleManager:
             "status": initial_status,
             "timeframe": primary.get("timeframe", "M5"),
             "trading_style": primary.get("trading_style", "intraday"),
+            "is_robot_scalper": bool(primary.get("is_robot_scalper", False)),
             "entry_mt5": actual_entry,
             "stop_mt5": sl,
             "initial_stop_mt5": sl,
@@ -619,6 +619,91 @@ class OrderLifecycleManager:
 
         return None
 
+    def check_robot_basket_drawdown(
+        self,
+        current_price: float,
+        account_balance: float,
+        config: Optional[Dict[str, Any]] = None,
+        symbol: str = "XAUUSD",
+    ) -> Optional[Dict[str, Any]]:
+        """Evaluate total floating drawdown of active robot scalper orders.
+        If total drawdown exceeds max_basket_drawdown_pct (e.g. 2.5% of account balance),
+        automatically close all robot orders as an emergency circuit breaker to protect capital."""
+        cfg = (config or {}).get("robot_scalper") or {}
+        max_basket_dd_pct = float(cfg.get("max_basket_drawdown_pct") or 2.5)
+        if max_basket_dd_pct <= 0 or account_balance <= 0:
+            return None
+
+        sym_u = (symbol or "XAUUSD").upper()
+        is_btc = "BTC" in sym_u
+        def_contract = 1.0 if is_btc else 100.0
+
+        robot_orders = [
+            o
+            for o in self.active_orders
+            if o.get("status") == "FILLED"
+            and (str(o.get("symbol") or "XAUUSD").upper() == sym_u)
+            and (
+                bool(o.get("is_robot_scalper"))
+                or str(o.get("trading_style") or "").lower() == "robot_scalper"
+                or bool(cfg.get("enabled", False))
+            )
+        ]
+
+        if not robot_orders:
+            return None
+
+        total_floating_usd = 0.0
+        for o in robot_orders:
+            side = o.get("side", "BUY")
+            o_ent = float(o.get("filled_price") or o.get("entry_mt5") or current_price)
+            o_lot = float(o.get("lot_size") or 0.01)
+            o_contract = float(o.get("contract_size") or def_contract)
+            delta = (current_price - o_ent) if side == "BUY" else (o_ent - current_price)
+            flt = delta * o_lot * o_contract
+            total_floating_usd += flt
+
+        if total_floating_usd < 0:
+            loss_pct = (abs(total_floating_usd) / account_balance) * 100.0
+            if loss_pct >= max_basket_dd_pct:
+                now_ts = int(time.time())
+                tickets_to_close = []
+                for o in robot_orders:
+                    o["status"] = "CLOSED_ROBOT_BASKET_CUT"
+                    o["closed_ts"] = now_ts
+                    o["close_price"] = current_price
+                    o["close_reason"] = "ROBOT_BASKET_DRAWDOWN_CUT"
+                    o["realized_pnl_usd"] = round(o.get("floating_pnl_usd") or 0.0, 2)
+                    o["management_note_th"] = (
+                        f"🛑 ตัดวงจร Basket Drawdown Kill-Switch ({loss_pct:.2f}% >= {max_basket_dd_pct:.1f}%) "
+                        f"ปิดทุกไม้อัตโนมัติเพื่อพิทักษ์เงินทุน (${total_floating_usd:+.2f})"
+                    )
+                    bt = o.get("broker_ticket")
+                    if bt and bt not in tickets_to_close:
+                        tickets_to_close.append(bt)
+                    self.order_history.append(dict(o))
+
+                self.active_orders = [o for o in self.active_orders if o not in robot_orders]
+                self._sync_primary()
+                self.save_to_disk()
+
+                ev = {
+                    "type": "ROBOT_BASKET_CUT",
+                    "symbol": sym_u,
+                    "loss_usd": round(total_floating_usd, 2),
+                    "loss_pct": round(loss_pct, 2),
+                    "max_allowed_pct": max_basket_dd_pct,
+                    "broker_tickets": tickets_to_close,
+                    "orders": [dict(o) for o in robot_orders],
+                    "message": (
+                        f"🛑 ตัดวงจร Robot Basket Kill-Switch ({loss_pct:.2f}% >= {max_basket_dd_pct:.1f}%): "
+                        f"ปิดออเดอร์หุ่นยนต์ทั้งหมดทันทีเพื่อรักษาเงินทุน (${total_floating_usd:+.2f})"
+                    ),
+                }
+                self.last_event = ev
+                return ev
+        return None
+
     def update_price_tick(
         self,
         current_price: float,
@@ -633,6 +718,17 @@ class OrderLifecycleManager:
         Returns the last significant state transition event if occurred."""
         if not self.has_active_order():
             return None
+
+        # Check Robot Basket Drawdown circuit breaker before normal evaluations
+        acc_bal = float((config or {}).get("account_balance") or 5000.0)
+        basket_cut = self.check_robot_basket_drawdown(
+            current_price=current_price,
+            account_balance=acc_bal,
+            config=config,
+            symbol=symbol,
+        )
+        if basket_cut:
+            return basket_cut
 
         bar_hi = high if high is not None else current_price
         bar_lo = low if low is not None else current_price
@@ -749,13 +845,19 @@ class OrderLifecycleManager:
                 order["highest_pnl_r"] = max(float(order.get("highest_pnl_r") or flt_r), flt_r)
                 order["lowest_pnl_r"] = min(float(order.get("lowest_pnl_r") or flt_r), flt_r)
 
-                # 0. Fast Dynamic Breakeven for Scalping / Micro-Scalp
+                # 0. Fast Dynamic Breakeven for Scalping / Micro-Scalp / Robot Scalper
                 is_scalp_order = str(order.get("trading_style") or "").lower() in ("scalping", "micro_scalp")
-                if is_scalp_order and flt_r >= 0.50 and not order.get("sl_moved_breakeven"):
+                is_robot_order = bool(order.get("is_robot_scalper")) or str(order.get("trading_style") or "").lower() == "robot_scalper"
+                rs_cfg = (config or {}).get("robot_scalper") or {}
+                be_thresh = float(rs_cfg.get("fast_breakeven_trigger_r") or 0.40) if is_robot_order else 0.50
+
+                if (is_scalp_order or is_robot_order) and flt_r >= be_thresh and not order.get("sl_moved_breakeven"):
                     order["sl_moved_breakeven"] = True
                     order["stop_mt5"] = be_sl
                     order["management_note_th"] = (
-                        f"⚡ สเกลป์เร็ว: กำไรถึง +{flt_r:.2f}R ดัน SL บังทุน ({be_sl}) ล็อคความปลอดภัยทันที"
+                        f"🤖 หุ่นยนต์เก็บสั้น: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl}) ล็อคความปลอดภัยทันที"
+                        if is_robot_order
+                        else f"⚡ สเกลป์เร็ว: กำไรถึง +{flt_r:.2f}R ดัน SL บังทุน ({be_sl}) ล็อคความปลอดภัยทันที"
                     )
                     last_event = {
                         "type": "BREAKEVEN_LOCKED",
@@ -764,7 +866,11 @@ class OrderLifecycleManager:
                         "be_sl": be_sl,
                         "broker_ticket": order.get("broker_ticket"),
                         "order": dict(order),
-                        "message": f"⚡ สเกลป์เร็ว: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl})",
+                        "message": (
+                            f"🤖 หุ่นยนต์เก็บสั้น: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl})"
+                            if is_robot_order
+                            else f"⚡ สเกลป์เร็ว: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl})"
+                        ),
                     }
 
                 # 0.5 Time-Decay Auto-Exit for Scalping / Micro-Scalp (Stale Position Guard)

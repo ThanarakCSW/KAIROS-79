@@ -92,10 +92,20 @@ class TradingAssistantCore:
         self.ea_bridge = EABridgeManager(CONFIG_PATH)
         self.timeframe = str(self.config.get("default_timeframe") or "M5").upper()
         self.trading_style = str(self.config.get("trading_style") or "intraday").lower()
-        if self.trading_style not in ("intraday", "scalping", "micro_scalp"):
+        if self.trading_style not in ("intraday", "scalping", "micro_scalp", "robot_scalper"):
             self.trading_style = "intraday"
         self.last_state: Optional[Dict[str, Any]] = None
         self.last_alert_fingerprint: Optional[str] = None
+
+    def toggle_robot_mode(self, enabled: Optional[bool] = None) -> bool:
+        rs_cfg = self.config.setdefault("robot_scalper", {})
+        if enabled is None:
+            new_val = not bool(rs_cfg.get("enabled", False))
+        else:
+            new_val = bool(enabled)
+        rs_cfg["enabled"] = new_val
+        save_config(self.config)
+        return new_val
 
     def compute_full_state(
         self,
@@ -106,9 +116,12 @@ class TradingAssistantCore:
     ) -> Dict[str, Any]:
         tf = (timeframe or self.timeframe).upper()
         self.timeframe = tf
-        if trading_style in ("intraday", "scalping", "micro_scalp"):
+        if trading_style in ("intraday", "scalping", "micro_scalp", "robot_scalper"):
             self.trading_style = trading_style
             self.config["trading_style"] = trading_style
+
+        is_robot = bool((self.config.get("robot_scalper") or {}).get("enabled", False))
+        effective_style = "robot_scalper" if is_robot else self.trading_style
 
         is_btc = "BTC" in self.symbol
         feed = self.hub.get_bars(tf, force_refresh=force_refresh, symbol=self.symbol)
@@ -144,12 +157,12 @@ class TradingAssistantCore:
             structure_res=structure,
             mtf_res=mtf,
             macro_res=macro,
-            trading_style=self.trading_style,
+            trading_style=effective_style,
             symbol=self.symbol,
         )
         replays_cnt = max(35000, int(self.config.get("simulation_replays") or 35000))
         self.config["simulation_replays"] = replays_cnt
-        bars_ahead_cnt = 14 if self.trading_style == "micro_scalp" else (18 if self.trading_style == "scalping" else int(self.config.get("simulation_bars_ahead") or 36))
+        bars_ahead_cnt = 10 if effective_style == "robot_scalper" else (14 if effective_style == "micro_scalp" else (18 if effective_style == "scalping" else int(self.config.get("simulation_bars_ahead") or 36)))
         sim_seed = int(self.config.get("simulation_seed") or 19)
         min_win_prob = float(self.config.get("min_win_prob_pct") or 50.0)
         self.config["min_win_prob_pct"] = min_win_prob
@@ -230,7 +243,7 @@ class TradingAssistantCore:
             symbol=self.symbol,
             contract_size=contract_size,
             broker_price_offset=0.0,
-            trading_style=self.trading_style,
+            trading_style=effective_style,
             min_win_prob_pct=min_win_prob,
             current_daily_loss_pct=float(ea_acc.get("daily_dd_pct") or 0.0),
             kill_switch_tripped=bool(ea_acc.get("kill_switch_tripped", False)),
@@ -398,7 +411,7 @@ class TradingAssistantCore:
                         smc_setup=smc["trade_setup"],
                         current_price=cur_p,
                         timeframe=tf,
-                        trading_style=self.trading_style,
+                        trading_style=effective_style,
                         symbol=self.symbol,
                     )
                 risk_ticket["active_order"] = self.order_manager.get_active_order_dict(cur_p)
@@ -568,6 +581,7 @@ class TradingAssistantCore:
             if order_event and order_event.get("type") in (
                 "ORDER_CLOSED_DISADVANTAGE",
                 "BUNDLE_CIRCUIT_BREAKER",
+                "ROBOT_BASKET_CUT",
                 "TRADE_CLOSED_SL",
                 "TRADE_CLOSED_TP2",
                 "TRADE_CLOSED_BREAKEVEN",
@@ -577,6 +591,9 @@ class TradingAssistantCore:
                 tickets_to_close = []
                 if order_event.get("broker_ticket"):
                     tickets_to_close.append(order_event.get("broker_ticket"))
+                for t in order_event.get("broker_tickets") or []:
+                    if t and t not in tickets_to_close:
+                        tickets_to_close.append(t)
                 if ord_obj.get("broker_ticket") and ord_obj.get("broker_ticket") not in tickets_to_close:
                     tickets_to_close.append(ord_obj.get("broker_ticket"))
                 for sub_o in ord_obj.get("orders") or []:
@@ -587,6 +604,11 @@ class TradingAssistantCore:
                     self.ea_bridge.enqueue_action(
                         action_type="CLOSE_ORDER",
                         payload={"ticket": int(t), "symbol": self.symbol},
+                    )
+                if order_event.get("type") == "ROBOT_BASKET_CUT" and not tickets_to_close:
+                    self.ea_bridge.enqueue_action(
+                        action_type="CLOSE_ALL",
+                        payload={"symbol": self.symbol, "magic": 797979},
                     )
 
         signal_tracker = evaluate_signal_performance(
@@ -655,7 +677,7 @@ class TradingAssistantCore:
                     structure_res=sym_struct,
                     mtf_res=sym_mtf,
                     macro_res=sym_macro,
-                    trading_style=self.trading_style,
+                    trading_style=effective_style,
                 )
                 sym_setup = sym_smc.get("trade_setup") or {}
 
@@ -715,7 +737,7 @@ class TradingAssistantCore:
                             smc_setup=sym_smc["trade_setup"],
                             current_price=sym_cur_p,
                             timeframe="M5",
-                            trading_style=self.trading_style,
+                            trading_style=effective_style,
                             symbol=sym,
                         )
                         sym_active_ord = self.order_manager.get_active_order_dict(sym_cur_p, symbol=sym)
@@ -824,6 +846,7 @@ class TradingAssistantCore:
             },
             "risk_ticket": risk_ticket,
             "ea_bridge": self.ea_bridge.get_status_dict(),
+            "robot_scalper": self.config.get("robot_scalper", {}),
             "cross_asset": {
                 "enabled": bool(cross_asset_cfg.get("enabled", False)),
                 "symbols": cross_asset_state,
@@ -837,6 +860,7 @@ class TradingAssistantCore:
                 "min_reward_risk": self.config.get("min_reward_risk", 1.5),
                 "broker_price_offset": offset,
                 "broker_spread_points": int(spread_pts),
+                "robot_scalper": self.config.get("robot_scalper", {}),
                 "cross_asset_enabled": bool(cross_asset_cfg.get("enabled", False)),
                 "has_gemini_key": bool(
                     (self.config.get("ai") or {}).get("api_key")
@@ -1303,8 +1327,9 @@ class AssistantServer:
                             symbol=sym_name,
                         )
 
-                # Periodic autonomous setup scan: evaluate setups every 6-16 seconds when auto trading is ON and no active order
-                scan_mod = 3 if core_inst.trading_style == "micro_scalp" else 8
+                # Periodic autonomous setup scan: evaluate setups every 4-16 seconds when auto trading is ON and no active order
+                is_robot_on = bool((core_inst.config.get("robot_scalper") or {}).get("enabled", False))
+                scan_mod = 2 if is_robot_on else (3 if core_inst.trading_style == "micro_scalp" else 8)
                 if core_inst.ea_bridge.auto_trading_enabled and not core_inst.order_manager.has_active_order() and loop_counter % scan_mod == 0:
                     try:
                         state = await asyncio.to_thread(core_inst.compute_full_state, None, False, False)
@@ -1690,6 +1715,11 @@ class AssistantServer:
             core.save_config()
             state = await asyncio.to_thread(core.compute_full_state)
             await self.broadcast(state, symbol=core.symbol)
+        elif action == "toggle_robot":
+            req_enable = cmd.get("enabled")
+            new_val = core.toggle_robot_mode(req_enable)
+            state = await asyncio.to_thread(core.compute_full_state)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "add_sub_order":
             cp = float(cmd.get("current_price") or core.hub.latest_spot.get("price") or 0.0)
             purpose = str(cmd.get("purpose") or "AUTO")
@@ -2007,6 +2037,31 @@ class AssistantServer:
                     "cross_asset": ca_cfg,
                 },
             )
+            return
+
+        if path == "/api/robot/toggle" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            req_enable = payload.get("enabled")
+            new_val = target_core.toggle_robot_mode(req_enable)
+            state = await asyncio.to_thread(target_core.compute_full_state)
+            await self.broadcast(state, symbol=target_core.symbol)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "robot_scalper_enabled": new_val,
+                    "robot_scalper": target_core.config.get("robot_scalper", {}),
+                },
+            )
+            return
+
+        if path == "/api/robot/status" and method == "GET":
+            sym = (query.get("symbol") or ["XAUUSD"])[0]
+            target_core = self.get_core(sym)
+            await self.send_http_json(writer, 200, target_core.config.get("robot_scalper", {}))
             return
 
         if path == "/api/ea/status" and method == "GET":

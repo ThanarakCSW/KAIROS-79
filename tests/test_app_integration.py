@@ -393,6 +393,64 @@ class TestAppIntegration(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_robot_toggle_api(self):
+        """Verify POST /api/robot/toggle turns Robot Mode ON/OFF and GET /api/robot/status reports status."""
+        async def _run():
+            srv = AssistantServer(host="127.0.0.1", port=0)
+            target_core = srv.get_core("XAUUSD")
+            target_core.config.setdefault("robot_scalper", {})["enabled"] = False
+
+            # 1. Toggle ON via POST /api/robot/toggle
+            req_body = json.dumps({"symbol": "XAUUSD", "enabled": True}).encode("utf-8")
+            h1 = (
+                "POST /api/robot/toggle HTTP/1.1\r\n"
+                "Host: localhost\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(req_body)}\r\n\r\n"
+            )
+            raw_req = h1.encode("ascii") + req_body
+            reader1 = asyncio.StreamReader()
+            reader1.feed_data(raw_req)
+            reader1.feed_eof()
+            writer1 = _MemoryWriter()
+            await srv.handle_client(reader1, writer1)
+
+            resp1 = json.loads(bytes(writer1.buffer).split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertEqual(resp1.get("status"), "ok")
+            self.assertTrue(resp1.get("robot_scalper_enabled"))
+            self.assertTrue(target_core.config.get("robot_scalper", {}).get("enabled"))
+
+            # 2. Check GET /api/robot/status
+            reader2 = asyncio.StreamReader()
+            reader2.feed_data(b"GET /api/robot/status?symbol=XAUUSD HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            reader2.feed_eof()
+            writer2 = _MemoryWriter()
+            await srv.handle_client(reader2, writer2)
+
+            resp2 = json.loads(bytes(writer2.buffer).split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertTrue(resp2.get("enabled"))
+
+            # 3. Toggle OFF
+            req_body3 = json.dumps({"symbol": "XAUUSD", "enabled": False}).encode("utf-8")
+            h3 = (
+                "POST /api/robot/toggle HTTP/1.1\r\n"
+                "Host: localhost\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(req_body3)}\r\n\r\n"
+            )
+            raw_req3 = h3.encode("ascii") + req_body3
+            reader3 = asyncio.StreamReader()
+            reader3.feed_data(raw_req3)
+            reader3.feed_eof()
+            writer3 = _MemoryWriter()
+            await srv.handle_client(reader3, writer3)
+
+            resp3 = json.loads(bytes(writer3.buffer).split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            self.assertFalse(resp3.get("robot_scalper_enabled"))
+            self.assertFalse(target_core.config.get("robot_scalper", {}).get("enabled"))
+
+        asyncio.run(_run())
+
 
 if __name__ == "__main__":
     unittest.main()
