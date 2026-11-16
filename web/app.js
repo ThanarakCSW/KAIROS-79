@@ -668,6 +668,24 @@
       }
     }
 
+    // Render Rapid Fire Demo test mode toggle button
+    const rapidBtn = el("btnToggleRapidFire");
+    const isRapidOn = Boolean(
+      (state.rapid_fire_test && state.rapid_fire_test.enabled) ||
+      (state.config && state.config.rapid_fire_test && state.config.rapid_fire_test.enabled)
+    );
+    if (rapidBtn) {
+      if (isRapidOn) {
+        rapidBtn.textContent = "🧪 RAPID-FIRE DEMO: ON";
+        rapidBtn.className = "meta-pill pill-rapid-active";
+        rapidBtn.title = "โหมดทดสอบยิงถี่เปิดอยู่: ยิงออเดอร์ทันทีไม่เลือกจังหวะ • กั้น SL $1.50 • เก็บ TP $0.80 • ล็อก 0.01 Lot (คลิกเพื่อปิด)";
+      } else {
+        rapidBtn.textContent = "🧪 RAPID-FIRE DEMO: OFF";
+        rapidBtn.className = "meta-pill pill-rapid-inactive";
+        rapidBtn.title = "คลิกเพื่อเปิดโหมดทดสอบยิงถี่ Demo (Rapid-Fire Stress Test): ยิงออเดอร์ทันทีไม่เลือกจังหวะ • กั้น SL $1.50 • เก็บ TP $0.80 • ล็อก 0.01 Lot สำหรับทดสอบระบบในบัญชี Demo";
+      }
+    }
+
     if (el("livePrice")) {
       el("livePrice").textContent = fmtPrice(st.current_price);
     }
@@ -824,6 +842,35 @@
           }
         } catch (_) {
           showToast("❌ สลับสถานะโหมดหุ่นยนต์ไม่สำเร็จ");
+        }
+      });
+    }
+
+    const toggleRapidBtn = el("btnToggleRapidFire");
+    if (toggleRapidBtn) {
+      toggleRapidBtn.addEventListener("click", async () => {
+        const isRapidCurrentlyOn = Boolean(
+          (currentState?.rapid_fire_test && currentState.rapid_fire_test.enabled) ||
+          (currentState?.config && currentState.config.rapid_fire_test && currentState.config.rapid_fire_test.enabled)
+        );
+        const nextRapidVal = !isRapidCurrentlyOn;
+        try {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: "toggle_rapid_fire", enabled: nextRapidVal, symbol: CURRENT_SYMBOL }));
+          } else {
+            await fetch("/api/rapid_fire/toggle", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ symbol: CURRENT_SYMBOL, enabled: nextRapidVal }),
+            });
+          }
+          if (nextRapidVal) {
+            showToast("🧪 เปิดโหมดทดสอบยิงถี่ Demo (Rapid-Fire ON) • ยิงออเดอร์ต่อเนื่อง • กั้น SL $1.50 / TP $0.80 • 0.01 Lot");
+          } else {
+            showToast("🛑 ปิดโหมดทดสอบยิงถี่ Demo แล้ว • คืนสู่โหมดปกติ");
+          }
+        } catch (_) {
+          showToast("❌ สลับสถานะโหมดทดสอบไม่สำเร็จ");
         }
       });
     }

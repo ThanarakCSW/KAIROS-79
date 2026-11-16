@@ -181,6 +181,7 @@ class OrderLifecycleManager:
             "timeframe": timeframe,
             "trading_style": trading_style,
             "is_robot_scalper": bool(trading_style == "robot_scalper" or risk_ticket.get("is_robot_scalper")),
+            "is_rapid_fire": bool(trading_style == "rapid_fire_test" or risk_ticket.get("is_rapid_fire")),
             "setup_archetype": setup.get("setup_archetype") or risk_ticket.get("setup_archetype") or "ORDER_BLOCK_PULLBACK",
             "archetype_label_th": setup.get("archetype_label_th") or risk_ticket.get("archetype_label_th") or "🏛️ SMC Order Block Pullback",
             "entry_mt5": entry_mt5,
@@ -280,8 +281,9 @@ class OrderLifecycleManager:
 
         sl = r2(stop_loss or primary.get("stop_mt5"))
         tp = r2(take_profit or primary.get("target_mt5"))
+        is_rapid_order = bool(primary.get("is_rapid_fire")) or str(primary.get("trading_style") or "").lower() == "rapid_fire_test"
         is_robot_order = bool(primary.get("is_robot_scalper")) or str(primary.get("trading_style") or "").lower() == "robot_scalper"
-        lot = 0.01 if is_robot_order else float(lot_size or primary.get("lot_size") or 0.10)
+        lot = 0.01 if (is_robot_order or is_rapid_order) else float(lot_size or primary.get("lot_size") or 0.10)
         actual_risk = max(1.0, float(primary.get("actual_risk_usd") or 50.0))
 
         sub_sym = str(primary.get("symbol") or "XAUUSD").upper()
@@ -303,6 +305,7 @@ class OrderLifecycleManager:
             "timeframe": primary.get("timeframe", "M5"),
             "trading_style": primary.get("trading_style", "intraday"),
             "is_robot_scalper": bool(primary.get("is_robot_scalper", False)),
+            "is_rapid_fire": bool(is_rapid_order),
             "entry_mt5": actual_entry,
             "stop_mt5": sl,
             "initial_stop_mt5": sl,
@@ -373,11 +376,17 @@ class OrderLifecycleManager:
 
         primary = self.active_orders[0]
         side = primary["side"]
+        is_rapid_order = bool(primary.get("is_rapid_fire")) or str(primary.get("trading_style") or "").lower() == "rapid_fire_test"
         is_robot_order = bool(primary.get("is_robot_scalper")) or str(primary.get("trading_style") or "").lower() == "robot_scalper"
+        rf_cfg = (config or {}).get("rapid_fire_test") or {}
         rs_cfg = (config or {}).get("robot_scalper") or {}
         is_btc = "BTC" in str(primary.get("symbol", "")).upper()
 
-        if is_robot_order and rs_cfg:
+        if is_rapid_order and rf_cfg:
+            max_orders = int(rf_cfg.get("max_concurrent_orders") or 10)
+            min_spacing = float(rf_cfg.get("min_spacing_usd_btc" if is_btc else "min_spacing_usd") or (15.0 if is_btc else 0.30))
+            cooldown = int(rf_cfg.get("cooldown_seconds") or 3)
+        elif is_robot_order and rs_cfg:
             max_orders = int(rs_cfg.get("max_concurrent_orders") or 5)
             min_spacing = float(rs_cfg.get("min_spacing_usd_btc" if is_btc else "min_spacing_usd") or (80.0 if is_btc else 1.50))
             cooldown = 10
@@ -533,8 +542,11 @@ class OrderLifecycleManager:
                     elif side == "SELL" and (bar_hi - max(current_price, bar_lo)) / candle_rng >= 0.40:
                         trigger_reason = "เกิดไส้เทียนบนปฏิเสธราคา (Wick Rejection)"
 
+                if not trigger_reason and is_rapid_order:
+                    trigger_reason = f"🧪 ยิงไม้แก้ต่อเนื่อง Demo ({min_spacing:.2f} USD Spacing)"
+
                 if trigger_reason:
-                    lot = 0.01 if is_robot_order else float(primary.get("lot_size") or 0.10)
+                    lot = 0.01 if (is_robot_order or is_rapid_order) else float(primary.get("lot_size") or 0.10)
                     sub = self.add_sub_order(
                         purpose="RECOVERY",
                         execution_type="MARKET",
@@ -543,7 +555,8 @@ class OrderLifecycleManager:
                     )
                     if sub:
                         sub["trigger_reason"] = trigger_reason
-                        sub["management_note_th"] = f"🤖 AI เปิดไม้แก้ (DCA) อัตโนมัติ @ {current_price:.2f} — {trigger_reason}"
+                        label_mode = "🧪 ยิงไม้แก้ Demo" if is_rapid_order else "🤖 AI เปิดไม้แก้ (DCA)"
+                        sub["management_note_th"] = f"{label_mode} @ {current_price:.2f} — {trigger_reason}"
                         self.last_order_add_ts = now_ts
                         self.last_event = {
                             "type": "AUTO_ORDER_ADDED",
@@ -561,7 +574,7 @@ class OrderLifecycleManager:
         # ---------------- 2. Scale-in Opportunity (ทำกำไรเพิ่ม) ----------------
         if cfg.get("scale_in_enabled", True):
             primary_flt_r = float(primary.get("floating_pnl_r") or 0.0)
-            in_profit = primary_flt_r >= 0.60 or primary.get("tp1_hit") or primary.get("sl_moved_breakeven")
+            in_profit = (primary_flt_r >= 0.15) if is_rapid_order else (primary_flt_r >= 0.60 or primary.get("tp1_hit") or primary.get("sl_moved_breakeven"))
 
             aligned_direction = False
             if side == "BUY" and current_price >= (primary_entry + min_spacing):
@@ -571,14 +584,16 @@ class OrderLifecycleManager:
 
             if in_profit and aligned_direction:
                 trend_bias = (st.get("trend") or {}).get("bias")
-                is_trend_aligned = (side == "BUY" and trend_bias == "BULLISH") or (side == "SELL" and trend_bias == "BEARISH")
+                is_trend_aligned = True if is_rapid_order else ((side == "BUY" and trend_bias == "BULLISH") or (side == "SELL" and trend_bias == "BEARISH"))
 
                 trigger_reason = None
                 ema_info = st.get("ema") or {}
                 ema20 = float(ema_info.get("ema20") or 0.0)
 
                 if is_trend_aligned:
-                    if side == "BUY" and ema20 > 0 and current_price >= ema20:
+                    if is_rapid_order:
+                        trigger_reason = f"🧪 ยิงไม้ทำกำไรต่อเนื่อง Demo ({min_spacing:.2f} USD Spacing)"
+                    elif side == "BUY" and ema20 > 0 and current_price >= ema20:
                         trigger_reason = "เทรนด์แข็งแกร่ง ยืนเหนือ EMA20 พร้อมขยายกำไร"
                     elif side == "SELL" and ema20 > 0 and current_price <= ema20:
                         trigger_reason = "เทรนด์แข็งแกร่ง อยู่ใต้ EMA20 พร้อมขยายกำไร"
@@ -604,7 +619,7 @@ class OrderLifecycleManager:
                             break
 
                 if trigger_reason:
-                    lot = 0.01 if is_robot_order else float(primary.get("lot_size") or 0.10)
+                    lot = 0.01 if (is_robot_order or is_rapid_order) else float(primary.get("lot_size") or 0.10)
                     sub = self.add_sub_order(
                         purpose="SCALE_IN",
                         execution_type="MARKET",
@@ -613,7 +628,8 @@ class OrderLifecycleManager:
                     )
                     if sub:
                         sub["trigger_reason"] = trigger_reason
-                        sub["management_note_th"] = f"🤖 AI เปิดไม้ทำกำไร (Scale) อัตโนมัติ @ {current_price:.2f} — {trigger_reason}"
+                        label_mode = "🧪 ยิงไม้ทำกำไร Demo" if is_rapid_order else "🤖 AI เปิดไม้ทำกำไร (Scale)"
+                        sub["management_note_th"] = f"{label_mode} @ {current_price:.2f} — {trigger_reason}"
                         self.last_order_add_ts = now_ts
                         self.last_event = {
                             "type": "AUTO_ORDER_ADDED",

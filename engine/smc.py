@@ -462,6 +462,69 @@ def build_trade_setup(
     """Build a deterministic Trade Plan (BUY or SELL) for either 'intraday' or 'scalping' mode."""
     current_price = float(structure_res["current_price"])
     atr_val = max(0.8, float(structure_res["atr14"] or 2.0))
+
+    is_rapid = str(trading_style).lower() == "rapid_fire_test"
+    if is_rapid:
+        is_btc_sym = "BTC" in str(symbol).upper()
+        # Direction: follow instantaneous trend direction or default to BUY
+        tr_dir = str(structure_res.get("trend", {}).get("direction") or "BULLISH").upper()
+        side = "SELL" if "BEAR" in tr_dir else "BUY"
+        entry = current_price
+        target_dist = 30.0 if is_btc_sym else 0.80
+        sl_dist = 60.0 if is_btc_sym else 1.50
+        tp1_dist = 15.0 if is_btc_sym else 0.40
+
+        if side == "BUY":
+            stop = r2(entry - sl_dist)
+            target = r2(entry + target_dist)
+            tp1 = r2(entry + tp1_dist)
+            risk = sl_dist
+        else:
+            stop = r2(entry + sl_dist + spread_usd)
+            target = r2(entry - target_dist)
+            tp1 = r2(entry - tp1_dist)
+            risk = sl_dist + spread_usd
+
+        reward = target_dist
+        rr = round(reward / max(0.01, risk), 2)
+        sym_u = (symbol or "XAUUSD").upper()
+        return {
+            "symbol": sym_u,
+            "trading_style": "rapid_fire_test",
+            "style_label_th": "🧪 โหมดทดสอบยิงถี่ Demo (Rapid-Fire Stress Test)",
+            "setup_archetype": "DEMO_RAPID_FIRE",
+            "archetype_label_th": "🧪 Rapid-Fire Demo Harvester (ยิงถี่ไม่เลือกจังหวะ)",
+            "available_setups": [],
+            "side": side,
+            "execution_type": "MARKET",
+            "order_type": f"{side} NOW (Market)",
+            "is_advance_entry": True,
+            "distance_to_entry_usd": 0.0,
+            "current_price": current_price,
+            "bias": "BULLISH" if side == "BUY" else "BEARISH",
+            "status": "ACTIVE_IN_ZONE",
+            "entry": entry,
+            "stop": stop,
+            "tp1": tp1,
+            "target": target,
+            "risk_usd": r2(risk),
+            "reward_usd": r2(reward),
+            "reward_risk": rr,
+            "sl_atr_ratio": round(risk / max(0.1, atr_val), 2),
+            "spread_included_usd": spread_usd,
+            "zone_low": min(entry, stop),
+            "zone_high": max(entry, stop),
+            "confluence_score": 95,
+            "confluence_factors": [
+                "🧪 โหมดทดสอบยิงถี่ Demo (Rapid-Fire Stress Test)",
+                "⚡ ยิงออเดอร์ทันทีที่ราคาตลาด ไม่เลือกจังหวะ (Market Execution)",
+                f"🛡️ กั้น SL แคบ (${sl_dist:.2f}) ป้องกันความเสี่ยงพอร์ต",
+                f"🎯 เน้นเก็บกำไรสั้น (${target_dist:.2f}) ความถี่สูง",
+                "🔒 ล็อกขนาดคงที่ 0.01 Lot ต่อไม้ สำหรับทดสอบระบบในบัญชี Demo",
+            ],
+            "scenario_b_sweep_reentry": r2(stop - 0.50 if side == "BUY" else stop + 0.50),
+            "scenario_c_invalidation": r2(stop - 0.30 if side == "BUY" else stop + 0.30),
+        }
     trend = structure_res["trend"]
     sr_zones = list(structure_res.get("sr_zones", []))
     htf_zones = list((mtf_res or {}).get("htf_sr_zones") or [])

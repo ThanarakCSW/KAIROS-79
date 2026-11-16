@@ -120,6 +120,29 @@ class TradingAssistantCore:
         save_config(self.config)
         return new_val
 
+    def toggle_rapid_fire_mode(self, enabled: Optional[bool] = None) -> bool:
+        rf_cfg = self.config.setdefault("rapid_fire_test", {})
+        if enabled is None:
+            new_val = not bool(rf_cfg.get("enabled", False))
+        else:
+            new_val = bool(enabled)
+        rf_cfg["enabled"] = new_val
+        if new_val:
+            self.timeframe = "M1"
+            self.config["default_timeframe"] = "M1"
+            # Cancel any stale pending orders from other modes so test can trade immediately
+            if self.order_manager.has_active_order():
+                act = self.order_manager.active_order
+                if act and act.get("status") == "PENDING":
+                    self.order_manager.cancel_active_order(reason="RAPID_FIRE_ACTIVATED")
+        else:
+            if self.order_manager.has_active_order():
+                act = self.order_manager.active_order
+                if act and act.get("status") == "PENDING" and act.get("trading_style") == "rapid_fire_test":
+                    self.order_manager.cancel_active_order(reason="RAPID_FIRE_DEACTIVATED")
+        save_config(self.config)
+        return new_val
+
     def compute_full_state(
         self,
         timeframe: Optional[str] = None,
@@ -129,18 +152,24 @@ class TradingAssistantCore:
     ) -> Dict[str, Any]:
         tf = (timeframe or self.timeframe).upper()
         self.timeframe = tf
-        if trading_style in ("intraday", "scalping", "micro_scalp", "robot_scalper"):
+        if trading_style in ("intraday", "scalping", "micro_scalp", "robot_scalper", "rapid_fire_test"):
             self.trading_style = trading_style
             self.config["trading_style"] = trading_style
+
+        is_rapid = (
+            bool((self.config.get("rapid_fire_test") or {}).get("enabled", False))
+            and (trading_style is None or trading_style == "rapid_fire_test")
+        ) or (trading_style == "rapid_fire_test")
 
         is_robot = (
             bool((self.config.get("robot_scalper") or {}).get("enabled", False))
             and (trading_style is None or trading_style == "robot_scalper")
         ) or (trading_style == "robot_scalper")
-        effective_style = "robot_scalper" if is_robot else self.trading_style
 
-        # In robot mode, prioritize M1 as the primary timeframe for fast execution unless explicitly requested
-        if is_robot and (not timeframe or timeframe == "M5"):
+        effective_style = "rapid_fire_test" if is_rapid else ("robot_scalper" if is_robot else self.trading_style)
+
+        # In rapid fire or robot mode, prioritize M1 as the primary timeframe for fast execution unless explicitly requested
+        if (is_rapid or is_robot) and (not timeframe or timeframe == "M5"):
             tf = "M1"
             self.timeframe = "M1"
 
@@ -183,7 +212,7 @@ class TradingAssistantCore:
         )
         replays_cnt = max(35000, int(self.config.get("simulation_replays") or 35000))
         self.config["simulation_replays"] = replays_cnt
-        bars_ahead_cnt = 10 if effective_style == "robot_scalper" else (14 if effective_style == "micro_scalp" else (18 if effective_style == "scalping" else int(self.config.get("simulation_bars_ahead") or 36)))
+        bars_ahead_cnt = 8 if effective_style == "rapid_fire_test" else (10 if effective_style == "robot_scalper" else (14 if effective_style == "micro_scalp" else (18 if effective_style == "scalping" else int(self.config.get("simulation_bars_ahead") or 36))))
         sim_seed = int(self.config.get("simulation_seed") or 19)
         min_win_prob = float(self.config.get("min_win_prob_pct") or 50.0)
         self.config["min_win_prob_pct"] = min_win_prob
@@ -215,7 +244,7 @@ class TradingAssistantCore:
 
         # Only invoke Gemini AI when scanning for a new trade entry (or when explicitly forced),
         # saving AI resources when an order is already active and managed by deterministic lifecycle rules.
-        if force_ai or not self.order_manager.has_active_order():
+        if effective_style != "rapid_fire_test" and (force_ai or not self.order_manager.has_active_order()):
             chosen_setup, gemini_raw = evaluate_chart_with_gemini_or_fallback(
                 bars=chart_bars,
                 structure=structure,
@@ -868,6 +897,7 @@ class TradingAssistantCore:
             "risk_ticket": risk_ticket,
             "ea_bridge": self.ea_bridge.get_status_dict(),
             "robot_scalper": self.config.get("robot_scalper", {}),
+            "rapid_fire_test": self.config.get("rapid_fire_test", {}),
             "cross_asset": {
                 "enabled": bool(cross_asset_cfg.get("enabled", False)),
                 "symbols": cross_asset_state,
@@ -882,6 +912,7 @@ class TradingAssistantCore:
                 "broker_price_offset": offset,
                 "broker_spread_points": int(spread_pts),
                 "robot_scalper": self.config.get("robot_scalper", {}),
+                "rapid_fire_test": self.config.get("rapid_fire_test", {}),
                 "cross_asset_enabled": bool(cross_asset_cfg.get("enabled", False)),
                 "has_gemini_key": bool(
                     (self.config.get("ai") or {}).get("api_key")
@@ -1348,9 +1379,10 @@ class AssistantServer:
                             symbol=sym_name,
                         )
 
-                # Periodic autonomous setup scan: evaluate setups every 4-16 seconds when auto trading is ON and no active order
+                # Periodic autonomous setup scan: evaluate setups every 2-16 seconds when auto trading is ON and no active order
+                is_rapid_on = bool((core_inst.config.get("rapid_fire_test") or {}).get("enabled", False))
                 is_robot_on = bool((core_inst.config.get("robot_scalper") or {}).get("enabled", False))
-                scan_mod = 2 if is_robot_on else (3 if core_inst.trading_style == "micro_scalp" else 8)
+                scan_mod = 1 if is_rapid_on else (2 if is_robot_on else (3 if core_inst.trading_style == "micro_scalp" else 8))
                 if core_inst.ea_bridge.auto_trading_enabled and not core_inst.order_manager.has_active_order() and loop_counter % scan_mod == 0:
                     try:
                         state = await asyncio.to_thread(core_inst.compute_full_state, None, False, False)
@@ -1741,6 +1773,11 @@ class AssistantServer:
             new_val = core.toggle_robot_mode(req_enable)
             state = await asyncio.to_thread(core.compute_full_state)
             await self.broadcast(state, symbol=core.symbol)
+        elif action == "toggle_rapid_fire":
+            req_enable = cmd.get("enabled")
+            new_val = core.toggle_rapid_fire_mode(req_enable)
+            state = await asyncio.to_thread(core.compute_full_state)
+            await self.broadcast(state, symbol=core.symbol)
         elif action == "add_sub_order":
             cp = float(cmd.get("current_price") or core.hub.latest_spot.get("price") or 0.0)
             purpose = str(cmd.get("purpose") or "AUTO")
@@ -2083,6 +2120,31 @@ class AssistantServer:
             sym = (query.get("symbol") or ["XAUUSD"])[0]
             target_core = self.get_core(sym)
             await self.send_http_json(writer, 200, target_core.config.get("robot_scalper", {}))
+            return
+
+        if path == "/api/rapid_fire/toggle" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            req_enable = payload.get("enabled")
+            new_val = target_core.toggle_rapid_fire_mode(req_enable)
+            state = await asyncio.to_thread(target_core.compute_full_state)
+            await self.broadcast(state, symbol=target_core.symbol)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "rapid_fire_enabled": new_val,
+                    "rapid_fire_test": target_core.config.get("rapid_fire_test", {}),
+                },
+            )
+            return
+
+        if path == "/api/rapid_fire/status" and method == "GET":
+            sym = (query.get("symbol") or ["XAUUSD"])[0]
+            target_core = self.get_core(sym)
+            await self.send_http_json(writer, 200, target_core.config.get("rapid_fire_test", {}))
             return
 
         if path == "/api/ea/status" and method == "GET":

@@ -41,6 +41,20 @@
     "fast_breakeven_trigger_r": 0.40,
     "scan_interval_seconds": 4
   },
+  "rapid_fire_test": {
+    "enabled": false,
+    "lot_size": 0.01,
+    "primary_timeframe": "M1",
+    "target_tp_usd": 0.80,
+    "hard_sl_usd": 1.50,
+    "target_tp_usd_btc": 30.0,
+    "hard_sl_usd_btc": 60.0,
+    "max_concurrent_orders": 10,
+    "min_spacing_usd": 0.30,
+    "min_spacing_usd_btc": 15.0,
+    "cooldown_seconds": 3,
+    "scan_interval_seconds": 2
+  },
   "min_win_prob_pct": 50.0,
   "simulation_replays": 35000,
   "simulation_bars_ahead": 36,

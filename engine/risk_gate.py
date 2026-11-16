@@ -73,16 +73,21 @@ def evaluate_risk_and_size(
     lot_step = float(config.get("lot_step") or 0.01)
 
     trading_style = str(trade_setup.get("trading_style") or config.get("trading_style") or "intraday").lower()
+    is_rapid = trading_style == "rapid_fire_test" or bool((config.get("rapid_fire_test") or {}).get("enabled"))
     is_robot = trading_style == "robot_scalper" or bool((config.get("robot_scalper") or {}).get("enabled"))
     is_micro = trading_style == "micro_scalp"
-    is_scalp = trading_style in ("scalping", "micro_scalp", "robot_scalper")
+    is_scalp = trading_style in ("scalping", "micro_scalp", "robot_scalper", "rapid_fire_test")
     min_rr = float(config.get("min_reward_risk") or 1.5)
-    if is_robot:
+    if is_rapid:
+        min_rr = min(min_rr, 0.20)
+    elif is_robot:
         min_rr = min(min_rr, 0.45)
     elif is_scalp:
         min_rr = min(min_rr, 1.15)
     min_sl_atr = float(config.get("min_sl_atr_mult") or 0.8)
-    if is_robot:
+    if is_rapid:
+        min_sl_atr = min(min_sl_atr, 0.10)
+    elif is_robot:
         min_sl_atr = min(min_sl_atr, 0.35)
     elif is_micro:
         min_sl_atr = min(min_sl_atr, 0.50)
@@ -124,7 +129,11 @@ def evaluate_risk_and_size(
 
     risk_budget_usd = round(balance * (risk_pct / 100.0), 2)
     loss_per_1lot = sl_distance_usd * contract_size
-    if is_robot:
+    if is_rapid:
+        rf_cfg = config.get("rapid_fire_test") or {}
+        cfg_lot = float(rf_cfg.get("lot_size") or 0.01)
+        lot_size = min(cfg_lot, 0.01) if min_lot <= 0.01 else min_lot
+    elif is_robot:
         robot_cfg = config.get("robot_scalper") or {}
         # Strictly locked to 0.01 lot per order as requested by user
         # Volume expansion must be done by splitting into multiple orders ("ซอยไม้")
@@ -232,13 +241,15 @@ def evaluate_risk_and_size(
         )
 
     # 4. News blackout & Pre-news shield check
-    if news_status.get("in_news_blackout") or news_status.get("is_imminent_news"):
+    if not is_rapid and (news_status.get("in_news_blackout") or news_status.get("is_imminent_news")):
         events = news_status.get("blackout_events") or news_status.get("imminent_news_events") or []
         titles = ", ".join(e.get("title", "") for e in events) or "USD Red News"
         mins = news_status.get("blackout_minutes") or news_status.get("pre_news_minutes") or 15
         reject_reasons.append(
             f"ติดช่วงประกาศข่าวกล่องแดง USD ภายในระยะ {mins} นาที ({titles}) — หยุดการเปิดออเดอร์ใหม่เพื่อคุมความเสี่ยง"
         )
+    elif is_rapid:
+        passed_checks.append("🧪 โหมดทดสอบ Demo ข้ามตัวกรองข่าวเพื่อทดสอบยิงออเดอร์ต่อเนื่อง")
     else:
         passed_checks.append("ปลอดข่าวกล่องแดง USD ในระยะ ±30 นาที")
 
@@ -259,7 +270,9 @@ def evaluate_risk_and_size(
 
     # 7. Spread vs SL check, Max Spread cap & Rollover danger
     max_spread_usd = float(config.get("max_spread_usd") or 0.0)
-    if is_robot or is_micro:
+    if is_rapid:
+        pass
+    elif is_robot or is_micro:
         micro_spread_cap = 15.0 if is_crypto else 0.30
         if spread_usd > micro_spread_cap:
             reject_reasons.append(
@@ -348,7 +361,10 @@ def evaluate_risk_and_size(
                             )
                             break
 
-    if reject_reasons:
+    if is_rapid:
+        verdict = "PASS"
+        badge_th = "🧪 โหมดทดสอบยิงถี่ Demo (RAPID-FIRE PASS)"
+    elif reject_reasons:
         verdict = "REJECT"
         if not win_prob_passed:
             badge_th = "⏳ รอจังหวะ (โอกาสถึง TP ยังไม่เกิน 50% — ระบบกำลังเฝ้าหาจุดเข้าต่อ)"
@@ -370,6 +386,7 @@ def evaluate_risk_and_size(
         "point_size": point_size,
         "trading_style": trading_style,
         "is_robot_scalper": is_robot,
+        "is_rapid_fire": is_rapid,
         "side": side,
         "execution_type": "MARKET" if is_market_entry else "LIMIT",
         "order_type": trade_setup.get("order_type", f"{side} NOW (Market)" if is_market_entry else f"{side} LIMIT"),

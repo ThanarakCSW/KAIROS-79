@@ -433,7 +433,11 @@ def optimize_setup_for_win_prob(
     current_win = float(best_sim["probabilities"]["win_pct"])
     ev_val = float(best_sim.get("expected_value_r") or 0.0)
 
-    has_edge = (current_win > min_win_prob_pct) if is_scalp else (current_win >= break_even_pct and ev_val > 0)
+    has_edge = (
+        True
+        if style_str == "rapid_fire_test"
+        else ((current_win > min_win_prob_pct) if is_scalp else (current_win >= break_even_pct and ev_val > 0))
+    )
     target_threshold = min_win_prob_pct if is_scalp else break_even_pct
 
     if has_edge and int(best_setup.get("confluence_score", 0)) >= 65:

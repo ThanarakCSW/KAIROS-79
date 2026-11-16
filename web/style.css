@@ -2276,6 +2276,56 @@ body {
   }
 }
 
+.pill-rapid-inactive {
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+  font-weight: 700;
+  padding: 5px 13px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pill-rapid-inactive:hover {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(245, 158, 11, 0.6);
+  color: #fef08a;
+  transform: translateY(-1px);
+}
+
+.pill-rapid-active {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.35), rgba(245, 158, 11, 0.3));
+  border: 1px solid rgba(248, 113, 113, 0.85);
+  color: #fef08a;
+  font-weight: 800;
+  padding: 5px 13px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.45);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  animation: pulse-rapid-glow 1.5s infinite alternate;
+}
+
+.pill-rapid-active:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 24px rgba(239, 68, 68, 0.7);
+  border-color: #fca5a5;
+}
+
+@keyframes pulse-rapid-glow {
+  0% {
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
+  }
+  100% {
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.7);
+  }
+}
+
 .styled-select {
   background: #111827;
   color: #f3f4f6;
