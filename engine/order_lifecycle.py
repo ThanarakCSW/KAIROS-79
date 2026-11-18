@@ -99,9 +99,19 @@ class OrderLifecycleManager:
         except Exception:
             pass
 
-    def has_active_order(self, symbol: Optional[str] = None) -> bool:
+    def has_active_order(self, symbol: Optional[str] = None, strategy_mode: Optional[str] = None) -> bool:
         """Check if any order is currently active (waiting for fill or currently live in MT5).
-        If symbol is provided, checks active orders specifically for that symbol."""
+        If symbol is provided, checks active orders specifically for that symbol.
+        If strategy_mode is provided, checks active orders specifically for that strategy."""
+        if symbol and strategy_mode:
+            sym_u = symbol.upper()
+            mode_u = strategy_mode.upper()
+            return bool(any(
+                o.get("status") in ("PENDING", "FILLED")
+                and o.get("symbol", "XAUUSD").upper() == sym_u
+                and str(o.get("strategy_mode", "SMC_SWING")).upper() == mode_u
+                for o in self.active_orders
+            ))
         if symbol:
             sym_u = symbol.upper()
             return bool(any(o.get("status") in ("PENDING", "FILLED") and o.get("symbol", "XAUUSD").upper() == sym_u for o in self.active_orders))
@@ -116,17 +126,42 @@ class OrderLifecycleManager:
         trading_style: str = "intraday",
         force_replace: bool = False,
         symbol: Optional[str] = None,
+        strategy_mode: Optional[str] = None,
         **kwargs,
     ) -> Optional[Dict[str, Any]]:
         """Register a new trade setup into active tracking.
-        If an order is already active for this symbol (PENDING or FILLED), keeps the existing order unless force_replace=True."""
+        Supports Unified Multi-Strategy Engine: allows simultaneous active orders from SMC_SWING and RAPID_FIRE."""
         setup = smc_setup or kwargs.get("trade_setup") or kwargs.get("smc") or {}
         sym = str(symbol or risk_ticket.get("symbol") or setup.get("symbol") or "XAUUSD").upper()
-        if self.has_active_order(symbol=sym) and not force_replace:
-            for o in self.active_orders:
-                if o.get("symbol", "XAUUSD").upper() == sym and o.get("status") in ("PENDING", "FILLED"):
-                    return o
-            return self.active_order
+
+        # Determine explicit strategy tag and badge
+        style_l = str(strategy_mode or kwargs.get("strategy_mode") or trading_style or "").lower()
+        if "rapid" in style_l:
+            strat_tag = "RAPID_FIRE"
+            badge_th = "⚡ Rapid Fire"
+            strat_prefix = "RAP"
+        elif "runner" in style_l:
+            strat_tag = "PROMOTED_RUNNER"
+            badge_th = "👑 Promoted Runner"
+            strat_prefix = "RUN"
+        else:
+            strat_tag = "SMC_SWING"
+            badge_th = "🏛️ SMC Swing"
+            strat_prefix = "SMC"
+
+        # Check if an order for this specific strategy_mode is already active on this symbol
+        if not force_replace:
+            existing_for_mode = [
+                o for o in self.active_orders
+                if o.get("symbol", "XAUUSD").upper() == sym
+                and str(o.get("strategy_mode", "SMC_SWING")).upper() == strat_tag
+                and o.get("status") in ("PENDING", "FILLED")
+            ]
+            if existing_for_mode:
+                return existing_for_mode[0]
+            # Cap total concurrent active orders across all modes to 10
+            if len(self.active_orders) >= 10:
+                return None
 
         # Only accept setups that passed risk gate and have a valid direction
         side = str(risk_ticket.get("side") or setup.get("side") or "").upper()
@@ -159,7 +194,7 @@ class OrderLifecycleManager:
         reward_risk = float(risk_ticket.get("reward_risk") or 1.5)
 
         now_ts = int(time.time())
-        order_id = f"K79-{sym}-{side}-{now_ts}-O1"
+        order_id = f"K79-{sym}-{strat_prefix}-{side}-{now_ts}"
 
         is_filled = exec_type == "MARKET"
         initial_status = "FILLED" if is_filled else "PENDING"
@@ -167,23 +202,34 @@ class OrderLifecycleManager:
 
         order = {
             "order_id": order_id,
-            "order_index": 1,
+            "order_index": len(self.active_orders) + 1,
             "symbol": sym,
             "pip_digits": pip_digits,
             "contract_size": contract_size,
             "point_size": point_size,
             "side": side,
+            "strategy_mode": strat_tag,
+            "strategy_badge": badge_th,
+            "comment": f"K79-{strat_prefix}-{side}",
             "purpose": "INITIAL",
-            "purpose_th": "ไม้หลัก (Initial)",
+            "purpose_th": f"ไม้หลัก ({badge_th})",
             "execution_type": exec_type,
             "order_type": order_type_str,
             "status": initial_status,
             "timeframe": timeframe,
             "trading_style": trading_style,
-            "is_robot_scalper": bool(trading_style == "robot_scalper" or risk_ticket.get("is_robot_scalper")),
-            "is_rapid_fire": bool(trading_style == "rapid_fire_test" or risk_ticket.get("is_rapid_fire")),
+            "is_robot_scalper": bool((strat_tag == "ROBOT_SCALP" or trading_style == "robot_scalper") and strat_tag != "SMC_SWING"),
+            "is_rapid_fire": bool((strat_tag == "RAPID_FIRE" or trading_style == "rapid_fire_test") and strat_tag != "SMC_SWING"),
+            "market_regime": setup.get("market_regime") or risk_ticket.get("market_regime") or "TRENDING",
+            "is_sideway": bool(setup.get("is_sideway") or risk_ticket.get("is_sideway")),
+            "regime_label_th": setup.get("regime_label_th") or risk_ticket.get("regime_label_th") or "",
             "setup_archetype": setup.get("setup_archetype") or risk_ticket.get("setup_archetype") or "ORDER_BLOCK_PULLBACK",
-            "archetype_label_th": setup.get("archetype_label_th") or risk_ticket.get("archetype_label_th") or "🏛️ SMC Order Block Pullback",
+            "archetype_label_th": setup.get("archetype_label_th") or risk_ticket.get("archetype_label_th") or f"{badge_th} Entry",
+            "entry_style": setup.get("entry_style") or "",
+            "is_counter_trend": bool(setup.get("is_counter_trend", False)),
+            "volume_tpsl_scaling": setup.get("volume_tpsl_scaling") or {},
+            "ai_features": setup.get("ai_features") or {},
+            "ai_memory_eval": setup.get("ai_memory_eval") or {},
             "entry_mt5": entry_mt5,
             "stop_mt5": stop_mt5,
             "initial_stop_mt5": stop_mt5,
@@ -200,6 +246,10 @@ class OrderLifecycleManager:
             "reward_risk": reward_risk,
             "confluence_score": int(setup.get("confluence_score") or 70),
             "confluence_factors": list(setup.get("confluence_factors") or []),
+            "allocation_factor": float(setup.get("allocation_factor") or 1.0),
+            "mtf_sr_context": setup.get("mtf_sr_context") or {},
+            "candle_signal": setup.get("candle_signal") or {},
+            "pattern_signal": setup.get("pattern_signal") or {},
             "created_ts": now_ts,
             "created_bkk": _now_bkk_str(now_ts),
             "filled_ts": now_ts if is_filled else None,
@@ -221,7 +271,11 @@ class OrderLifecycleManager:
             ),
         }
 
-        self.active_orders = [o for o in self.active_orders if o.get("symbol", "XAUUSD").upper() != sym] + [order]
+        # Remove previous order only for the same symbol AND the same strategy_mode
+        self.active_orders = [
+            o for o in self.active_orders
+            if not (o.get("symbol", "XAUUSD").upper() == sym and str(o.get("strategy_mode", "SMC_SWING")).upper() == strat_tag)
+        ] + [order]
         self._sync_primary()
         self.last_event = {
             "type": "NEW_ORDER_REGISTERED",
@@ -288,7 +342,15 @@ class OrderLifecycleManager:
         tp = r2(take_profit or primary.get("target_mt5"))
         is_rapid_order = bool(primary.get("is_rapid_fire")) or str(primary.get("trading_style") or "").lower() == "rapid_fire_test"
         is_robot_order = bool(primary.get("is_robot_scalper")) or str(primary.get("trading_style") or "").lower() == "robot_scalper"
-        lot = 0.01 if (is_robot_order or is_rapid_order) else float(lot_size or primary.get("lot_size") or 0.10)
+        base_primary_lot = float(primary.get("lot_size") or 0.01)
+        if is_robot_order:
+            lot = 0.01
+        elif lot_size is not None and float(lot_size) > 0:
+            lot = round(max(0.01, float(lot_size)), 2)
+        elif purp == "RECOVERY":
+            lot = 0.01 if is_rapid_order else round(max(0.01, base_primary_lot * 0.5), 2)
+        else:
+            lot = round(max(0.01, base_primary_lot * 0.5 if is_rapid_order else base_primary_lot), 2)
         actual_risk = max(1.0, float(primary.get("actual_risk_usd") or 50.0))
 
         sub_sym = str(primary.get("symbol") or "XAUUSD").upper()
@@ -411,6 +473,25 @@ class OrderLifecycleManager:
         stop_p = float(primary.get("stop_mt5") or 0.0)
         target_p = float(primary.get("target_mt5") or 0.0)
 
+        # Sideway Guard for Rapid Fire: Strictly disallow DCA recovery or scaling in consolidation/sideway
+        st_trend = structure.get("trend") or {}
+        st_regime = str(st_trend.get("regime") or "").upper()
+        st_bias = str(st_trend.get("bias") or structure.get("current_bias") or "").upper()
+        st_vf = structure.get("volume_flow") or {}
+        st_rng_ratio = st_vf.get("range_expansion_ratio")
+        is_sideway = bool(
+            primary.get("is_sideway")
+            or "RANGING" in st_regime
+            or "SIDEWAY" in st_regime
+            or st_bias in ("NEUTRAL", "CHOP", "SIDEWAY")
+            or str(st_trend.get("ema_alignment") or "").upper() == "MIXED"
+            or "SLOWDOWN" in str(st_vf.get("flow_state") or "").upper()
+            or (st_rng_ratio is not None and float(st_rng_ratio) < 0.78)
+        )
+        if is_rapid_order and is_sideway:
+            # In sideway/consolidation, stick strictly to single-order quick in / quick out (no DCA, no scale)
+            return None
+
         # Check distance from all existing active orders to prevent clustering (skip for rapid-fire demo)
         if not is_rapid_order:
             for o in self.active_orders:
@@ -424,25 +505,33 @@ class OrderLifecycleManager:
         bar_lo = low if low is not None else current_price
 
         # ---------------- 0. Structural Disadvantage Invalidation (ตัดขาดทุนเมื่อเสียเปรียบ) ----------------
-        breaks = st.get("breaks") or []
-        for brk in breaks:
-            if brk.get("type") == "CHOCH" and (
-                (side == "BUY" and brk.get("direction") == "BEARISH")
-                or (side == "SELL" and brk.get("direction") == "BULLISH")
-            ):
-                flt_r = float(primary.get("floating_pnl_r") or 0.0)
-                if flt_r <= -0.25:  # in disadvantage drawdown
-                    ev = self.close_active_order(
-                        reason="STRUCTURAL_DISADVANTAGE",
-                        current_price=current_price,
-                    )
-                    if ev:
-                        ev["type"] = "ORDER_CLOSED_DISADVANTAGE"
-                        ev["reason_th"] = (
-                            f"🛡️ AI ปิดตัดขาดทุนก่อนชน SL เต็ม เนื่องจากโครงสร้างเปลี่ยนทาง "
-                            f"({brk.get('type')} {brk.get('direction')})"
+        # STRICT GUARD: Only react to a GENUINE NEW opposing CHOCH formed AFTER entry + sufficient hold time!
+        filled_ts_prim = int(primary.get("filled_ts") or primary.get("created_ts") or 0)
+        hold_sec_prim = max(0, int(time.time()) - filled_ts_prim) if filled_ts_prim > 0 else 0
+        min_hold_disadv = 600 if not is_rapid_order else 180
+        if hold_sec_prim >= min_hold_disadv:
+            breaks = st.get("breaks") or []
+            for brk in breaks:
+                brk_ts = int(brk.get("time") or brk.get("timestamp") or 0)
+                if brk_ts <= filled_ts_prim:
+                    continue  # Ignore ancient historical breaks from before this order opened!
+                if brk.get("type") == "CHOCH" and (
+                    (side == "BUY" and brk.get("direction") == "BEARISH")
+                    or (side == "SELL" and brk.get("direction") == "BULLISH")
+                ):
+                    flt_r = float(primary.get("floating_pnl_r") or 0.0)
+                    if flt_r <= -0.65:  # Genuine deep disadvantage (never trigger from entry spread!)
+                        ev = self.close_active_order(
+                            reason="STRUCTURAL_DISADVANTAGE",
+                            current_price=current_price,
                         )
-                    return ev
+                        if ev:
+                            ev["type"] = "ORDER_CLOSED_DISADVANTAGE"
+                            ev["reason_th"] = (
+                                f"🛡️ AI ปิดตัดขาดทุนก่อนชน SL เต็ม เนื่องจากโครงสร้างเปลี่ยนทางใหม่หลังเข้าไม้ "
+                                f"({brk.get('type')} {brk.get('direction')})"
+                            )
+                        return ev
 
         # ---------------- 0.5 Bundle Drawdown Circuit Breaker ----------------
         max_bundle_dd_pct = float(cfg.get("max_bundle_drawdown_pct") or 0.0)
@@ -471,41 +560,55 @@ class OrderLifecycleManager:
                         )
                     return ev
 
-        # ---------------- 0.9 Rapid-Fire Demo High-Frequency Order Placement ----------------
+        # ---------------- 0.9 Rapid Scalp Production Scaling (Momentum Expansion) ----------------
         if is_rapid_order and len(self.active_orders) < max_orders:
             rf_cfg = (config or {}).get("rapid_fire_test") or {}
-            target_dist = float(rf_cfg.get("target_tp_usd") or 0.80)
-            sl_dist = float(rf_cfg.get("hard_sl_usd") or 1.50)
+            target_dist = float(rf_cfg.get("target_tp_usd") or max(0.80, 1.2 * atr))
+            sl_dist = float(rf_cfg.get("hard_sl_usd") or max(1.20, 1.5 * atr))
             sub_sl = r2(current_price - sl_dist if side == "BUY" else current_price + sl_dist)
             sub_tp = r2(current_price + target_dist if side == "BUY" else current_price - target_dist)
             lot = 0.01
 
-            trigger_reason = f"🧪 ยิงทดสอบ Throughput Demo (ไม้ที่ {len(self.active_orders) + 1}/{max_orders})"
-            sub = self.add_sub_order(
-                purpose="RAPID_FIRE",
-                execution_type="MARKET",
-                current_price=current_price,
-                lot_size=lot,
-                stop_loss=sub_sl,
-                take_profit=sub_tp,
-                max_allowed=max_orders,
+            # Prevent clustering: must be at least min_spacing away from all existing active orders
+            too_close = any(
+                abs(current_price - float(o.get("filled_price") or o.get("entry_mt5") or current_price)) < min_spacing
+                for o in self.active_orders
             )
-            if sub:
-                sub["trigger_reason"] = trigger_reason
-                sub["management_note_th"] = f"🧪 ยิงทดสอบ Throughput Demo @ {current_price:.2f}"
-                self.last_order_add_ts = now_ts
-                self.last_event = {
-                    "type": "AUTO_ORDER_ADDED",
-                    "order_id": sub["order_id"],
-                    "purpose": "RAPID_FIRE",
-                    "purpose_th": "ยิงทดสอบ Demo",
-                    "side": side,
-                    "entry_price": current_price,
-                    "trigger_reason": trigger_reason,
-                    "message": f"🧪 ยิงคำสั่งทดสอบ Throughput MT5: {side} @ {current_price:.2f}",
-                }
-                self.save_to_disk()
-                return self.last_event
+
+            # Pyramiding condition: only add scale-in orders when previous position is in profit / moving favorably
+            primary_floating = float(primary.get("floating_pnl_usd") or 0.0)
+            is_favorable = primary_floating >= 0.10 or (
+                (side == "BUY" and current_price >= primary_entry + (min_spacing * 0.8))
+                or (side == "SELL" and current_price <= primary_entry - (min_spacing * 0.8))
+            )
+
+            if not too_close and is_favorable:
+                trigger_reason = f"⚡ ขยายไม้ทำกำไรตามโมเมนตัม SMC (Rapid Scale #{len(self.active_orders) + 1}/{max_orders})"
+                sub = self.add_sub_order(
+                    purpose="RAPID_SCALE",
+                    execution_type="MARKET",
+                    current_price=current_price,
+                    lot_size=lot,
+                    stop_loss=sub_sl,
+                    take_profit=sub_tp,
+                    max_allowed=max_orders,
+                )
+                if sub:
+                    sub["trigger_reason"] = trigger_reason
+                    sub["management_note_th"] = f"⚡ ขยายไม้ตามโมเมนตัม SMC @ {current_price:.2f}"
+                    self.last_order_add_ts = now_ts
+                    self.last_event = {
+                        "type": "AUTO_ORDER_ADDED",
+                        "order_id": sub["order_id"],
+                        "purpose": "RAPID_SCALE",
+                        "purpose_th": "ขยายไม้โมเมนตัม",
+                        "side": side,
+                        "entry_price": current_price,
+                        "trigger_reason": trigger_reason,
+                        "message": f"⚡ Rapid Scalp: ออกไม้ขยายกำไร {side} @ {current_price:.2f}",
+                    }
+                    self.save_to_disk()
+                    return self.last_event
 
         # ---------------- 1. Recovery Opportunity (แก้ไม้ DCA) ----------------
         max_recovery_orders = int(cfg.get("max_recovery_orders") or 1)
@@ -661,7 +764,8 @@ class OrderLifecycleManager:
                             break
 
                 if trigger_reason:
-                    lot = 0.01 if (is_robot_order or is_rapid_order) else float(primary.get("lot_size") or 0.10)
+                    prim_lot = float(primary.get("lot_size") or 0.01)
+                    lot = 0.01 if is_robot_order else (round(max(0.01, prim_lot * 0.5), 2) if is_rapid_order else prim_lot)
                     sub = self.add_sub_order(
                         purpose="SCALE_IN",
                         execution_type="MARKET",
@@ -782,6 +886,7 @@ class OrderLifecycleManager:
         contract_size: float = 100.0,
         config: Optional[Dict[str, Any]] = None,
         symbol: str = "XAUUSD",
+        market_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Evaluate active orders against the latest price tick / candle bar.
         Returns the last significant state transition event if occurred."""
@@ -801,7 +906,10 @@ class OrderLifecycleManager:
 
         bar_hi = high if high is not None else current_price
         bar_lo = low if low is not None else current_price
-        now_ts = int(ts or time.time())
+        wall_ts = int(time.time())
+        # Guard against MT5 broker server-time candle timestamps (UTC+2 = +7200s ahead of UTC)
+        # which would spoof holding_seconds = 7200s on tick 1 and poison closed_ts in the future!
+        now_ts = int(ts) if (ts is not None and int(ts) <= wall_ts + 60) else wall_ts
         last_event = None
 
         sym_u = (symbol or "XAUUSD").upper()
@@ -824,11 +932,17 @@ class OrderLifecycleManager:
             be_sl = float(order.get("breakeven_sl_mt5") or entry)
             invalidation = float(order.get("scenario_c_invalidation_mt5") or stop)
             pip_digits = int(order.get("pip_digits") or (5 if ("EUR" in order_sym or "GBP" in order_sym) else 2))
+            is_ea_managed = bool(order.get("ea_dispatch_status") or order.get("broker_ticket"))
 
             # ---------------- Case 1: PENDING LIMIT ORDER ----------------
             if order["status"] == "PENDING":
                 dist = abs(current_price - entry)
                 order["distance_to_entry_usd"] = round(dist, pip_digits)
+
+                # If order was dispatched to MT5, require MT5 ticket confirmation before filling virtually
+                if is_ea_managed and not order.get("broker_ticket"):
+                    remaining_orders.append(order)
+                    continue
 
                 filled = False
                 if side == "BUY" and bar_lo <= entry:
@@ -914,19 +1028,67 @@ class OrderLifecycleManager:
                 order["highest_pnl_r"] = max(float(order.get("highest_pnl_r") or flt_r), flt_r)
                 order["lowest_pnl_r"] = min(float(order.get("lowest_pnl_r") or flt_r), flt_r)
 
-                # 0. Fast Dynamic Breakeven for Scalping / Micro-Scalp / Robot Scalper
+                # 0. Fast Dynamic Breakeven for Scalping / Micro-Scalp / Rapid Fire
+                is_smc_order = str(order.get("strategy_mode") or "").upper() == "SMC_SWING"
+                is_rapid = (
+                    not is_smc_order and (
+                        bool(order.get("is_rapid_fire"))
+                        or str(order.get("strategy_mode") or "").upper() == "RAPID_FIRE"
+                        or str(order.get("trading_style") or "").lower() == "rapid_fire_test"
+                    )
+                )
                 is_scalp_order = str(order.get("trading_style") or "").lower() in ("scalping", "micro_scalp")
                 is_robot_order = bool(order.get("is_robot_scalper")) or str(order.get("trading_style") or "").lower() == "robot_scalper"
-                rs_cfg = (config or {}).get("robot_scalper") or {}
-                be_thresh = float(rs_cfg.get("fast_breakeven_trigger_r") or 0.40) if is_robot_order else 0.50
 
-                if (is_scalp_order or is_robot_order) and flt_r >= be_thresh and not order.get("sl_moved_breakeven"):
+                # Contextual sideway check
+                ctx_st = (market_context.get("structure") or {}) if market_context else {}
+                ctx_trend = ctx_st.get("trend") or {}
+                ctx_regime = str(ctx_trend.get("regime") or "").upper()
+                ctx_bias = str(ctx_trend.get("bias") or ctx_st.get("current_bias") or "").upper()
+                ctx_vf = ctx_st.get("volume_flow") or {}
+                ctx_rng_ratio = ctx_vf.get("range_expansion_ratio")
+                is_ctx_sideway = bool(
+                    "RANGING" in ctx_regime
+                    or "SIDEWAY" in ctx_regime
+                    or ctx_bias in ("NEUTRAL", "CHOP", "SIDEWAY")
+                    or str(ctx_trend.get("ema_alignment") or "").upper() == "MIXED"
+                    or "SLOWDOWN" in str(ctx_vf.get("flow_state") or "").upper()
+                    or "CONSOLIDATION" in str(ctx_vf.get("flow_state") or "").upper()
+                    or (ctx_rng_ratio is not None and float(ctx_rng_ratio) < 0.78)
+                )
+                order_sideway = bool(order.get("is_sideway")) or is_ctx_sideway
+
+                filled_ts = int(order.get("filled_ts") or order.get("registered_ts") or order.get("created_ts") or now_ts)
+                holding_seconds = max(0, now_ts - filled_ts)
+
+                if is_rapid:
+                    # Only lock BE after genuine profit well beyond broker spread!
+                    be_thresh = 0.55 if order_sideway else 0.65
+                elif is_robot_order:
+                    be_thresh = 0.60
+                elif is_scalp_order:
+                    be_thresh = 0.60
+                else:
+                    be_thresh = 0.70
+
+                # Require >= 30s hold + genuine profit beyond spread (flt_usd >= $0.75) before moving SL to BE
+                if (
+                    (is_scalp_order or is_robot_order or is_rapid)
+                    and holding_seconds >= 30
+                    and flt_r >= be_thresh
+                    and flt_usd >= 0.75
+                    and not order.get("sl_moved_breakeven")
+                ):
                     order["sl_moved_breakeven"] = True
                     order["stop_mt5"] = be_sl
                     order["management_note_th"] = (
-                        f"🤖 หุ่นยนต์เก็บสั้น: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl}) ล็อคความปลอดภัยทันที"
-                        if is_robot_order
-                        else f"⚡ สเกลป์เร็ว: กำไรถึง +{flt_r:.2f}R ดัน SL บังทุน ({be_sl}) ล็อคความปลอดภัยทันที"
+                        f"🦀 ไซด์เวย์เก็บเร็ว: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl}) ป้องกันการถูกลากทันที"
+                        if (is_rapid and order_sideway)
+                        else (
+                            f"🤖 หุ่นยนต์เก็บสั้น: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl}) ล็อคความปลอดภัยทันที"
+                            if is_robot_order
+                            else f"⚡ สเกลป์เร็ว: กำไรถึง +{flt_r:.2f}R ดัน SL บังทุน ({be_sl}) ล็อคความปลอดภัยทันที"
+                        )
                     )
                     last_event = {
                         "type": "BREAKEVEN_LOCKED",
@@ -936,11 +1098,45 @@ class OrderLifecycleManager:
                         "broker_ticket": order.get("broker_ticket"),
                         "order": dict(order),
                         "message": (
-                            f"🤖 หุ่นยนต์เก็บสั้น: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl})"
-                            if is_robot_order
-                            else f"⚡ สเกลป์เร็ว: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl})"
+                            f"🦀 ไซด์เวย์เก็บเร็ว: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl})"
+                            if (is_rapid and order_sideway)
+                            else (
+                                f"🤖 หุ่นยนต์เก็บสั้น: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl})"
+                                if is_robot_order
+                                else f"⚡ สเกลป์เร็ว: กำไรแตะ +{flt_r:.2f}R ดัน SL บังทุน ({be_sl})"
+                            )
                         ),
                     }
+
+                # 0.4 Sideway Stagnation Drag Guard for Rapid Fire:
+                # In sideway/consolidation, if position sits for >= 180s (3 min) and is floating negative (<= -0.20R),
+                # cut the position immediately so it NEVER gets dragged!
+                filled_ts = int(order.get("filled_ts") or order.get("registered_ts") or now_ts)
+                holding_seconds = max(0, now_ts - filled_ts)
+                if is_rapid and order_sideway and holding_seconds >= 180 and flt_r <= -0.20:
+                    order["status"] = "CLOSED_SIDEWAY_STAGNATION_GUARD"
+                    order["closed_ts"] = now_ts
+                    order["close_price"] = current_price
+                    order["close_reason"] = "SIDEWAY_STAGNATION_GUARD"
+                    order["realized_pnl_r"] = flt_r
+                    order["realized_pnl_usd"] = flt_usd
+                    mins_held = int(holding_seconds / 60)
+                    order["management_note_th"] = (
+                        f"🛡️ ตัดปิดไม้หน่วง Sideway (Stagnation Guard): ถือครอง {mins_held} นาทีในกรอบพักตัว "
+                        f"และเริ่มติดลบ ({flt_r:+.2f}R) ชิงตัดไม้ทันทีเพื่อป้องกันการถูกลาก"
+                    )
+                    self.order_history.append(dict(order))
+                    last_event = {
+                        "type": "TRADE_CLOSED_SIDEWAY_STAGNATION_GUARD",
+                        "order_id": order["order_id"],
+                        "side": side,
+                        "pnl_r": flt_r,
+                        "pnl_usd": flt_usd,
+                        "broker_ticket": order.get("broker_ticket"),
+                        "order": dict(order),
+                        "message": f"🛡️ ตัดปิดไม้หน่วง Sideway: {side} {order_sym} ({flt_r:+.2f}R) ชิงออกเพื่อไม่ให้ถูกลาก",
+                    }
+                    continue
 
                 # 0.5 Time-Decay Auto-Exit for Scalping / Micro-Scalp (Stale Position Guard)
                 filled_ts = int(order.get("filled_ts") or order.get("registered_ts") or now_ts)
@@ -972,13 +1168,234 @@ class OrderLifecycleManager:
                     }
                     continue
 
+                # 0.6 Dynamic Order State Morphing / Promotion (Rapid Scalp -> Promoted Runner)
+                strat_mode = str(order.get("strategy_mode") or "").upper()
+                is_morphable = (
+                    strat_mode == "RAPID_FIRE"
+                    or bool(order.get("is_rapid_fire"))
+                    or str(order.get("trading_style") or "").lower() in ("rapid_fire_test", "scalping", "micro_scalp")
+                )
+                if is_morphable and not order.get("is_promoted_runner") and flt_r >= 0.70:
+                    can_promote = True
+                    # In sideway/consolidation, do NOT morph into runner! Keep taking profit quickly!
+                    if order_sideway:
+                        can_promote = False
+                    elif market_context:
+                        st_ctx = market_context.get("structure") or {}
+                        bias = (st_ctx.get("trend") or {}).get("bias") or st_ctx.get("current_bias") or ""
+                        if side == "BUY" and bias == "BEARISH":
+                            can_promote = False
+                        elif side == "SELL" and bias == "BULLISH":
+                            can_promote = False
+
+                    if can_promote:
+                        order["is_promoted_runner"] = True
+                        order["strategy_mode"] = "PROMOTED_RUNNER"
+                        order["trading_style"] = "swing_runner"
+                        order["purpose"] = "PROMOTED_RUNNER"
+                        order["purpose_th"] = "👑 ไม้รันเทรนด์ (Promoted Runner)"
+                        order["strategy_badge"] = "👑 Promoted Runner (เลื่อนขั้นถือยาว)"
+
+                        # Lock profit with SL at +0.40R
+                        init_sl_dist = float(order.get("initial_sl_dist") or abs(entry - stop) or 2.50)
+                        promoted_sl = round(entry + (0.40 * init_sl_dist), pip_digits) if side == "BUY" else round(entry - (0.40 * init_sl_dist), pip_digits)
+                        cur_sl = float(order.get("stop_mt5") or 0.0)
+                        improves_sl = (promoted_sl > cur_sl) if side == "BUY" else (cur_sl <= 0.0 or promoted_sl < cur_sl)
+                        if improves_sl:
+                            order["stop_mt5"] = promoted_sl
+                            order["sl_moved_breakeven"] = True
+                            order["locked_r"] = 0.40
+
+                        # Expand TP to swing target (at least 3.5R to 5.0R)
+                        promoted_tp = round(entry + (3.5 * init_sl_dist), pip_digits) if side == "BUY" else round(entry - (3.5 * init_sl_dist), pip_digits)
+                        if market_context:
+                            st_ctx = market_context.get("structure") or {}
+                            sw_tp = st_ctx.get("swing_target") or (st_ctx.get("trade_setup") or {}).get("target_mt5")
+                            if sw_tp:
+                                promoted_tp = round(float(sw_tp), pip_digits)
+
+                        order["target_mt5"] = promoted_tp
+                        order["management_note_th"] = (
+                            f"👑 เลื่อนขั้นเป็นไม้รันเทรนด์ (Promoted Runner): ตลาดโมเมนตัมแรงขยายตัวตามเทรนด์ใหญ่ "
+                            f"ล็อกกำไร SL ที่ {order['stop_mt5']:.2f} (+0.40R) และขยายเป้าหมาย TP เป็น {promoted_tp:.2f} เพื่อรันกำไรสูงสุด"
+                        )
+                        last_event = {
+                            "type": "ORDER_PROMOTED_TO_RUNNER",
+                            "order_id": order["order_id"],
+                            "side": side,
+                            "new_sl": order["stop_mt5"],
+                            "new_tp": promoted_tp,
+                            "locked_r": 0.40,
+                            "broker_ticket": order.get("broker_ticket"),
+                            "order": dict(order),
+                            "message": f"👑 เลื่อนขั้นออเดอร์ {side} เป็นไม้รันเทรนด์! ล็อกกำไร SL @ {order['stop_mt5']:.2f} ขยาย TP @ {promoted_tp:.2f}",
+                        }
+
+                # 0.7 Early Profit Taking on Market Reversal (ชิงเก็บกำไรก่อนตลาดกลับตัวไปชน SL)
+                # STRICT GUARD: Require >= 60s hold + genuine net profit beyond spread (flt_usd >= $0.45)
+                # and ONLY react to NEW structure breaks formed AFTER filled_ts!
+                reversal_trigger = None
+                reversal_trigger_th = None
+                highest_r = float(order.get("highest_pnl_r") or flt_r)
+                is_winning = (
+                    holding_seconds >= 60
+                    and flt_usd >= 0.45
+                    and flt_r >= (0.25 if (is_rapid and order_sideway) else 0.35)
+                )
+
+                if is_winning:
+                    # Trigger A: Profit Retracement / Giveback Sentinel
+                    if is_rapid and order_sideway and highest_r >= 0.45 and flt_r <= (highest_r * 0.65):
+                        reversal_trigger = "SIDEWAY_PEAK_GIVEBACK"
+                        reversal_trigger_th = f"ตลาดพักตัว/ไซด์เวย์ กำไรสูงสุดแตะ +{highest_r:.2f}R แต่เริ่มย่อตัวเหลือ +{flt_r:.2f}R ชิงเก็บกำไรทันทีก่อนตลาดกลับตัว"
+                    elif highest_r >= 0.65 and flt_r <= (highest_r * 0.55):
+                        reversal_trigger = "PEAK_PROFIT_GIVEBACK"
+                        reversal_trigger_th = f"กำไรสูงสุดเคยแตะ +{highest_r:.2f}R แต่เริ่มย่อตัวรุนแรงเหลือ +{flt_r:.2f}R (ย่อเสียกำไร >45%)"
+
+                    # Trigger B: Rejection Candle against position in profit (Shooting Star / Hammer)
+                    bar_rng = (bar_hi - bar_lo)
+                    min_bar_rng = 0.0004 if ("EUR" in order_sym or "GBP" in order_sym) else 0.40
+                    wick_threshold = 0.55 if (is_rapid and order_sideway) else 0.60
+                    if not reversal_trigger and flt_r >= (0.30 if (is_rapid and order_sideway) else 0.40) and bar_rng >= min_bar_rng:
+                        if side == "BUY":
+                            upper_wick = bar_hi - max(current_price, bar_lo + (bar_rng * 0.40))
+                            if (upper_wick / bar_rng) >= wick_threshold and flt_r < highest_r:
+                                reversal_trigger = "BEARISH_REJECTION_WICK"
+                                reversal_trigger_th = f"เกิดแท่งเทียนทิ้งไส้บนปฏิเสธราคาชัดเจน ({upper_wick/bar_rng*100:.0f}% ของแท่ง) ชนแนวต้าน"
+                        elif side == "SELL":
+                            lower_wick = min(current_price, bar_hi - (bar_rng * 0.40)) - bar_lo
+                            if (lower_wick / bar_rng) >= wick_threshold and flt_r < highest_r:
+                                reversal_trigger = "BULLISH_REJECTION_WICK"
+                                reversal_trigger_th = f"เกิดแท่งเทียนทิ้งไส้ล่างปฏิเสธราคาชัดเจน ({lower_wick/bar_rng*100:.0f}% ของแท่ง) ชนแนวรับ"
+
+                    # Trigger C: Opposite Structure Break (CHoCH / BOS) — ONLY breaks formed AFTER entry!
+                    if not reversal_trigger and market_context:
+                        st_ctx = market_context.get("structure") or {}
+                        for brk in (st_ctx.get("breaks") or []):
+                            brk_ts = int(brk.get("time") or brk.get("timestamp") or 0)
+                            if brk_ts <= filled_ts:
+                                continue
+                            if brk.get("type") in ("CHOCH", "BOS"):
+                                if (side == "BUY" and brk.get("direction") == "BEARISH") or (side == "SELL" and brk.get("direction") == "BULLISH"):
+                                    reversal_trigger = f"OPPOSITE_{brk.get('type')}"
+                                    reversal_trigger_th = f"โครงสร้างตลาดเกิดสัญญาณกลับตัวใหม่ {brk.get('type')} {brk.get('direction')}"
+                                    break
+
+                    # Trigger D (Rapid Fire MTF S/R + Candlestick Rejection):
+                    # When price reaches an opposing MTF Resistance (BUY) / MTF Support (SELL) and prints
+                    # a fresh opposing candlestick pattern AFTER entry, bank the profit immediately!
+                    if not reversal_trigger and is_rapid and market_context:
+                        mtf_sr_ctx = order.get("mtf_sr_context") or {}
+                        opp_zone = mtf_sr_ctx.get("nearest_resistance") if side == "BUY" else mtf_sr_ctx.get("nearest_support")
+                        st_ctx = market_context.get("structure") or {}
+                        cb_ctx = st_ctx.get("candle_behavior") or {}
+                        opp_bias = "BEARISH" if side == "BUY" else "BULLISH"
+                        fresh_opp_candle = next(
+                            (
+                                cp for cp in reversed(cb_ctx.get("recent_patterns") or [])
+                                if int(cp.get("t") or 0) > filled_ts
+                                and str(cp.get("bias") or "").upper() == opp_bias
+                            ),
+                            None,
+                        )
+                        if opp_zone and fresh_opp_candle:
+                            dist_wall = abs(current_price - float(opp_zone.get("mid") or current_price))
+                            if dist_wall <= 0.55:
+                                reversal_trigger = "MTF_SR_CANDLE_REJECTION"
+                                reversal_trigger_th = (
+                                    f"ราคาชนแนว{'ต้าน' if side == 'BUY' else 'รับ'} {opp_zone.get('timeframe', 'MTF')} "
+                                    f"({float(opp_zone.get('mid') or 0):.2f}) + เกิด {fresh_opp_candle.get('label_th', opp_bias)}"
+                                )
+
+                    if reversal_trigger:
+                        order["status"] = "CLOSED_REVERSAL_PROFIT_LOCK"
+                        order["closed_ts"] = now_ts
+                        order["close_price"] = current_price
+                        order["close_reason"] = "REVERSAL_PROFIT_LOCK"
+                        order["realized_pnl_r"] = flt_r
+                        order["realized_pnl_usd"] = flt_usd
+                        order["management_note_th"] = (
+                            f"💰 ชิงปิดทำกำไรล่วงหน้า (Reversal Profit Lock): {reversal_trigger_th} "
+                            f"ล็อกกำไรสำเร็จ (+{flt_r:+.2f}R, ${flt_usd:+.2f}) ก่อนตลาดจะย่อกลับไปชน SL"
+                        )
+                        self.order_history.append(dict(order))
+                        last_event = {
+                            "type": "TRADE_CLOSED_REVERSAL_PROFIT_LOCK",
+                            "order_id": order["order_id"],
+                            "side": side,
+                            "pnl_r": flt_r,
+                            "pnl_usd": flt_usd,
+                            "broker_ticket": order.get("broker_ticket"),
+                            "order": dict(order),
+                            "message": f"💰 ชิงปิดทำกำไรล่วงหน้า: ล็อกกำไร {side} (+{flt_r:+.2f}R, ${flt_usd:+.2f}) หลังพบสัญญาณกลับตัว ({reversal_trigger})",
+                        }
+                        continue
+
+                # 0.8 Rapid Fire MTF S/R Breakdown + Opposing Candle Cut (ตัดขาดทุนเมื่อหลุดแนวรับ/ต้าน TF ใหญ่จริง)
+                if is_rapid and holding_seconds >= 120 and flt_r <= -0.60 and market_context:
+                    mtf_sr_ctx = order.get("mtf_sr_context") or {}
+                    prot_zone = mtf_sr_ctx.get("nearest_support") if side == "BUY" else mtf_sr_ctx.get("nearest_resistance")
+                    st_ctx = market_context.get("structure") or {}
+                    cb_ctx = st_ctx.get("candle_behavior") or {}
+                    opp_bias = "BEARISH" if side == "BUY" else "BULLISH"
+                    fresh_opp_candle = next(
+                        (
+                            cp for cp in reversed(cb_ctx.get("recent_patterns") or [])
+                            if (
+                                (int(cp.get("t") or 0) - 7200 if int(cp.get("t") or 0) > (wall_ts + 60) else int(cp.get("t") or 0))
+                                > filled_ts
+                            )
+                            and str(cp.get("bias") or "").upper() == opp_bias
+                        ),
+                        None,
+                    )
+                    if prot_zone and fresh_opp_candle:
+                        broke_sr = (
+                            (side == "BUY" and current_price < float(prot_zone.get("low") or 0) - 0.35)
+                            or (side == "SELL" and current_price > float(prot_zone.get("high") or 0) + 0.35)
+                        )
+                        if broke_sr:
+                            order["status"] = "CLOSED_DISADVANTAGE"
+                            order["closed_ts"] = now_ts
+                            order["close_price"] = current_price
+                            order["close_reason"] = "MTF_SR_BREAKDOWN_CUT"
+                            order["realized_pnl_r"] = flt_r
+                            order["realized_pnl_usd"] = flt_usd
+                            order["management_note_th"] = (
+                                f"✂️ ตัดออเดอร์เมื่อหลุดแนว{'รับ' if side == 'BUY' else 'ต้าน'} {prot_zone.get('timeframe', 'MTF')} "
+                                f"({float(prot_zone.get('mid') or 0):.2f}) + {fresh_opp_candle.get('label_th', opp_bias)} ({flt_r:+.2f}R)"
+                            )
+                            self.order_history.append(dict(order))
+                            last_event = {
+                                "type": "ORDER_CLOSED_DISADVANTAGE",
+                                "order_id": order["order_id"],
+                                "side": side,
+                                "pnl_r": flt_r,
+                                "pnl_usd": flt_usd,
+                                "broker_ticket": order.get("broker_ticket"),
+                                "order": dict(order),
+                                "message": order["management_note_th"],
+                            }
+                            continue
+
                 active_sl = float(order.get("stop_mt5") or (be_sl if order.get("sl_moved_breakeven") else stop))
+                is_live_mt5_order = bool(is_ea_managed and order.get("broker_ticket"))
+
+                # For live MT5 orders with real broker Hard SL/TP, NEVER virtually close on server-side
+                # candle High/Low or external feed ticks — let MT5 broker execute exact SL/TP!
+                if is_live_mt5_order:
+                    remaining_orders.append(order)
+                    continue
+
+                # For non-EA simulation/paper orders, avoid prior-candle High/Low false triggers in first 60s
+                eval_hi = current_price if holding_seconds < 60 else bar_hi
+                eval_lo = current_price if holding_seconds < 60 else bar_lo
 
                 # 1. Full Target TP2
                 hit_tp2 = False
-                if side == "BUY" and bar_hi >= target:
+                if side == "BUY" and eval_hi >= target:
                     hit_tp2 = True
-                elif side == "SELL" and bar_lo <= target:
+                elif side == "SELL" and eval_lo <= target:
                     hit_tp2 = True
 
                 if hit_tp2:
@@ -1003,9 +1420,9 @@ class OrderLifecycleManager:
 
                 # 1.5 Early Exit on Structural Disadvantage / Invalidation (ปิดเมื่อเสียเปรียบ)
                 hit_disadvantage = False
-                if side == "BUY" and bar_lo <= invalidation and invalidation > stop:
+                if side == "BUY" and eval_lo <= invalidation and invalidation > stop:
                     hit_disadvantage = True
-                elif side == "SELL" and bar_hi >= invalidation and invalidation < stop:
+                elif side == "SELL" and eval_hi >= invalidation and invalidation < stop:
                     hit_disadvantage = True
 
                 if hit_disadvantage:
@@ -1034,9 +1451,9 @@ class OrderLifecycleManager:
 
                 # 2. Stop Loss / Breakeven SL
                 hit_sl = False
-                if side == "BUY" and bar_lo <= active_sl:
+                if side == "BUY" and eval_lo <= active_sl:
                     hit_sl = True
-                elif side == "SELL" and bar_hi >= active_sl:
+                elif side == "SELL" and eval_hi >= active_sl:
                     hit_sl = True
 
                 if hit_sl:
@@ -1372,7 +1789,21 @@ class OrderLifecycleManager:
             o_dict = dict(ord_item)
             o_dict["order_index"] = idx
             purp = str(o_dict.get("purpose") or "INITIAL").upper()
-            if purp == "RECOVERY":
+            strat_m = str(o_dict.get("strategy_mode") or "SMC_SWING").upper()
+            if not o_dict.get("strategy_badge"):
+                if "RAPID" in strat_m:
+                    o_dict["strategy_badge"] = "⚡ Rapid Fire"
+                elif "ROBOT" in strat_m:
+                    o_dict["strategy_badge"] = "🤖 Robot Scalp"
+                elif "RUNNER" in strat_m:
+                    o_dict["strategy_badge"] = "👑 Promoted Runner"
+                else:
+                    o_dict["strategy_badge"] = "🏛️ SMC Swing"
+
+            if purp == "PROMOTED_RUNNER" or strat_m == "PROMOTED_RUNNER":
+                o_dict["purpose_badge_th"] = "👑 ไม้รันเทรนด์ (Promoted Runner)"
+                o_dict["purpose_desc_th"] = "เลื่อนขั้นจากไม้สเกลป์เป็นไม้รันเทรนด์ถือยาวตามโครงสร้าง BOS พร้อมขยายเป้าหมายกำไรสูงสุด"
+            elif purp == "RECOVERY":
                 o_dict["purpose_badge_th"] = "🛡️ ไม้แก้ขาดทุน (Recovery / DCA)"
                 o_dict["purpose_desc_th"] = "ไม้แก้พอร์ตดึงทุนเฉลี่ยอัตโนมัติในโซนกลับตัวสำคัญ"
             elif purp == "SCALE_IN":
@@ -1380,7 +1811,7 @@ class OrderLifecycleManager:
                 o_dict["purpose_desc_th"] = "ไม้ทบเพิ่มกำไรตามเทรนด์เมื่อออเดอร์หลักบวกและโมเมนตัมขยายตัว"
             else:
                 o_dict["purpose"] = "INITIAL"
-                o_dict["purpose_badge_th"] = "🎯 ไม้ทำกำไรหลัก (Initial Entry)"
+                o_dict["purpose_badge_th"] = f"🎯 ไม้ทำกำไรหลัก ({o_dict['strategy_badge']})"
                 o_dict["purpose_desc_th"] = "ไม้เปิดทำกำไรหลักตามสัญญาณวิเคราะห์อัตโนมัติ"
 
             lot = float(o_dict.get("lot_size") or 0.10)
@@ -1487,20 +1918,59 @@ class OrderLifecycleManager:
                             hist_ord["close_reason"] = deal_reas
                         self.save_to_disk()
                         return True
+
+                # Real MT5 Deal capture: if MT5 reports a closed deal not yet in history, add it directly!
+                if status in ("DEAL_CLOSED", "CLOSED", "CLOSED_DEAL_SL", "CLOSED_DEAL_TP"):
+                    d_profit = float(rec.get("profit") or 0.0)
+                    d_swap = float(rec.get("swap") or 0.0)
+                    d_comm = float(rec.get("commission") or 0.0)
+                    tot_pnl = round(d_profit + d_swap + d_comm, 2)
+                    d_side = str(rec.get("side") or ("SELL" if str(rec.get("order_type")).upper() == "SELL" else "BUY")).upper()
+                    new_hist = {
+                        "order_id": sig_id or f"MT5-DEAL-{rec.get('deal') or ticket_int}",
+                        "symbol": str(rec.get("symbol") or "XAUUSD").upper(),
+                        "side": d_side,
+                        "lot_size": float(rec.get("lot") or 0.01),
+                        "entry_mt5": fill_px,
+                        "stop_mt5": 0.0,
+                        "target_mt5": 0.0,
+                        "close_price": fill_px,
+                        "status": "CLOSED_DEAL_" + str(rec.get("close_reason") or "CLOSE"),
+                        "close_reason": str(rec.get("close_reason") or "DEAL_CLOSE"),
+                        "realized_pnl_usd": tot_pnl,
+                        "realized_pnl_r": round(tot_pnl / 5.0, 2),
+                        "broker_ticket": ticket_int if ticket_int > 0 else None,
+                        "broker_deal_id": rec.get("deal"),
+                        "strategy_mode": "MT5_EXECUTION",
+                        "strategy_badge": "🤖 MT5 Real Deal",
+                        "management_note_th": f"ออเดอร์ปิดจริงใน MT5 (Ticket #{ticket_int}, PnL: ${tot_pnl:+.2f})",
+                        "closed_ts": int(time.time()),
+                    }
+                    self.order_history.append(new_hist)
+                    self.save_to_disk()
+                    return True
             return False
 
         now_ts = int(time.time())
         target_ord["ea_dispatch_status"] = status
-        if status in (
-            "REJECTED",
-            "FAILED",
-            "FAILED_NO_SL",
-            "SKIPPED_DUPLICATE",
-            "SKIPPED_KILL_SWITCH",
-            "SKIPPED_ROLLOVER",
-            "STALE_SIGNAL",
-        ):
+        is_rejection = (
+            status.startswith("REJECTED")
+            or status.startswith("FAILED")
+            or status
+            in (
+                "SKIPPED_DUPLICATE",
+                "SKIPPED_KILL_SWITCH",
+                "SKIPPED_ROLLOVER",
+                "STALE_SIGNAL",
+            )
+        )
+        if is_rejection:
             target_ord["ea_last_error"] = rec.get("error_msg") or status
+            # If this order never got an MT5 ticket, purge it from active orders immediately
+            if not target_ord.get("broker_ticket"):
+                oid = target_ord.get("order_id")
+                self.cancel_active_order(reason=f"MT5_{status}", order_id=oid)
+                return True
             self._sync_primary()
             self.save_to_disk()
             return True
@@ -1618,6 +2088,29 @@ class OrderLifecycleManager:
                             break
 
             if not bt:
+                # Ghost Order Detection: Order never received a ticket from MT5
+                miss = int(ord_item.get("reconcile_miss_count") or 0) + 1
+                ord_item["reconcile_miss_count"] = miss
+                age_sec = now_ts - int(ord_item.get("created_ts") or now_ts)
+                disp_st = str(ord_item.get("ea_dispatch_status") or "").upper()
+                is_failed_dispatch = (
+                    disp_st.startswith("REJECTED")
+                    or disp_st.startswith("FAILED")
+                    or disp_st in ("SKIPPED_KILL_SWITCH", "SKIPPED_ROLLOVER", "STALE_SIGNAL")
+                )
+                if is_failed_dispatch or (miss >= 2 and age_sec >= 8):
+                    oid = ord_item.get("order_id")
+                    if oid:
+                        clean_reason = f"GHOST_CLEANUP_{disp_st}" if is_failed_dispatch else "GHOST_UNMATCHED_CLEANUP"
+                        if ord_item.get("status") == "PENDING":
+                            reconcile_event = self.cancel_active_order(reason=clean_reason, order_id=oid)
+                        else:
+                            reconcile_event = self.close_order_by_id(
+                                oid,
+                                current_price=current_price or None,
+                                reason=clean_reason,
+                            )
+                        changed = True
                 continue
 
             if bt in pos_by_ticket:
@@ -1648,8 +2141,10 @@ class OrderLifecycleManager:
             else:
                 miss = int(ord_item.get("reconcile_miss_count") or 0) + 1
                 ord_item["reconcile_miss_count"] = miss
-                age_sec = now_ts - int(ord_item.get("filled_ts") or ord_item.get("created_ts") or now_ts)
-                if miss >= 2 and age_sec >= 5:
+                age_sec = max(0, now_ts - int(ord_item.get("created_ts") or now_ts))
+                # If ticket is missing from both open positions and pending orders in MT5 for 2+ heartbeats,
+                # it has been closed or cancelled externally in MT5. Clean it immediately!
+                if miss >= 2:
                     oid = ord_item.get("order_id")
                     if oid:
                         if ord_item.get("status") == "PENDING":
@@ -1666,3 +2161,65 @@ class OrderLifecycleManager:
             self._sync_primary()
             self.save_to_disk()
         return reconcile_event
+
+    def force_sync_with_mt5(
+        self,
+        open_positions: List[Dict[str, Any]],
+        pending_orders: Optional[List[Dict[str, Any]]] = None,
+        current_price: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Force immediate full synchronization with live MT5 state. Purge all ghost/unmatched orders."""
+        mt5_open_tickets = {
+            str(p.get("ticket") or "").strip(): p
+            for p in (open_positions or [])
+            if p.get("ticket")
+        }
+        mt5_pend_tickets = {
+            str(po.get("ticket") or "").strip(): po
+            for po in (pending_orders or [])
+            if po.get("ticket")
+        }
+
+        purged = []
+        synced = []
+
+        for ord_item in list(self.active_orders):
+            bt = str(ord_item.get("broker_ticket") or "").strip()
+            oid = ord_item.get("order_id")
+
+            if bt and bt in mt5_open_tickets:
+                pos = mt5_open_tickets[bt]
+                ord_item["status"] = "FILLED"
+                ord_item["reconcile_miss_count"] = 0
+                open_px = float(pos.get("open_price") or 0.0)
+                if open_px > 0.0:
+                    ord_item["entry_mt5"] = open_px
+                    ord_item["filled_price"] = open_px
+                synced.append(bt)
+            elif bt and bt in mt5_pend_tickets:
+                ord_item["status"] = "PENDING"
+                ord_item["reconcile_miss_count"] = 0
+                synced.append(bt)
+            else:
+                # Unmatched in MT5 -> Purge immediately!
+                if ord_item.get("status") == "PENDING":
+                    self.cancel_active_order(reason="MANUAL_SYNC_PURGE", order_id=oid)
+                else:
+                    self.close_order_by_id(
+                        oid,
+                        current_price=current_price or None,
+                        reason="MANUAL_SYNC_PURGE",
+                    )
+                purged.append(oid or bt or "unknown")
+
+        self._sync_primary()
+        self.save_to_disk()
+        return {
+            "status": "ok",
+            "purged_count": len(purged),
+            "purged_orders": purged,
+            "synced_count": len(synced),
+            "synced_tickets": synced,
+            "mt5_open_count": len(mt5_open_tickets),
+            "mt5_pending_count": len(mt5_pend_tickets),
+        }

@@ -1079,71 +1079,424 @@ def analyze_candlestick_behavior(
         zone_name = "EQUILIBRIUM"
         zone_th = f"กึ่งกลางกรอบราคา (Equilibrium {pos_pct:.0f}%)"
 
-    # Scan last 35 bars for notable candlestick patterns
+    # Scan last 35 bars for comprehensive candlestick behavior, wick rejections, and multi-bar reversal patterns
     patterns: List[Dict[str, Any]] = []
-    start_idx = max(1, len(bars) - 35)
+    start_idx = max(2, len(bars) - 35)
     for i in range(start_idx, len(bars)):
+        prev2 = bars[i - 2]
         prev = bars[i - 1]
         curr = bars[i]
+        p2o, p2h, p2l, p2c = float(prev2["o"]), float(prev2["h"]), float(prev2["l"]), float(prev2["c"])
         po, ph, pl, pc = float(prev["o"]), float(prev["h"]), float(prev["l"]), float(prev["c"])
         co, ch, cl, cc = float(curr["o"]), float(curr["h"]), float(curr["l"]), float(curr["c"])
+        p2_body = abs(p2c - p2o)
+        p2_range = max(0.01, p2h - p2l)
         p_body = abs(pc - po)
+        p_range = max(0.01, ph - pl)
         c_body = abs(cc - co)
         c_range = max(0.01, ch - cl)
         l_wick = max(0.0, min(co, cc) - cl)
         u_wick = max(0.0, ch - max(co, cc))
 
-        # 1. Bullish Engulfing
-        if pc < po and cc > co and cc >= po and co <= pc and c_body >= max(p_body * 1.05, safe_atr * 0.35):
+        # Local 8-bar sweep bounds (excluding current bar)
+        win_start = max(0, i - 8)
+        prior_lows = [float(b["l"]) for b in bars[win_start:i]]
+        prior_highs = [float(b["h"]) for b in bars[win_start:i]]
+        local_min_l = min(prior_lows) if prior_lows else cl
+        local_max_h = max(prior_highs) if prior_highs else ch
+
+        # 1. Liquidity Sweep Rejection Wick (แทงกวาดสภาพคล่องแล้วดึงไส้กลับแรง)
+        if (
+            cl < local_min_l
+            and cc > local_min_l
+            and l_wick >= max(safe_atr * 0.35, c_range * 0.45)
+            and u_wick <= l_wick * 0.55
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "BULLISH_WICK_SWEEP",
+                "category": "WICK_REJECTION",
+                "bias": "BULLISH",
+                "strength": 88,
+                "price": r2(cc),
+                "rejection_price": r2(cl),
+                "label_th": "Liquidity Sweep Pin Bar (กวาด Low ทิ้งไส้ล่างยาวดึงกลับแรง)",
+            })
+        elif (
+            ch > local_max_h
+            and cc < local_max_h
+            and u_wick >= max(safe_atr * 0.35, c_range * 0.45)
+            and l_wick <= u_wick * 0.55
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "BEARISH_WICK_SWEEP",
+                "category": "WICK_REJECTION",
+                "bias": "BEARISH",
+                "strength": 88,
+                "price": r2(cc),
+                "rejection_price": r2(ch),
+                "label_th": "Liquidity Sweep Shooting Star (กวาด High ทิ้งไส้บนยาวทุบกลับแรง)",
+            })
+        # 2. Morning Star / Evening Star (3-Bar Reversal)
+        elif (
+            p2c < p2o
+            and p2_body >= safe_atr * 0.40
+            and p_body <= p2_body * 0.45
+            and cc > co
+            and c_body >= safe_atr * 0.35
+            and cc >= (p2o + p2c) / 2.0
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "MORNING_STAR",
+                "category": "REVERSAL",
+                "bias": "BULLISH",
+                "strength": 86,
+                "price": r2(cc),
+                "rejection_price": r2(min(p2l, pl, cl)),
+                "label_th": "Morning Star (3 แท่งกลับตัวขาขึ้นชัดเจน)",
+            })
+        elif (
+            p2c > p2o
+            and p2_body >= safe_atr * 0.40
+            and p_body <= p2_body * 0.45
+            and cc < co
+            and c_body >= safe_atr * 0.35
+            and cc <= (p2o + p2c) / 2.0
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "EVENING_STAR",
+                "category": "REVERSAL",
+                "bias": "BEARISH",
+                "strength": 86,
+                "price": r2(cc),
+                "rejection_price": r2(max(p2h, ph, ch)),
+                "label_th": "Evening Star (3 แท่งกลับตัวขาลงชัดเจน)",
+            })
+        # 3. Bullish Engulfing
+        elif pc < po and cc > co and cc >= po and co <= pc and c_body >= max(p_body * 1.05, safe_atr * 0.30):
             patterns.append({
                 "index": i,
                 "t": int(curr["t"]),
                 "pattern": "BULLISH_ENGULFING",
+                "category": "REVERSAL",
                 "bias": "BULLISH",
+                "strength": 83,
                 "price": r2(cc),
-                "label_th": "Bullish Engulfing (แท่งเขียวกลืนกินขาขึ้น)",
+                "rejection_price": r2(min(pl, cl)),
+                "label_th": "Bullish Engulfing (แท่งเขียวกลืนกินกลับตัวขาขึ้น)",
             })
-        # 2. Bearish Engulfing
-        elif pc > po and cc < co and cc <= po and co >= pc and c_body >= max(p_body * 1.05, safe_atr * 0.35):
+        # 4. Bearish Engulfing
+        elif pc > po and cc < co and cc <= po and co >= pc and c_body >= max(p_body * 1.05, safe_atr * 0.30):
             patterns.append({
                 "index": i,
                 "t": int(curr["t"]),
                 "pattern": "BEARISH_ENGULFING",
+                "category": "REVERSAL",
                 "bias": "BEARISH",
+                "strength": 83,
                 "price": r2(cc),
-                "label_th": "Bearish Engulfing (แท่งแดงกลืนกินขาลง)",
+                "rejection_price": r2(max(ph, ch)),
+                "label_th": "Bearish Engulfing (แท่งแดงกลืนกินกลับตัวขาลง)",
             })
-        # 3. Bullish Pin Bar / Hammer Rejection
-        elif l_wick >= max(c_body * 1.8, safe_atr * 0.45) and (l_wick / c_range) >= 0.55 and u_wick <= l_wick * 0.45:
+        # 5. Hammer / Dragonfly Doji / Bullish Pin Bar Rejection
+        elif l_wick >= max(c_body * 1.65, safe_atr * 0.38) and (l_wick / c_range) >= 0.52 and u_wick <= l_wick * 0.45:
+            is_dragonfly = c_body <= c_range * 0.14
             patterns.append({
                 "index": i,
                 "t": int(curr["t"]),
-                "pattern": "BULLISH_PINBAR",
+                "pattern": "DRAGONFLY_DOJI" if is_dragonfly else "BULLISH_PINBAR",
+                "category": "WICK_REJECTION",
                 "bias": "BULLISH",
-                "price": r2(cl),
-                "label_th": "Bullish Pin Bar (ไส้ล่างยาวปฏิเสธราคาลง)",
+                "strength": 81 if is_dragonfly else 80,
+                "price": r2(cc),
+                "rejection_price": r2(cl),
+                "label_th": (
+                    "Dragonfly Doji (โดจิหางล่างยาวช้อนกลับตัวแรง)"
+                    if is_dragonfly
+                    else "Hammer / Bullish Pin Bar (ไส้ล่างยาวปฏิเสธราคาลง)"
+                ),
             })
-        # 4. Bearish Pin Bar / Shooting Star Rejection
-        elif u_wick >= max(c_body * 1.8, safe_atr * 0.45) and (u_wick / c_range) >= 0.55 and l_wick <= u_wick * 0.45:
+        # 6. Shooting Star / Gravestone Doji / Bearish Pin Bar Rejection
+        elif u_wick >= max(c_body * 1.65, safe_atr * 0.38) and (u_wick / c_range) >= 0.52 and l_wick <= u_wick * 0.45:
+            is_gravestone = c_body <= c_range * 0.14
             patterns.append({
                 "index": i,
                 "t": int(curr["t"]),
-                "pattern": "BEARISH_PINBAR",
+                "pattern": "GRAVESTONE_DOJI" if is_gravestone else "BEARISH_PINBAR",
+                "category": "WICK_REJECTION",
                 "bias": "BEARISH",
-                "price": r2(ch),
-                "label_th": "Shooting Star / Pin Bar (ไส้บนยาวปฏิเสธราคาขึ้น)",
+                "strength": 81 if is_gravestone else 80,
+                "price": r2(cc),
+                "rejection_price": r2(ch),
+                "label_th": (
+                    "Gravestone Doji (โดจิหางบนยาวทุบกลับตัวแรง)"
+                    if is_gravestone
+                    else "Shooting Star / Pin Bar (ไส้บนยาวปฏิเสธราคาขึ้น)"
+                ),
             })
-        # 5. Strong Momentum Impulse (Marubozu)
-        elif c_body >= safe_atr * 1.35 and (c_body / c_range) >= 0.75:
+        # 7. Tweezer Bottom / Tweezer Top (ฐานคู่/ยอดคู่ 2 แท่ง)
+        elif (
+            pc < po
+            and cc > co
+            and abs(cl - pl) <= max(0.15, safe_atr * 0.14)
+            and c_body >= safe_atr * 0.25
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "TWEEZER_BOTTOM",
+                "category": "REVERSAL",
+                "bias": "BULLISH",
+                "strength": 78,
+                "price": r2(cc),
+                "rejection_price": r2(min(pl, cl)),
+                "label_th": "Tweezer Bottom (แท่งเทียนคู่ย้ำฐานล่างกลับตัวขึ้น)",
+            })
+        elif (
+            pc > po
+            and cc < co
+            and abs(ch - ph) <= max(0.15, safe_atr * 0.14)
+            and c_body >= safe_atr * 0.25
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "TWEEZER_TOP",
+                "category": "REVERSAL",
+                "bias": "BEARISH",
+                "strength": 78,
+                "price": r2(cc),
+                "rejection_price": r2(max(ph, ch)),
+                "label_th": "Tweezer Top (แท่งเทียนคู่ย้ำยอดบนกลับตัวลง)",
+            })
+        # 8. Piercing Line / Dark Cloud Cover
+        elif (
+            pc < po
+            and p_body >= safe_atr * 0.40
+            and cc > co
+            and cc >= (pc + p_body * 0.55)
+            and cc < po
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "PIERCING_LINE",
+                "category": "REVERSAL",
+                "bias": "BULLISH",
+                "strength": 75,
+                "price": r2(cc),
+                "rejection_price": r2(min(pl, cl)),
+                "label_th": "Piercing Line (แท่งเขียวสวนปิดเกินครึ่งแท่งแดง)",
+            })
+        elif (
+            pc > po
+            and p_body >= safe_atr * 0.40
+            and cc < co
+            and cc <= (pc - p_body * 0.55)
+            and cc > po
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "DARK_CLOUD_COVER",
+                "category": "REVERSAL",
+                "bias": "BEARISH",
+                "strength": 75,
+                "price": r2(cc),
+                "rejection_price": r2(max(ph, ch)),
+                "label_th": "Dark Cloud Cover (แท่งแดงสวนปิดต่ำกว่าครึ่งแท่งเขียว)",
+            })
+        # 9. Three White Soldiers / Three Black Crows (3 แท่งโมเมนตัมเรียงตัว)
+        elif (
+            p2c > p2o and pc > po and cc > co
+            and pc > p2c and cc > pc
+            and (p2_body / p2_range) >= 0.55 and (p_body / p_range) >= 0.55 and (c_body / c_range) >= 0.55
+            and (c_body + p_body + p2_body) >= safe_atr * 1.4
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "THREE_WHITE_SOLDIERS",
+                "category": "CONTINUATION",
+                "bias": "BULLISH",
+                "strength": 78,
+                "price": r2(cc),
+                "rejection_price": r2(min(pl, cl)),
+                "label_th": "Three White Soldiers (3 แท่งเขียวเรียงตัวดันราคาต่อเนื่อง)",
+            })
+        elif (
+            p2c < p2o and pc < po and cc < co
+            and pc < p2c and cc < pc
+            and (p2_body / p2_range) >= 0.55 and (p_body / p_range) >= 0.55 and (c_body / c_range) >= 0.55
+            and (c_body + p_body + p2_body) >= safe_atr * 1.4
+        ):
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "THREE_BLACK_CROWS",
+                "category": "CONTINUATION",
+                "bias": "BEARISH",
+                "strength": 78,
+                "price": r2(cc),
+                "rejection_price": r2(max(ph, ch)),
+                "label_th": "Three Black Crows (3 แท่งแดงเรียงตัวทุบราคาต่อเนื่อง)",
+            })
+        # 10. Inside Bar Breakout
+        elif ph <= p2h and pl >= p2l and p2_range >= safe_atr * 0.45 and (cc > p2h or cc < p2l):
+            is_bull = cc > p2h
+            patterns.append({
+                "index": i,
+                "t": int(curr["t"]),
+                "pattern": "BULLISH_INSIDE_BREAKOUT" if is_bull else "BEARISH_INSIDE_BREAKOUT",
+                "category": "CONTINUATION",
+                "bias": "BULLISH" if is_bull else "BEARISH",
+                "strength": 74,
+                "price": r2(cc),
+                "rejection_price": r2(pl if is_bull else ph),
+                "label_th": (
+                    "Inside Bar Breakout ขาขึ้น (เบรกกรอบพักตัวปิดเหนือแท่งแม่)"
+                    if is_bull
+                    else "Inside Bar Breakout ขาลง (เบรกกรอบพักตัวปิดใต้แท่งแม่)"
+                ),
+            })
+        # 11. Strong Momentum Impulse (Marubozu)
+        elif c_body >= safe_atr * 1.25 and (c_body / c_range) >= 0.72:
             is_bull = cc > co
             patterns.append({
                 "index": i,
                 "t": int(curr["t"]),
                 "pattern": "BULLISH_IMPULSE" if is_bull else "BEARISH_IMPULSE",
+                "category": "CONTINUATION",
                 "bias": "BULLISH" if is_bull else "BEARISH",
+                "strength": 73,
                 "price": r2(cc),
-                "label_th": "แท่งเขียวเต็มแท่งพุ่งแรง (Impulse)" if is_bull else "แท่งแดงเต็มแท่งทุบแรง (Impulse)",
+                "rejection_price": r2(cl if is_bull else ch),
+                "label_th": "แท่งเขียวเต็มแท่งพุ่งแรง (Marubozu Impulse)" if is_bull else "แท่งแดงเต็มแท่งทุบแรง (Marubozu Impulse)",
             })
+
+    # Live Actionable Candlestick Signal (last 3 bars: bars_ago <= 2) with STRICT Price Invalidation Guard
+    last_idx = len(bars) - 1
+    live_bar = bars[-1]
+    live_o, live_h, live_l, live_c = float(live_bar["o"]), float(live_bar["h"]), float(live_bar["l"]), float(live_bar["c"])
+    prev_bar = bars[-2] if len(bars) >= 2 else live_bar
+    prev_h, prev_l = float(prev_bar["h"]), float(prev_bar["l"])
+
+    def _is_pattern_still_valid(pat: Dict[str, Any]) -> bool:
+        p_idx = int(pat.get("index", 0))
+        p_bias = str(pat.get("bias") or "").upper()
+        rej = pat.get("rejection_price")
+        bars_ago = last_idx - p_idx
+        if rej is not None:
+            rej_f = float(rej)
+            if p_bias == "BEARISH":
+                # If price ALREADY broke above the Shooting Star / Bearish Reversal high, pattern is INVALIDATED!
+                if live_c >= rej_f:
+                    return False
+                for sub_b in bars[p_idx + 1:]:
+                    if float(sub_b["c"]) >= rej_f:
+                        return False
+            elif p_bias == "BULLISH":
+                # If price ALREADY broke below the Hammer / Bullish Reversal low, pattern is INVALIDATED!
+                if live_c <= rej_f:
+                    return False
+                for sub_b in bars[p_idx + 1:]:
+                    if float(sub_b["c"]) <= rej_f:
+                        return False
+        # Do NOT fire a stale reversal from 1-2 bars ago if the current live candle is surging strongly the opposite way!
+        if bars_ago >= 1:
+            if p_bias == "BEARISH" and ((live_c - live_o) >= max(0.35, safe_atr * 0.45) or live_c > prev_h):
+                return False
+            if p_bias == "BULLISH" and ((live_o - live_c) >= max(0.35, safe_atr * 0.45) or live_c < prev_l):
+                return False
+        return True
+
+    fresh_3 = [
+        p for p in patterns
+        if (last_idx - int(p.get("index", 0))) <= 2 and _is_pattern_still_valid(p)
+    ]
+    live_signal: Dict[str, Any] = {
+        "has_signal": False,
+        "has_reversal_signal": False,
+        "signal_bias": "NEUTRAL",
+        "category": "NONE",
+        "pattern": "",
+        "strength": 0,
+        "rejection_price": None,
+        "bars_ago": 99,
+        "label_th": "",
+    }
+    if fresh_3:
+        # Prioritize freshest highest-strength valid reversal/wick signal
+        best_p = max(
+            fresh_3,
+            key=lambda p: (
+                int(p.get("strength", 0))
+                + (5 if p.get("category") in ("WICK_REJECTION", "REVERSAL") else 0)
+                - (last_idx - int(p.get("index", 0))) * 3
+            ),
+        )
+        cat = str(best_p.get("category") or "CONTINUATION")
+        live_signal = {
+            "has_signal": True,
+            "has_reversal_signal": cat in ("REVERSAL", "WICK_REJECTION"),
+            "signal_bias": str(best_p.get("bias") or "NEUTRAL"),
+            "category": cat,
+            "pattern": str(best_p.get("pattern") or ""),
+            "strength": int(best_p.get("strength") or 70),
+            "rejection_price": best_p.get("rejection_price"),
+            "bars_ago": max(0, last_idx - int(best_p.get("index", last_idx))),
+            "label_th": str(best_p.get("label_th") or ""),
+        }
+    elif len(bars) >= 2:
+        # Fallback: direct live wick rejection inspection on last closed bar (bars[-2]) — ONLY if still valid!
+        lb = bars[-2]
+        lo, lh, ll, lc = float(lb["o"]), float(lb["h"]), float(lb["l"]), float(lb["c"])
+        lrng = max(0.01, lh - ll)
+        luw = lh - max(lo, lc)
+        llw = min(lo, lc) - ll
+        if (
+            llw >= safe_atr * 0.35
+            and (llw / lrng) >= 0.50
+            and luw <= llw * 0.50
+            and live_c > ll
+            and (live_o - live_c) < max(0.35, safe_atr * 0.45)
+        ):
+            live_signal = {
+                "has_signal": True,
+                "has_reversal_signal": True,
+                "signal_bias": "BULLISH",
+                "category": "WICK_REJECTION",
+                "pattern": "LOWER_WICK_REJECTION",
+                "strength": 75,
+                "rejection_price": r2(ll),
+                "bars_ago": 1,
+                "label_th": f"แท่งเทียนทิ้งไส้ล่างปฏิเสธราคาลง ({llw / lrng * 100:.0f}% ของแท่ง)",
+            }
+        elif (
+            luw >= safe_atr * 0.35
+            and (luw / lrng) >= 0.50
+            and llw <= luw * 0.50
+            and live_c < lh
+            and (live_c - live_o) < max(0.35, safe_atr * 0.45)
+        ):
+            live_signal = {
+                "has_signal": True,
+                "has_reversal_signal": True,
+                "signal_bias": "BEARISH",
+                "category": "WICK_REJECTION",
+                "pattern": "UPPER_WICK_REJECTION",
+                "strength": 75,
+                "rejection_price": r2(lh),
+                "bars_ago": 1,
+                "label_th": f"แท่งเทียนทิ้งไส้บนปฏิเสธราคาขึ้น ({luw / lrng * 100:.0f}% ของแท่ง)",
+            }
 
     return {
         "lookback_bars": len(lookback_bars),
@@ -1161,7 +1514,8 @@ def analyze_candlestick_behavior(
             "zone": zone_name,
             "summary_th": zone_th,
         },
-        "recent_patterns": patterns[-8:],
+        "live_signal": live_signal,
+        "recent_patterns": patterns[-10:],
     }
 
 

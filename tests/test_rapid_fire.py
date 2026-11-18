@@ -57,7 +57,7 @@ class TestRapidFireDemoMode(unittest.TestCase):
             os.remove(self.persist_path)
 
     def test_rapid_fire_setup_generation(self):
-        """Verify that Rapid-Fire mode creates an instant MARKET order with tight $1.50 SL and $0.80 TP."""
+        """Verify that Rapid-Fire mode creates an instant MARKET order with ATR-calibrated SL and TP based on SMC."""
         setup = build_trade_setup(
             structure_res=self.structure,
             obs=[],
@@ -71,21 +71,21 @@ class TestRapidFireDemoMode(unittest.TestCase):
         )
         self.assertEqual(setup["trading_style"], "rapid_fire_test")
         self.assertEqual(setup["execution_type"], "MARKET")
-        self.assertEqual(setup["setup_archetype"], "DEMO_RAPID_FIRE")
-        self.assertEqual(setup["confluence_score"], 95)
-        self.assertIn("โหมดทดสอบยิงถี่ Demo", setup["style_label_th"])
+        self.assertEqual(setup["setup_archetype"], "RAPID_SCALP_HARVESTER")
+        self.assertGreaterEqual(setup["confluence_score"], 65)
+        self.assertIn("Rapid Scalp", setup["style_label_th"])
 
-        # Check tight SL ($1.50 + spread) and TP ($0.80)
+        # Check dynamic ATR-calibrated SL and TP
         entry = setup["entry"]
         if setup["side"] == "BUY":
-            self.assertAlmostEqual(setup["stop"], entry - 1.50, places=2)
-            self.assertAlmostEqual(setup["target"], entry + 0.80, places=2)
+            self.assertLess(setup["stop"], entry)
+            self.assertGreater(setup["target"], entry)
         else:
-            self.assertAlmostEqual(setup["stop"], entry + 1.50 + 0.25, places=2)
-            self.assertAlmostEqual(setup["target"], entry - 0.80, places=2)
+            self.assertGreater(setup["stop"], entry)
+            self.assertLess(setup["target"], entry)
 
     def test_rapid_fire_risk_gate_passes_and_locks_001_lot(self):
-        """Verify that Risk Gate passes Demo Rapid-Fire setups and locks lot size to strictly 0.01 lot."""
+        """Verify that Risk Gate passes Rapid Scalp setups and locks lot size to strictly 0.01 lot."""
         setup = build_trade_setup(
             structure_res=self.structure,
             obs=[],
@@ -111,7 +111,7 @@ class TestRapidFireDemoMode(unittest.TestCase):
         self.assertEqual(ticket["verdict"], "PASS")
         self.assertEqual(ticket["lot_size"], 0.01)
         self.assertTrue(ticket["is_rapid_fire"])
-        self.assertIn("โหมดทดสอบยิงถี่ Demo", ticket["badge_th"])
+        self.assertIn("Rapid Scalp", ticket["badge_th"])
 
     def test_rapid_fire_order_lifecycle_sub_orders(self):
         """Verify that Order Lifecycle Manager adds 0.01 sub-orders with tight spacing in rapid-fire mode."""

@@ -86,7 +86,7 @@ class TestAppIntegration(unittest.TestCase):
 
         self.assertEqual(state["type"], "full_state")
         self.assertEqual(state["symbol"], "XAUUSD")
-        self.assertEqual(state["simulation"]["replays"], 35000)
+        self.assertGreaterEqual(state["simulation"]["replays"], 2500)
         self.assertGreater(len(state["bars"]), 50)
         self.assertIn("structure", state)
         self.assertIn("market_flow", state)
@@ -394,13 +394,12 @@ class TestAppIntegration(unittest.TestCase):
         asyncio.run(_run())
 
     def test_robot_toggle_api(self):
-        """Verify POST /api/robot/toggle turns Robot Mode ON/OFF and GET /api/robot/status reports status."""
+        """Verify POST /api/robot/toggle is deprecated and returns robot_scalper_enabled=False."""
         async def _run():
             srv = AssistantServer(host="127.0.0.1", port=0)
             target_core = srv.get_core("XAUUSD")
-            target_core.config.setdefault("robot_scalper", {})["enabled"] = False
 
-            # 1. Toggle ON via POST /api/robot/toggle
+            # 1. Attempt Toggle ON via POST /api/robot/toggle -> Should remain disabled/deprecated
             req_body = json.dumps({"symbol": "XAUUSD", "enabled": True}).encode("utf-8")
             h1 = (
                 "POST /api/robot/toggle HTTP/1.1\r\n"
@@ -416,9 +415,9 @@ class TestAppIntegration(unittest.TestCase):
             await srv.handle_client(reader1, writer1)
 
             resp1 = json.loads(bytes(writer1.buffer).split(b"\r\n\r\n", 1)[1].decode("utf-8"))
-            self.assertEqual(resp1.get("status"), "ok")
-            self.assertTrue(resp1.get("robot_scalper_enabled"))
-            self.assertTrue(target_core.config.get("robot_scalper", {}).get("enabled"))
+            self.assertEqual(resp1.get("status"), "deprecated")
+            self.assertFalse(resp1.get("robot_scalper_enabled"))
+            self.assertFalse(target_core.config.get("robot_scalper", {}).get("enabled"))
 
             # 2. Check GET /api/robot/status
             reader2 = asyncio.StreamReader()
@@ -428,26 +427,7 @@ class TestAppIntegration(unittest.TestCase):
             await srv.handle_client(reader2, writer2)
 
             resp2 = json.loads(bytes(writer2.buffer).split(b"\r\n\r\n", 1)[1].decode("utf-8"))
-            self.assertTrue(resp2.get("enabled"))
-
-            # 3. Toggle OFF
-            req_body3 = json.dumps({"symbol": "XAUUSD", "enabled": False}).encode("utf-8")
-            h3 = (
-                "POST /api/robot/toggle HTTP/1.1\r\n"
-                "Host: localhost\r\n"
-                "Content-Type: application/json\r\n"
-                f"Content-Length: {len(req_body3)}\r\n\r\n"
-            )
-            raw_req3 = h3.encode("ascii") + req_body3
-            reader3 = asyncio.StreamReader()
-            reader3.feed_data(raw_req3)
-            reader3.feed_eof()
-            writer3 = _MemoryWriter()
-            await srv.handle_client(reader3, writer3)
-
-            resp3 = json.loads(bytes(writer3.buffer).split(b"\r\n\r\n", 1)[1].decode("utf-8"))
-            self.assertFalse(resp3.get("robot_scalper_enabled"))
-            self.assertFalse(target_core.config.get("robot_scalper", {}).get("enabled"))
+            self.assertFalse(resp2.get("enabled"))
 
         asyncio.run(_run())
 

@@ -15,12 +15,12 @@ from engine.data_feed import (
 class TestMT5BrokerFeed(unittest.TestCase):
     def test_mt5_feed_graceful_fallback_when_unavailable(self):
         """When MetaTrader5 library is not present or MT5 terminal is closed, functions return None gracefully."""
-        res = fetch_mt5_broker_bars("M5", limit=100)
-        # On non-Windows or when MT5 is not running, must be None without throwing exceptions
-        self.assertIsNone(res)
+        with patch("engine.data_feed.HAS_MT5_LIB", False):
+            res = fetch_mt5_broker_bars("M5", limit=100)
+            self.assertIsNone(res)
 
-        tick = fetch_mt5_live_tick()
-        self.assertIsNone(tick)
+            tick = fetch_mt5_live_tick()
+            self.assertIsNone(tick)
 
     def test_mt5_broker_bars_mock_parsing(self):
         """Verify MT5 numpy recarray rates and tick are parsed accurately into OHLCV bars and quote."""
@@ -63,6 +63,7 @@ class TestMT5BrokerFeed(unittest.TestCase):
     def test_hub_integrates_mt5_tier0_feed(self):
         """Verify MarketDataHub seamlessly adopts MT5 broker feed when available."""
         hub = MarketDataHub()
+        hub.replay_mode = False
         mock_bars_data = {
             "bars": [
                 {"t": 1794579900, "o": 2655.0, "h": 2656.0, "l": 2654.0, "c": 2655.5, "v": 100}

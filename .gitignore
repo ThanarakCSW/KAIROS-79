@@ -6,6 +6,9 @@ active_order.json.tmp
 active_order_btc.json
 active_order_btc.json.tmp
 active_order*.json*
+loss_patterns*.json*
+ai_trade_memory*.json*
+mt5_ea/*.ex5
 *.local.json
 
 # Environment variables & secrets

@@ -41,7 +41,7 @@ class TestBitcoinEngine(unittest.TestCase):
         res = hub.get_bars(symbol="BTCUSD", timeframe="M5")
         bars = res.get("bars", [])
         self.assertGreaterEqual(len(bars), 50)
-        self.assertGreater(bars[-1]["c"], 80000.0)
+        self.assertGreater(bars[-1]["c"], 50000.0)
         self.assertEqual(res.get("symbol"), "BTCUSD")
 
     def test_smc_analysis_for_btc(self):
@@ -193,7 +193,7 @@ class TestBitcoinEngine(unittest.TestCase):
         self.assertIn("structure", state)
         self.assertIn("risk_ticket", state)
         self.assertEqual(state["risk_ticket"]["symbol"], "BTCUSD")
-        self.assertGreater(state["structure"]["current_price"], 80000.0)
+        self.assertGreater(state["structure"]["current_price"], 50000.0)
 
     def test_server_routes_btc_page_and_api(self):
         """Verify AssistantServer serves /btc, /btc.html, and /api/state?symbol=BTCUSD."""

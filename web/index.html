@@ -7,11 +7,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css?v=3.0" />
 </head>
 <body>
-  <!-- Clean Top Status Bar (100% Autonomous Mode) -->
-  <header class="topbar">
+  <!-- Clean & Minimal Top Command Bar -->
+  <header class="topbar topbar-clean">
     <div class="topbar-primary">
       <div class="topbar-left">
         <div class="brand-badge" title="KAIROS-79 — ระบบเทรดและบริหารออเดอร์อัตโนมัติ 100% บน MetaTrader 5">
@@ -21,45 +21,20 @@
           <span class="symbol-name">XAU/USD</span>
         </div>
 
-        <div class="asset-switcher" role="tablist" aria-label="Asset Switcher">
-          <a href="/" class="asset-tab active" title="Gold (XAU/USD)"><span class="asset-icon">🟡</span> Gold (XAU/USD)</a>
-          <a href="/btc" class="asset-tab" title="Bitcoin (BTC/USD)"><span class="asset-icon">₿</span> Bitcoin (BTC/USD)</a>
-        </div>
-
         <span class="topbar-divider" aria-hidden="true"></span>
 
         <div class="ticker-group">
-          <span id="livePrice" class="live-price">2658.05</span>
+          <span id="livePrice" class="live-price">—</span>
           <span id="bidAskPill" class="bid-ask-pill">Bid — / Ask —</span>
         </div>
       </div>
 
       <div class="topbar-right">
-        <button id="tradingModeBadge" class="meta-pill pill-mode-scalp" title="คลิกเพื่อสลับโหมด: เทรดสั้นความถี่สูง (Micro-Scalp) / เทรดรอบปกติ (Intraday)">
-          ⚡ MICRO-SCALP (เข้าเร็วออกเร็ว)
-        </button>
-
-        <button id="btnToggleRobot" class="meta-pill pill-robot-inactive" title="คลิกเพื่อเปิด/ปิดโหมดหุ่นยนต์ (Robot Scalper): เน้นออกออเดอร์ถี่ เก็บกำไรสั้นต่อเนื่อง พร้อมระบบตัดวงจรขาดทุน 2.5%">
-          🤖 ROBOT MODE: OFF
-        </button>
-
-        <button id="btnToggleRapidFire" class="meta-pill pill-rapid-inactive" title="คลิกเพื่อเปิด/ปิดโหมดทดสอบยิงถี่ Demo (Rapid-Fire Stress Test): ยิงออเดอร์ทันทีไม่เลือกจังหวะ • กั้น SL $1.50 • เก็บ TP $0.80 • ล็อก 0.01 Lot สำหรับทดสอบระบบในบัญชี Demo">
-          🧪 RAPID-FIRE DEMO: OFF
-        </button>
-
-        <span id="autoEnginePill" class="meta-pill pill-auto-active" title="ระบบทำงานแบบ Automation 100%: วิเคราะห์เบื้องหลัง • เปิดออเดอร์ • แก้ไม้ DCA • ทบกำไร • เลื่อน SL บังทุนอัตโนมัติ">
-          🤖 FULL AUTOMATION ACTIVE
-        </span>
-
-        <span id="mt5StatusPill" class="meta-pill pill-mt5-offline" title="สถานะการเชื่อมต่อพอร์ต MetaTrader 5 EA">
-          <i class="conn-dot"></i> <span id="mt5StatusText">MT5: Waiting...</span>
-        </span>
-
-        <span id="wsStatus" class="conn-indicator">
+        <span id="wsStatus" class="conn-indicator" title="สถานะการสตรีมข้อมูลราคาแบบเรียลไทม์">
           <i class="conn-dot"></i> <span id="wsStatusText">Connecting</span>
         </span>
 
-        <button id="btnOpenSettings" class="btn-outline" title="ตั้งค่าขนาดพอร์ตเริ่มต้นและคีย์ AI เบื้องหลัง">
+        <button id="btnOpenSettings" class="btn-outline" title="ตั้งค่าพอร์ตเริ่มต้นและคีย์ Gemini AI">
           ⚙️ ตั้งค่าระบบ
         </button>
       </div>
@@ -68,96 +43,484 @@
 
   <!-- Main Autonomous MT5 Order Monitor Dashboard -->
   <main class="auto-monitor-workspace">
-    <!-- 1. Top 4-Card Summary Strip: กี่ไม้ • เข้าจุดไหน • TP/SL ราคาไหน • กำไร/ขาดทุนเท่าไหร่ -->
-    <section class="summary-strip">
-      <!-- Card 1: จำนวนไม้ & ประเภทไม้ -->
-      <div class="summary-card" id="cardOrdersCount">
-        <div class="summary-card-head">
-          <span class="summary-label">📋 จำนวนไม้ใน MT5 (ACTIVE ORDERS)</span>
-          <span id="summaryStatusBadge" class="status-tag tag-scanning">🤖 AUTO SCANNING</span>
-        </div>
-        <div class="summary-main-val" id="sumOrdersCount">0 ไม้</div>
-        <div class="summary-role-pills" id="sumRoleBreakdown">
-          <span class="role-mini role-initial">🎯 ไม้ทำกำไร: <b id="cntInitial">0</b></span>
-          <span class="role-mini role-recovery">🛡️ ไม้แก้ขาดทุน: <b id="cntRecovery">0</b></span>
-          <span class="role-mini role-scale">🚀 ไม้ทบกำไร: <b id="cntScale">0</b></span>
-        </div>
-        <div class="summary-sub-text" id="sumTotalLot">ขนาดรวม: 0.00 Lot</div>
-      </div>
-
-      <!-- Card 2: ทิศทาง & จุดเข้า (Entry Price) -->
-      <div class="summary-card" id="cardEntryInfo">
-        <div class="summary-card-head">
-          <span class="summary-label">🎯 จุดเข้าออเดอร์ (ENTRY PRICE)</span>
-          <span id="sumSideBadge" class="side-tag side-neutral">WAITING</span>
-        </div>
-        <div class="summary-main-val mono" id="sumEntryPrice">—</div>
-        <div class="summary-sub-text" id="sumAvgEntry">ทุนเฉลี่ยรวมทุกไม้: —</div>
-        <div class="summary-sub-text" id="sumEntryDistance">ระบบกำลังวิเคราะห์หาจุดเข้าที่ได้เปรียบในเบื้องหลัง</div>
-      </div>
-
-      <!-- Card 3: จุดทำกำไร & ตัดขาดทุน (TP / SL) -->
-      <div class="summary-card" id="cardTpSlInfo">
-        <div class="summary-card-head">
-          <span class="summary-label">🛡️ จุดทำกำไร &amp; ตัดขาดทุน (TP / SL)</span>
-          <span id="sumRiskControlBadge" class="status-tag tag-shield">AUTO SL/TP</span>
-        </div>
-        <div class="tpsl-summary-grid">
-          <div class="tpsl-box tp-box">
-            <span class="tpsl-lbl">TAKE PROFIT (TP1 / TP2)</span>
-            <strong class="tpsl-val mono" id="sumTpPrice">—</strong>
+    <!-- TOP COMMAND HUB: 3 Dedicated Overview & Control Cards -->
+    <section class="command-hub-section">
+      <div class="command-hub-grid">
+        <!-- HUB CARD 1: Account Balance & MT5 Connection Status -->
+        <div class="hub-card hub-card-account" id="cardAccountConn">
+          <div class="hub-card-head">
+            <div class="hub-title-wrap">
+              <span class="hub-icon">🏦</span>
+              <span class="hub-title">ยอดเงินพอร์ต &amp; การเชื่อมต่อ MT5</span>
+            </div>
+            <span id="hubConnBadge" class="conn-pill conn-offline">
+              <i class="conn-led-dot"></i>
+              <span id="hubConnText">รอเชื่อมต่อ EA</span>
+            </span>
           </div>
-          <div class="tpsl-box sl-box">
-            <span class="tpsl-lbl">STOP LOSS (SL)</span>
-            <strong class="tpsl-val mono" id="sumSlPrice">—</strong>
+
+          <div class="hub-balance-hero">
+            <div class="balance-main-col">
+              <span class="balance-kicker">BALANCE (MT5)</span>
+              <div id="hubBalanceVal" class="hub-big-val mono">$0.00</div>
+            </div>
+            <div class="balance-sub-stats">
+              <div class="mini-stat-box">
+                <span class="mini-stat-lbl">Equity</span>
+                <strong id="hubEquityVal" class="mini-stat-val mono">$0.00</strong>
+              </div>
+              <div class="mini-stat-box">
+                <span class="mini-stat-lbl">Free Margin</span>
+                <strong id="hubFreeMarginVal" class="mini-stat-val mono">$0.00</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="hub-meta-footer">
+            <div class="hub-meta-lines">
+              <div id="hubBrokerInfo" class="hub-meta-line">Broker: รอการซิงค์จาก MT5...</div>
+              <div id="hubSpreadOffset" class="hub-meta-line mono">Spread: — • Offset: — • EA v—</div>
+            </div>
+            <button type="button" id="btnReloadSync" class="btn-hub-subtle" title="ซิงค์สถานะพอร์ตและออเดอร์กับ MT5 ทันที">
+              🔄 ซิงค์ MT5
+            </button>
           </div>
         </div>
-        <div class="summary-sub-text" id="sumTpSlMeta">R:R — • ระบบเลื่อน SL บังทุนและล็อคกำไรอัตโนมัติ</div>
-      </div>
 
-      <!-- Card 4: กำไร/ขาดทุนสุทธิ & ความเสี่ยง (Floating PnL) -->
-      <div class="summary-card" id="cardPnlInfo">
-        <div class="summary-card-head">
-          <span class="summary-label">💰 กำไร/ขาดทุนสุทธิ (FLOATING PnL)</span>
-          <span id="sumAccountEquityBadge" class="status-tag">Equity: $5,000.00</span>
+        <!-- HUB CARD 2: Daily PnL, Profit Target & Portfolio Loss Settings -->
+        <div class="hub-card hub-card-pnl" id="cardDailyPnlTarget">
+          <div class="hub-card-head">
+            <div class="hub-title-wrap">
+              <span class="hub-icon">📊</span>
+              <span class="hub-title">กำไร/ขาดทุนวันนี้ &amp; เป้าหมายพอร์ต</span>
+            </div>
+            <button type="button" id="btnOpenPnlTargetModal" class="btn-hub-target" title="ตั้งค่าเป้าหมายกำไรต่อวันและลิมิตขาดทุนของพอร์ต">
+              ⚙️ ตั้งค่ากำไร/ขาดทุน
+            </button>
+          </div>
+
+          <div class="hub-pnl-hero">
+            <div class="pnl-main-col">
+              <span class="balance-kicker">กำไร/ขาดทุนตั้งแต่ตั้งเป้า (SESSION PnL)</span>
+              <div id="hubDailyPnlVal" class="hub-big-val mono">$0.00</div>
+              <div id="hubAnchorMeta" class="hub-anchor-note mono">อ้างอิงจาก Balance ตอนตั้ง: —</div>
+            </div>
+            <span id="hubDailyTargetBadge" class="target-state-badge state-tracking">🎯 กำลังสะสมเป้า</span>
+          </div>
+
+          <div class="hub-bars-stack">
+            <!-- Daily Profit Target Bar -->
+            <div class="hub-progress-group">
+              <div class="hub-progress-head">
+                <span>🎯 เป้าหมายกำไรวันนี้</span>
+                <strong id="hubProfitTargetText" class="mono">$0.00 / $10.00 (0%)</strong>
+              </div>
+              <div class="hub-bar-track">
+                <div id="hubProfitBarFill" class="hub-bar-fill fill-profit" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- Portfolio Loss Limit Bar -->
+            <div class="hub-progress-group">
+              <div class="hub-progress-head">
+                <span>🛑 ลิมิตขาดทุน (จาก Balance ตอนตั้ง)</span>
+                <strong id="hubLossLimitText" class="mono">-$0.00 / -$0.00 (0%)</strong>
+              </div>
+              <div class="hub-bar-track">
+                <div id="hubLossBarFill" class="hub-bar-fill fill-safe" style="width: 0%;"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="hub-pnl-foot">
+            <span id="hubFloatingQuick" class="mono">Floating: $0.00</span>
+            <span id="hubStreakQuick">แพ้ติดกัน: 0 / 3 ไม้</span>
+          </div>
         </div>
-        <div class="summary-main-val mono" id="sumTotalPnl">$0.00 (0.00R)</div>
-        <div class="summary-sub-text" id="sumRiskBudget">ความเสี่ยงที่คุมไว้: —</div>
-        <div class="summary-sub-text" id="sumTargetProfit">เป้าหมายกำไรสุทธิ: —</div>
+
+        <!-- HUB CARD 3: System Controls, Dual Live Scanners & AI/Simulation Status Lights -->
+        <div class="hub-card hub-card-control" id="cardControlHub">
+          <div class="hub-card-head">
+            <div class="hub-title-wrap">
+              <span class="hub-icon">🎛️</span>
+              <span class="hub-title">ควบคุมระบบ &amp; สถานะการสแกนสด</span>
+            </div>
+            <div class="hub-head-actions">
+              <button type="button" id="btnSystemReset" class="btn-hub-subtle btn-hub-reset" title="รีเซ็ตเงื่อนไขที่บล็อกออเดอร์ (ปลดล็อก Veto/สตรีคแพ้/คิวค้าง และรีเซ็ตฐาน Balance ใหม่โดยไม่ปิดไม้จริงใน MT5)">
+                🔄 รีเซ็ตระบบ
+              </button>
+              <button type="button" id="btnPurgeGhosts" class="btn-hub-subtle btn-hub-danger" title="กวาดล้างไม้ผีและออเดอร์ตกค้างที่ไม่มีอยู่จริงใน MT5 ทันที">
+                🧹 เคลียร์ไม้ผี
+              </button>
+            </div>
+          </div>
+
+          <!-- Unified Control Switches (No Trading Mode Selector — SMC + Rapid Run Together) -->
+          <div class="control-switches-row">
+            <div class="ctrl-switch-box" title="เปิด/ปิดการส่งคำสั่งเข้า MetaTrader 5 อัตโนมัติ">
+              <div class="ctrl-switch-meta">
+                <i class="switch-live-dot dot-live" id="dotAutoTrading"></i>
+                <span class="ctrl-switch-name">Auto-Trading</span>
+              </div>
+              <div class="ctrl-switch-right">
+                <label class="modern-toggle-switch" for="switchAutoTrading">
+                  <input type="checkbox" id="switchAutoTrading" checked />
+                  <span class="switch-slider"></span>
+                </label>
+                <span class="switch-status-pill pill-on" id="badgeAutoTrading">ON</span>
+              </div>
+            </div>
+
+            <div class="ctrl-switch-box" title="เปิด/ปิดเครื่องยนต์ Rapid Scalp (M1) เสริมคู่กับ SMC Swing (M15)">
+              <div class="ctrl-switch-meta">
+                <span class="switch-icon-bolt">⚡</span>
+                <span class="ctrl-switch-name">Rapid Scalp</span>
+              </div>
+              <div class="ctrl-switch-right">
+                <label class="modern-toggle-switch" for="switchRapidFire">
+                  <input type="checkbox" id="switchRapidFire" checked />
+                  <span class="switch-slider"></span>
+                </label>
+                <span class="switch-status-pill pill-on" id="badgeRapidFire">ON</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live Sideway Guard Status Banner (shown when Sideway Pause / Continue Override is active) -->
+          <div id="hubSidewayStatusBar" class="hub-sideway-bar hidden">
+            <div class="hub-sideway-info">
+              <span id="hubSidewayIcon" class="hub-sideway-icon">⏸️</span>
+              <span id="hubSidewayText" class="hub-sideway-text">เฝ้ารอกราฟหลุดกรอบ Sideway — จะกลับมาออกไม้อัตโนมัติเมื่อเข้าเทรนด์</span>
+            </div>
+            <button type="button" id="btnHubSidewayAction" class="btn-sideway-quick">▶️ เปิดออกไม้ต่อ</button>
+          </div>
+
+          <!-- Live Dual-Engine Scanning Radar Indicators -->
+          <div class="scanner-grid">
+            <div class="scanner-item is-scanning" id="scannerRowSmc">
+              <div class="scanner-top">
+                <div class="scanner-label-group">
+                  <span class="scanner-orb orb-smc" id="orbSmc" aria-hidden="true">
+                    <span class="orb-ring"></span>
+                    <span class="orb-core"></span>
+                  </span>
+                  <span class="scanner-engine-name">🏛️ SMC Swing <small>M15</small></span>
+                </div>
+                <span class="scanner-state-pill" id="smcScanBadge">SCANNING</span>
+              </div>
+              <div class="scanner-desc" id="smcScanText">กำลังสแกนโครงสร้าง OB/FVG หาจุดเข้า M15...</div>
+              <div class="scanner-beam-track">
+                <div class="scanner-beam-bar beam-smc"></div>
+              </div>
+            </div>
+
+            <div class="scanner-item is-scanning" id="scannerRowRapid">
+              <div class="scanner-top">
+                <div class="scanner-label-group">
+                  <span class="scanner-orb orb-rapid" id="orbRapid" aria-hidden="true">
+                    <span class="orb-ring"></span>
+                    <span class="orb-core"></span>
+                  </span>
+                  <span class="scanner-engine-name">⚡ Rapid Scalp <small>M1</small></span>
+                </div>
+                <span class="scanner-state-pill" id="rapidScanBadge">SCANNING</span>
+              </div>
+              <div class="scanner-desc" id="rapidScanText">กำลังสแกนโมเมนตัมสเกลป์ความเร็วสูง M1...</div>
+              <div class="scanner-beam-track">
+                <div class="scanner-beam-bar beam-rapid"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- LED Status Lights: Gemini AI & Chart Simulation (Monte Carlo) -->
+          <div class="led-status-strip">
+            <div class="led-indicator-chip" id="ledWrapGemini" title="สถานะการทำงานของระบบวิเคราะห์โดย Google Gemini AI">
+              <span class="status-led led-idle" id="ledGemini"></span>
+              <div class="led-texts">
+                <span class="led-name">🧠 Gemini AI</span>
+                <span class="led-sub" id="ledGeminiText">กำลังตรวจสอบ...</span>
+              </div>
+            </div>
+
+            <div class="led-indicator-chip" id="ledWrapSim" title="สถานะการทำงานของระบบจำลองกราฟ Monte Carlo">
+              <span class="status-led led-idle" id="ledSim"></span>
+              <div class="led-texts">
+                <span class="led-name">🎲 จำลองกราฟ</span>
+                <span class="led-sub" id="ledSimText">กำลังคำนวณ...</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
-    <!-- 2. Detailed Active MT5 Orders Breakdown (รายละเอียดของแต่ละไม้ว่าเป็นไม้ทำกำไร / ไม้แก้ขาดทุน / ไม้ทบเพิ่มกำไร) -->
-    <section class="orders-section">
-      <div class="section-header">
-        <div class="section-title-group">
-          <h2>📌 รายละเอียดออเดอร์ที่เข้าใน MT5 (Active Orders Breakdown)</h2>
-          <p>แสดงข้อมูลจุดเข้า, TP/SL, ขนาด Lot และหน้าที่ของแต่ละไม้ (ระบบตัดสินใจเปิดไม้ แก้ไม้ และทบกำไรให้อัตโนมัติทั้งหมด)</p>
+    <!-- Full-Width 4-Card KPI Summary Strip (placed above so Active Orders & Order History sit 100% symmetrical side-by-side) -->
+    <section class="summary-section summary-strip-4col">
+      <div class="summary-grid-4col">
+        <!-- Card 1: จำนวนไม้ & ประเภทไม้ -->
+        <div class="summary-card" id="cardOrdersCount">
+          <div class="summary-card-head">
+            <span class="summary-label">📋 จำนวนไม้ใน MT5 (ACTIVE ORDERS)</span>
+            <span id="summaryStatusBadge" class="status-tag tag-scanning">🤖 AUTO SCANNING</span>
+          </div>
+          <div class="summary-main-val" id="sumOrdersCount">0 ไม้</div>
+          <div class="summary-role-pills" id="sumRoleBreakdown">
+            <span class="role-mini role-initial">🎯 ไม้ทำกำไร: <b id="cntInitial">0</b></span>
+            <span class="role-mini role-recovery">🛡️ ไม้แก้ขาดทุน: <b id="cntRecovery">0</b></span>
+            <span class="role-mini role-scale">🚀 ไม้ทบกำไร: <b id="cntScale">0</b></span>
+          </div>
+          <div class="summary-sub-text" id="sumTotalLot">ขนาดรวม: 0.00 Lot</div>
         </div>
-        <div class="role-legend">
-          <span class="legend-item"><i class="dot-role dot-initial"></i> 🎯 ไม้ทำกำไรหลัก (Initial)</span>
-          <span class="legend-item"><i class="dot-role dot-recovery"></i> 🛡️ ไม้แก้ขาดทุน (Recovery / DCA)</span>
-          <span class="legend-item"><i class="dot-role dot-scale"></i> 🚀 ไม้ทบเพิ่มกำไร (Scale-In)</span>
-        </div>
-      </div>
 
-      <div id="activeOrdersContainer" class="active-orders-grid">
-        <!-- Populated dynamically by app.js -->
+        <!-- Card 2: ทิศทาง & จุดเข้า (Entry Price) -->
+        <div class="summary-card" id="cardEntryInfo">
+          <div class="summary-card-head">
+            <span class="summary-label">🎯 จุดเข้าออเดอร์ (ENTRY PRICE)</span>
+            <span id="sumSideBadge" class="side-tag side-neutral">WAITING</span>
+          </div>
+          <div class="summary-main-val mono" id="sumEntryPrice">—</div>
+          <div class="summary-sub-text" id="sumAvgEntry">ทุนเฉลี่ยรวมทุกไม้: —</div>
+          <div class="summary-sub-text" id="sumEntryDistance">ระบบกำลังวิเคราะห์หาจุดเข้าที่ได้เปรียบในเบื้องหลัง</div>
+        </div>
+
+        <!-- Card 3: จุดทำกำไร & ตัดขาดทุน (TP / SL) -->
+        <div class="summary-card" id="cardTpSlInfo">
+          <div class="summary-card-head">
+            <span class="summary-label">🛡️ จุดทำกำไร &amp; ตัดขาดทุน (TP / SL)</span>
+            <span id="sumRiskControlBadge" class="status-tag tag-shield">AUTO SL/TP</span>
+          </div>
+          <div class="tpsl-summary-grid">
+            <div class="tpsl-box tp-box">
+              <span class="tpsl-lbl">TAKE PROFIT (TP1 / TP2)</span>
+              <strong class="tpsl-val mono" id="sumTpPrice">—</strong>
+            </div>
+            <div class="tpsl-box sl-box">
+              <span class="tpsl-lbl">STOP LOSS (SL)</span>
+              <strong class="tpsl-val mono" id="sumSlPrice">—</strong>
+            </div>
+          </div>
+          <div class="summary-sub-text" id="sumTpSlMeta">R:R — • ระบบเลื่อน SL บังทุนและล็อคกำไรอัตโนมัติ</div>
+        </div>
+
+        <!-- Card 4: กำไร/ขาดทุนสุทธิ & ความเสี่ยง (Floating PnL) -->
+        <div class="summary-card" id="cardPnlInfo">
+          <div class="summary-card-head">
+            <span class="summary-label">💰 กำไร/ขาดทุนสุทธิ (FLOATING PnL)</span>
+            <span id="sumAccountEquityBadge" class="status-tag">Equity: $5,000.00</span>
+          </div>
+          <div class="summary-main-val mono" id="sumTotalPnl">$0.00 (0.00R)</div>
+          <div class="summary-sub-text" id="sumRiskBudget">ความเสี่ยงที่คุมไว้: —</div>
+          <div class="summary-sub-text" id="sumTargetProfit">เป้าหมายกำไรสุทธิ: —</div>
+        </div>
       </div>
     </section>
 
-    <!-- 3. Recent Closed MT5 Orders History (ประวัติออเดอร์ที่ปิดแล้วใน MT5) -->
-    <section class="orders-section history-section">
-      <div class="section-header">
-        <div class="section-title-group">
-          <h2>🏁 ประวัติออเดอร์ล่าสุดใน MT5 (Recent Executed Trades)</h2>
-          <p>บันทึกผลลัพธ์ของออเดอร์ที่ระบบดำเนินการเสร็จสิ้นแล้ว พร้อมระบุประเภทไม้และราคาปิด</p>
-        </div>
-        <span id="historyCountBadge" class="status-tag">0 รายการล่าสุด</span>
+    <!-- Symmetrical 50/50 2-Column Layout: Active Orders Breakdown (Left) == Recent Executed Trades (Right) -->
+    <div class="dashboard-2col-layout dashboard-2col-symmetrical">
+      <!-- LEFT 50%: รายละเอียดออเดอร์ที่เข้าใน MT5 (Active Orders Breakdown) -->
+      <div class="dash-col-left">
+        <section class="orders-section active-orders-section">
+          <div class="section-header">
+            <div class="section-title-group">
+              <h2>📌 รายละเอียดออเดอร์ที่เข้าใน MT5 (Active Orders Breakdown)</h2>
+              <p>แสดงข้อมูลจุดเข้า, TP/SL, ขนาด Lot และหน้าที่ของแต่ละไม้ (แสดงสูงสุด 3 ไม้ มากกว่านั้นเลื่อนดูด้วย Scrollbar)</p>
+            </div>
+            <div class="role-legend">
+              <span class="legend-item"><i class="dot-role dot-initial"></i> 🎯 ไม้หลัก (Initial)</span>
+              <span class="legend-item"><i class="dot-role dot-recovery"></i> 🛡️ ไม้แก้ (DCA)</span>
+              <span class="legend-item"><i class="dot-role dot-scale"></i> 🚀 ไม้ทบ (Scale)</span>
+              <button id="btnSectionPurgeGhosts" class="btn-mini-purge" title="ล้างไม้ค้าง/ไม้ผีที่ไม่ตรงกับ MT5 ทันที">🧹 ล้างไม้ผี</button>
+            </div>
+          </div>
+
+          <div id="activeOrdersContainer" class="active-orders-grid">
+            <!-- Populated dynamically by app.js as cards -->
+          </div>
+        </section>
       </div>
 
-      <div id="orderHistoryContainer" class="history-table-wrap">
-        <!-- Populated dynamically by app.js -->
+      <!-- RIGHT 50%: ประวัติออเดอร์ล่าสุดใน MT5 (Recent Executed Trades) — Exact Same Height & Width -->
+      <div class="dash-col-right">
+        <section class="orders-section history-section">
+          <div class="section-header">
+            <div class="section-title-group">
+              <h2>🏁 ประวัติออเดอร์ล่าสุดใน MT5 (Recent Executed Trades)</h2>
+              <p>บันทึกผลลัพธ์ของออเดอร์ที่ระบบดำเนินการเสร็จสิ้นแล้ว พร้อมระบุประเภทไม้และราคาปิด</p>
+            </div>
+            <span id="historyCountBadge" class="status-tag">0 รายการ</span>
+          </div>
+
+          <!-- History Filter Bar (กรองตามวันที่, หมวดหมู่, กำไร/ขาดทุน) -->
+          <div class="history-filter-panel">
+            <div class="filter-controls-row">
+              <div class="filter-group">
+                <label for="filterHistoryDate" class="filter-label">📅 วันที่:</label>
+                <select id="filterHistoryDate" class="filter-select">
+                  <option value="all" selected>ทั้งหมด (All Time)</option>
+                  <option value="today">วันนี้ (Today)</option>
+                  <option value="yesterday">เมื่อวาน (Yesterday)</option>
+                  <option value="7d">7 วันล่าสุด (Past 7 Days)</option>
+                  <option value="custom">ระบุวันที่...</option>
+                </select>
+                <input type="date" id="filterHistoryCustomDate" class="filter-date-input hidden" />
+              </div>
+
+              <div class="filter-group">
+                <label for="filterHistoryCategory" class="filter-label">🏷️ หมวดหมู่:</label>
+                <select id="filterHistoryCategory" class="filter-select">
+                  <option value="all" selected>ทุกหมวดหมู่ (All)</option>
+                  <option value="INITIAL">🎯 ไม้ทำกำไรหลัก (Initial)</option>
+                  <option value="RECOVERY">🛡️ ไม้แก้ขาดทุน (DCA)</option>
+                  <option value="SCALE_IN">🚀 ไม้ทบกำไร (Scale)</option>
+                  <option value="PROMOTED_RUNNER">🏆 ไม้รันเทรนด์ (Runner)</option>
+                  <option value="RAPID_FIRE">⚡ Rapid Scalp</option>
+                  <option value="SMC_SWING">🏛️ SMC Swing</option>
+                </select>
+              </div>
+
+              <div class="filter-group">
+                <label for="filterHistoryOutcome" class="filter-label">💰 ผลลัพธ์:</label>
+                <select id="filterHistoryOutcome" class="filter-select">
+                  <option value="all" selected>ทั้งหมด (All)</option>
+                  <option value="profit">🟢 กำไร (Win / TP)</option>
+                  <option value="loss">🔴 ขาดทุน (Loss / SL)</option>
+                  <option value="breakeven">⚪ เสมอตัว (BE)</option>
+                </select>
+              </div>
+
+              <button type="button" id="btnResetHistoryFilters" class="btn-filter-reset" title="รีเซ็ตตัวกรองทั้งหมด">
+                🔄 ล้างตัวกรอง
+              </button>
+            </div>
+
+            <!-- Dynamic Stats Summary of Filtered Items -->
+            <div id="filterSummaryBar" class="filter-summary-bar">
+              <span class="fs-chip">แสดง: <b id="fsCount">0</b> ไม้</span>
+              <span class="fs-chip">กำไร/ขาดทุนรวม: <b id="fsPnl" class="mono">$0.00 (+0.00R)</b></span>
+              <span class="fs-chip">อัตราชนะ (Win Rate): <b id="fsWinRate">0%</b></span>
+            </div>
+          </div>
+
+          <div id="orderHistoryContainer" class="history-table-wrap">
+            <!-- Populated dynamically by app.js -->
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- 4. Deep Loss Pattern Learning & Background Adaptive Analyzer -->
+    <section class="orders-section learning-section">
+      <div class="section-header">
+        <div class="section-title-group">
+          <h2>🧠 ระบบวิเคราะห์ปรับปรุงกลยุทธ์เบื้องหลัง &amp; จดจำรูปแบบ (Background Adaptive Analyzer)</h2>
+          <p>วิเคราะห์เบื้องหลังอัตโนมัติทันทีเมื่อขาดทุนติดกันเกิน 3 ไม้ เพื่อปรับปรุงเงื่อนไขการเข้าออเดอร์และจัดสรรขนาดไม้รอบถัดไป (ไม่ล็อกพอร์ตด้วย DD Circuit Breaker)</p>
+        </div>
+        <div class="learning-actions">
+          <button type="button" id="btnRunDeepReanalysis" class="btn-action-outline" title="สั่งให้ระบบรันการวิเคราะห์โครงสร้างตลาดและสภาวะความเสี่ยงเชิงลึก">
+            🔬 รันการวิเคราะห์เชิงลึกใหม่
+          </button>
+        </div>
+      </div>
+
+      <div class="learning-grid">
+        <!-- Card A: Background Adaptive Auto-Tuning Status -->
+        <div class="learning-card">
+          <div class="learning-card-head">
+            <span class="card-icon">🧬</span>
+            <h4>ระบบปรับจูนอัตโนมัติเบื้องหลัง (3+ Loss Auto-Adapt)</h4>
+          </div>
+          <div class="learning-card-body">
+            <div class="loss-metric-row">
+              <span class="loss-label">แพ้ติดต่อกัน (ทริกเกอร์ที่ 3 ไม้):</span>
+              <span id="consecCountVal" class="loss-val font-mono">0 / 3 ไม้</span>
+            </div>
+            <div class="loss-metric-row">
+              <span class="loss-label">สัดส่วนจัดสรรออเดอร์ (Allocation):</span>
+              <span id="adaptiveAllocVal" class="loss-val font-mono">100% (ปกติ)</span>
+            </div>
+            <div class="loss-metric-row">
+              <span class="loss-label">ขาดทุนสะสมรอบนี้:</span>
+              <span id="consecLossVal" class="loss-val font-mono">$0.00 (0.0%)</span>
+            </div>
+            <div class="loss-progress-wrap">
+              <div class="loss-progress-bar">
+                <div id="lossProgressBarFill" class="loss-bar-fill" style="width: 0%;"></div>
+              </div>
+              <span id="lossProgressText" class="loss-progress-text">0 / 3 ไม้ (โหมดปกติ)</span>
+            </div>
+            <div id="circuitBreakerAlertBox" class="cb-alert-box normal">
+              <span id="circuitBreakerStatusText">✅ สภาวะปกติ: จัดสรรออเดอร์เต็มประสิทธิภาพ (100%)</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card B: คลังจดจำรูปแบบที่แพ้ (Memorized Loss Patterns) -->
+        <div class="learning-card">
+          <div class="learning-card-head">
+            <span class="card-icon">📚</span>
+            <h4>รูปแบบที่ระบบจดจำเพื่อหลีกเลี่ยง (Memorized Failure Patterns)</h4>
+          </div>
+          <div class="learning-card-body">
+            <div id="lossPatternsContainer" class="loss-patterns-list">
+              <p class="empty-hint">ยังไม่มีรูปแบบที่แพ้สะสม — ระบบกำลังเรียนรู้และเฝ้าระวังแบบเรียลไทม์</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card C: ผลการวิเคราะห์เชิงลึก (Deep Re-Analysis Diagnostic Report) -->
+        <div class="learning-card learning-card-wide">
+          <div class="learning-card-head">
+            <span class="card-icon">📑</span>
+            <h4>รายงานการวิเคราะห์เชิงลึก (Deep Re-Analysis Report)</h4>
+            <span id="reanalysisTimestamp" class="meta-tag">อัปเดตล่าสุด: -</span>
+          </div>
+          <div class="learning-card-body">
+            <div id="reanalysisReportContent" class="reanalysis-content">
+              <p class="empty-hint">ยังไม่มีการรันวิเคราะห์เชิงลึก — ระบบจะทำงานอัตโนมัติเมื่อเกิด Drawdown หรือกดปุ่มด้านบน</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card D: Online AI Self-Learning Trade Memory (Trains on Every Real Closed Win & Loss) -->
+        <div class="learning-card learning-card-wide ai-memory-card">
+          <div class="learning-card-head">
+            <span class="card-icon">🤖</span>
+            <h4>โมเดล AI เรียนรู้ลักษณะการเข้าไม้ (Online Self-Learning Memory)</h4>
+            <div class="ai-mem-head-right">
+              <span id="aiMemStatsBadge" class="meta-tag mono">เทรนแล้ว: 0 ไม้ • Win 0%</span>
+              <button type="button" id="btnResetAiMemory" class="btn-hub-subtle btn-hub-danger" title="ล้างค่าน้ำหนักที่ AI เทรนไว้ทั้งหมดเพื่อเริ่มเรียนรู้ใหม่">
+                🧹 รีเซ็ต AI Memory
+              </button>
+            </div>
+          </div>
+          <div class="learning-card-body ai-mem-body">
+            <div id="aiMemCurrentEval" class="ai-mem-live-pill">
+              🧠 AI Memory กำลังรวบรวมข้อมูลจากการเทรดจริง (ทั้งไม้ชนะและไม้แพ้) เพื่อปรับค่าน้ำหนักอัตโนมัติ
+            </div>
+
+            <div class="ai-mem-columns">
+              <div class="ai-mem-col col-loss">
+                <div class="ai-mem-col-title">🔴 ลักษณะเข้าไม้ที่ AI จำว่าแพ้บ่อย (ลดคะแนน / ลด Lot)</div>
+                <div id="aiMemLosingList" class="ai-mem-list">
+                  <p class="empty-hint">ยังไม่มีลักษณะที่แพ้สะสม</p>
+                </div>
+              </div>
+              <div class="ai-mem-col col-win">
+                <div class="ai-mem-col-title">🟢 ลักษณะเข้าไม้ที่ AI จำว่าทำกำไรดี (เสริมความมั่นใจ)</div>
+                <div id="aiMemWinningList" class="ai-mem-list">
+                  <p class="empty-hint">ยังไม่มีลักษณะที่ทำกำไรสะสม</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="ai-mem-weights-wrap">
+              <span class="ai-mem-weights-label">⚖️ น้ำหนักปัจจัยที่ AI เทรนได้ล่าสุด:</span>
+              <div id="aiMemFeatureWeights" class="ai-mem-weight-pills">
+                <span class="empty-hint">รอสะสมข้อมูลเทรดจริง</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   </main>
@@ -174,18 +537,6 @@
       </div>
 
       <form id="settingsForm" class="modal-form" novalidate>
-        <div class="form-row">
-          <label class="full-field">
-            <span>⚡ โหมดกลยุทธ์การเทรด (Trading Mode)</span>
-            <select id="cfgTradingStyle" class="styled-select">
-              <option value="micro_scalp">⚡ สเกลป์ความเร็วสูง / เข้าเร็วออกเร็ว / ออกออเดอร์ถี่ (High-Frequency Micro-Scalp)</option>
-              <option value="scalping">⚡ สเกลป์ปกติ (Fast Scalp M5/M1)</option>
-              <option value="intraday">🎯 เทรดรอบตามแนวโน้มโครงสร้าง (Intraday SMC)</option>
-            </select>
-            <small>โหมดสเกลป์ความเร็วสูงจะใช้กราฟ M1 เข้าเร็วแบบ Market Order ดัน SL บังทุน +0.5R พร้อมระบบ Time-Decay Exit อัตโนมัติ</small>
-          </label>
-        </div>
-
         <div class="form-row">
           <label>
             <span>ขนาดพอร์ต Equity ($)</span>
@@ -219,9 +570,48 @@
           </label>
         </div>
 
+        <div class="form-row">
+          <label>
+            <span>🎯 เป้าหมายกำไรต่อวัน ($ USD Target)</span>
+            <input type="number" step="any" min="0" id="cfgDailyProfitTarget" value="10.0" />
+            <small>เมื่อกำไรถึงเป้า ระบบจะล็อกกำไรและหยุดเปิดไม้ใหม่ประจำวัน</small>
+          </label>
+          <label>
+            <span>🛑 ลิมิตตัดวงจรเมื่อแพ้สะสม (% Drawdown Circuit Breaker)</span>
+            <input type="number" step="any" min="5" max="50" id="cfgMaxConsecutiveLossPct" value="20.0" />
+            <small>หากแพ้สะสมเกินเกณฑ์ จะหยุดเทรดทันทีและสั่งวิเคราะห์เชิงลึก</small>
+          </label>
+        </div>
+
         <input type="hidden" id="cfgOffset" value="0.0" />
         <input type="checkbox" id="cfgAutoMultiOrder" checked hidden />
-        <input type="checkbox" id="cfgAutoTrading" checked hidden />
+
+        <!-- Modern Switch Control Cards for Settings -->
+        <div class="settings-switches-group">
+          <!-- Switch 1: Auto-Trading -->
+          <div class="settings-switch-card">
+            <div class="switch-card-texts">
+              <div class="switch-card-title">🤖 ส่งคำสั่งเข้า MT5 อัตโนมัติ (MT5 Auto-Trading)</div>
+              <div class="switch-card-desc">เมื่อเปิด ระบบจะส่งออเดอร์เข้า MetaTrader 5 โดยตรงอัตโนมัติทันทีที่ตรวจพบสัญญาณ</div>
+            </div>
+            <label class="modern-toggle-switch switch-large" for="cfgAutoTrading">
+              <input type="checkbox" id="cfgAutoTrading" checked />
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+
+          <!-- Switch 2: Daily Profit Target Lock -->
+          <div class="settings-switch-card">
+            <div class="switch-card-texts">
+              <div class="switch-card-title">🎯 ล็อกพอร์ตเมื่อกำไรถึงเป้าประจำวัน (Daily Profit Lock)</div>
+              <div class="switch-card-desc">พักการเทรดอัตโนมัติเมื่อทำกำไรถึงเป้าหมายที่กำหนดในแต่ละวัน เพื่อรักษากำไรสุทธิ</div>
+            </div>
+            <label class="modern-toggle-switch switch-large" for="cfgDailyProfitTargetEnabled">
+              <input type="checkbox" id="cfgDailyProfitTargetEnabled" checked />
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+        </div>
 
         <label class="full-field">
           <span>🔑 Google Gemini API Key (ทำงานวิเคราะห์เบื้องหลัง)</span>
@@ -237,8 +627,148 @@
     </div>
   </div>
 
+  <!-- Dedicated Quick Modal: Portfolio Daily Profit & Loss Limit Settings -->
+  <div id="pnlTargetModal" class="modal-backdrop hidden">
+    <div class="modal-drawer modal-drawer-compact">
+      <div class="modal-header">
+        <div>
+          <h3>🎯 ตั้งค่ากำไร / ขาดทุนของพอร์ต</h3>
+          <p>คำนวณเป้าหมายกำไรและจุดตัดขาดทุนจาก Balance ปัจจุบัน ณ เวลาที่กดบันทึก</p>
+        </div>
+        <button id="btnClosePnlTarget" class="btn-close">✕</button>
+      </div>
+
+      <form id="pnlTargetForm" class="modal-form" novalidate>
+        <!-- Live Balance Anchor Info Banner -->
+        <div class="anchor-preview-banner">
+          <div class="anchor-banner-top">
+            <span class="anchor-banner-lbl">🏦 Balance ปัจจุบันที่จะใช้อ้างอิง (Anchor Balance)</span>
+            <strong id="quickAnchorBalanceVal" class="anchor-banner-val mono">$0.00</strong>
+          </div>
+          <div class="anchor-banner-sub">
+            เมื่อกดบันทึก ระบบจะเริ่มนับกำไรและคำนวณลิมิตขาดทุนจากยอด Balance นี้ทันที
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label class="full-field">
+            <span>🎯 เป้าหมายกำไรที่ต้องการ ($ USD Profit Target)</span>
+            <input type="number" step="any" min="0" id="quickDailyProfitTarget" value="15.0" />
+            <small id="quickProfitGoalHint" class="preview-hint hint-profit">เป้าพอร์ตปลายทาง: $0.00 (+$15.00)</small>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label>
+            <span>🛑 ลิมิตขาดทุน (% ของ Balance ตอนตั้ง)</span>
+            <input type="number" step="any" min="1" max="95" id="quickMaxLossPct" value="20.0" />
+          </label>
+          <label>
+            <span>💵 หรือระบุเป็นยอดขาดทุนสูงสุด ($ USD)</span>
+            <input type="number" step="any" min="0.5" id="quickMaxLossUsd" value="0.0" />
+          </label>
+        </div>
+        <div id="quickLossFloorHint" class="preview-hint hint-loss">จุดตัดขาดทุน (Stop Floor): $0.00 (ขาดทุนสูงสุด -$0.00)</div>
+
+        <div class="form-row">
+          <label class="full-field">
+            <span>⚖️ ความเสี่ยงต่อไม้ (% Risk Per Trade)</span>
+            <input type="number" step="any" min="0.1" max="100" id="quickRiskPct" value="2.0" />
+            <small>ใช้คำนวณขนาด Lot Size อัตโนมัติตามระยะ Stop Loss ของแต่ละไม้</small>
+          </label>
+        </div>
+
+        <div class="settings-switches-group">
+          <div class="settings-switch-card">
+            <div class="switch-card-texts">
+              <div class="switch-card-title">🔒 ล็อกพอร์ตและปิดไม้อัตโนมัติเมื่อทำกำไรถึงเป้า</div>
+              <div class="switch-card-desc">เมื่อกำไรแตะเป้าหมาย ระบบจะปิดออเดอร์เพื่อล็อกกำไรและหยุด Auto-Trading ชั่วคราวทันที</div>
+            </div>
+            <label class="modern-toggle-switch switch-large" for="quickDailyProfitEnabled">
+              <input type="checkbox" id="quickDailyProfitEnabled" checked />
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" id="btnCancelPnlTarget" class="btn-outline">ยกเลิก</button>
+          <button type="submit" class="btn-ai-glow">💾 บันทึกเป้ากำไร / ขาดทุน</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Sideway Detection Alert & 30-Second Auto-Pause Decision Popup -->
+  <div id="sidewayDecisionModal" class="modal-backdrop sideway-modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card sideway-modal-card">
+      <div class="sideway-modal-head">
+        <div class="sideway-badge-row">
+          <span class="sideway-alert-pill">🦀 SIDEWAY DETECTED</span>
+          <span class="sideway-paused-pill">⏸️ หยุดออกไม้ใหม่ชั่วคราวแล้ว</span>
+        </div>
+        <h2 class="sideway-modal-title">กราฟกำลังเข้าสู่ภาวะ Sideway!</h2>
+        <p class="sideway-modal-sub">
+          ระบบตรวจพบว่าราคาทองคำกำลังแกว่งตัวในกรอบพักตัว จึงระงับการเปิดออเดอร์ใหม่ชั่วคราว (ออเดอร์ที่เปิดค้างอยู่ใน MT5 ยังทำงานตามปกติ)
+        </p>
+      </div>
+
+      <div class="sideway-metrics-box">
+        <div class="sideway-metric-row">
+          <span>📊 สาเหตุที่ตรวจพบ</span>
+          <strong id="sidewayReasonText" class="mono">Regime: RANGING • EMA พันกัน</strong>
+        </div>
+        <div class="sideway-metric-row">
+          <span>🚀 โหมดเฝ้ารออัตโนมัติ</span>
+          <strong>หากหยุดรอ ระบบจะกลับมาออกไม้อัตโนมัติทันทีเมื่อกราฟหลุดกรอบเป็นเทรนด์</strong>
+        </div>
+      </div>
+
+      <div class="sideway-countdown-box">
+        <div class="sideway-countdown-head">
+          <span>⏳ นับถอยหลังตัดสินใจอัตโนมัติ</span>
+          <strong id="sidewayCountdownText" class="mono sideway-countdown-num">30 วินาที</strong>
+        </div>
+        <div class="sideway-countdown-track">
+          <div id="sidewayCountdownBar" class="sideway-countdown-fill" style="width: 100%;"></div>
+        </div>
+        <div class="sideway-countdown-hint">
+          หากไม่กดเลือกภายใน 30 วินาที ระบบจะเลือก <strong>“หยุดออกไม้ เฝ้ารอจังหวะ”</strong> ให้อัตโนมัติเพื่อความปลอดภัย
+        </div>
+      </div>
+
+      <div class="sideway-modal-actions">
+        <button type="button" id="btnSidewayPause" class="btn-sideway-pause">
+          ⏸️ หยุดออกไม้ เฝ้ารอจังหวะ (<span id="btnSidewayPauseSec">30</span>s)
+        </button>
+        <button type="button" id="btnSidewayContinue" class="btn-sideway-continue">
+          ▶️ ให้ระบบทำงานต่อ (เทรดใน Sideway)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reusable Action / Mode / Settings Loading Popup Overlay -->
+  <div id="actionLoadingModal" class="action-loading-backdrop hidden" aria-hidden="true">
+    <div class="action-loading-card">
+      <div class="loading-spinner-orbital">
+        <div class="orbital-ring ring-outer"></div>
+        <div class="orbital-ring ring-inner"></div>
+        <div class="orbital-glow"></div>
+        <span class="orbital-icon" id="loadingIcon">⚡</span>
+      </div>
+      <div class="loading-message-group">
+        <h3 id="loadingTitle">กำลังประมวลผล...</h3>
+        <p id="loadingSubtitle">กรุณารอสักครู่ ระบบกำลังปรับปรุงและซิงค์ข้อมูลกับ MT5</p>
+      </div>
+      <div class="loading-pulse-dots">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden">บันทึกสำเร็จ!</div>
   <script>window.CURRENT_SYMBOL = "XAUUSD";</script>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=2.9"></script>
 </body>
 </html>

@@ -16,6 +16,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import signal
@@ -23,7 +24,18 @@ import struct
 import subprocess
 import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
+
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+logger = logging.getLogger("KAIROS-79")
+
+BKK_TZ = timezone(timedelta(hours=7))
+
+
+def _fmt_bkk(ts: Optional[int] = None) -> str:
+    t = int(ts if ts is not None else time.time())
+    return datetime.fromtimestamp(t, BKK_TZ).strftime("%d/%m %H:%M น.")
 
 from advisor.ai_evaluator import (
     evaluate_chart_with_gemini_or_fallback,
@@ -40,6 +52,8 @@ from engine.data_feed import (
 from engine.news_feed import evaluate_news_window
 from engine.ea_bridge import EABridgeManager
 from engine.order_lifecycle import OrderLifecycleManager
+from engine.loss_learning import LossPatternMemoryManager
+from engine.ai_memory_trainer import OnlineTradeMemoryTrainer
 from engine.risk_gate import evaluate_risk_and_size
 from engine.signal_tracker import evaluate_signal_performance
 from engine.simulate import optimize_setup_for_win_prob, run_simulation
@@ -89,37 +103,218 @@ class TradingAssistantCore:
             persistence_file = "active_order_btc.json" if is_btc else "active_order.json"
             p_path = os.path.join(ROOT_DIR, persistence_file)
         self.order_manager = OrderLifecycleManager(persistence_path=p_path)
+        loss_mem_file = "loss_patterns_btc.json" if is_btc else "loss_patterns.json"
+        self.loss_memory = LossPatternMemoryManager(persistence_path=os.path.join(ROOT_DIR, loss_mem_file))
+        ai_mem_file = "ai_trade_memory_btc.json" if is_btc else "ai_trade_memory.json"
+        self.ai_memory = OnlineTradeMemoryTrainer(persistence_path=os.path.join(ROOT_DIR, ai_mem_file))
+        try:
+            self.ai_memory.ingest_order_history(getattr(self.order_manager, "order_history", []))
+        except Exception:
+            pass
         self.ea_bridge = EABridgeManager(CONFIG_PATH)
         self.timeframe = str(self.config.get("default_timeframe") or "M5").upper()
-        self.trading_style = str(self.config.get("trading_style") or "intraday").lower()
-        if self.trading_style not in ("intraday", "scalping", "micro_scalp", "robot_scalper"):
+        self.config["robot_scalper"] = {"enabled": False}
+        if os.environ.get("K79_TEST_MODE") == "1":
+            self.config = dict(self.config)
+            self.config["rapid_fire_test"] = dict(self.config.get("rapid_fire_test") or {}, enabled=False)
+            self.config["simulation_replays"] = 2500
             self.trading_style = "intraday"
+        else:
+            self.trading_style = str(self.config.get("trading_style") or "intraday").lower()
+            if self.trading_style not in ("intraday", "scalping", "micro_scalp"):
+                self.trading_style = "intraday"
         self.last_state: Optional[Dict[str, Any]] = None
         self.last_alert_fingerprint: Optional[str] = None
+        self.sideway_guard: Dict[str, Any] = {
+            "status": "NORMAL",  # NORMAL | PENDING_USER | CONTINUE_ALLOWED | PAUSED_WAIT_BREAKOUT
+            "is_sideway_now": False,
+            "prompt_id": 0,
+            "prompt_ts": 0,
+            "deadline_ts": 0,
+            "countdown_sec": 30,
+            "sideway_confirm_count": 0,
+            "breakout_confirm_count": 0,
+            "allow_until_ts": 0,
+            "reset_grace_until_ts": 0,
+            "just_resumed_ts": 0,
+            "just_resumed_note_th": "",
+            "reason_th": "",
+            "regime": "",
+            "ema_alignment": "",
+            "range_ratio": 1.0,
+        }
+
+    def update_sideway_guard(self, structure: Dict[str, Any], now_ts: int) -> Dict[str, Any]:
+        """Track Sideway regime, pause new orders & prompt user (30s auto-pause), and auto-resume on Trend Breakout."""
+        sg = self.sideway_guard
+        tr_info = structure.get("trend") or {}
+        tr_reg = str(tr_info.get("regime") or "").upper()
+        tr_bias = str(tr_info.get("bias") or "").upper()
+        ema_al = str(tr_info.get("ema_alignment") or "").upper()
+        vf = structure.get("volume_flow") or {}
+        rng_ratio = float(vf.get("range_expansion_ratio") if vf.get("range_expansion_ratio") is not None else 1.0)
+        flow_st = str(vf.get("flow_state") or "").upper()
+
+        is_sideway_now = bool(
+            "RANGING" in tr_reg
+            or "SIDEWAY" in tr_reg
+            or tr_bias in ("NEUTRAL", "CHOP", "SIDEWAY")
+            or ema_al == "MIXED"
+            or "CONSOLIDATION" in flow_st
+            or (vf.get("range_expansion_ratio") is not None and rng_ratio < 0.72)
+        )
+
+        reasons: List[str] = []
+        if "RANGING" in tr_reg or "SIDEWAY" in tr_reg:
+            reasons.append(f"Regime: {tr_reg}")
+        if ema_al == "MIXED":
+            reasons.append("EMA พันกัน (MIXED)")
+        if tr_bias in ("NEUTRAL", "CHOP", "SIDEWAY"):
+            reasons.append(f"ทิศทางไม่ชัดเจน ({tr_bias})")
+        if "CONSOLIDATION" in flow_st:
+            reasons.append("ตลาดบีบกรอบพักตัว (CONSOLIDATION)")
+        if vf.get("range_expansion_ratio") is not None and rng_ratio < 0.72:
+            reasons.append(f"กรอบแท่งแคบกว่าค่าเฉลี่ย ({rng_ratio:.2f}x)")
+
+        sg["is_sideway_now"] = is_sideway_now
+        sg["regime"] = tr_reg or "UNKNOWN"
+        sg["ema_alignment"] = ema_al or "UNKNOWN"
+        sg["range_ratio"] = round(rng_ratio, 2)
+        sg["reason_th"] = " • ".join(reasons) if reasons else "กราฟเคลื่อนไหวเป็นเทรนด์ปกติ"
+
+        if is_sideway_now:
+            sg["sideway_confirm_count"] = min(10, int(sg.get("sideway_confirm_count", 0)) + 1)
+            sg["breakout_confirm_count"] = 0
+        else:
+            sg["breakout_confirm_count"] = min(10, int(sg.get("breakout_confirm_count", 0)) + 1)
+            sg["sideway_confirm_count"] = 0
+
+        status = str(sg.get("status") or "NORMAL")
+        in_grace = now_ts < int(sg.get("reset_grace_until_ts") or 0)
+
+        if status == "NORMAL":
+            if is_sideway_now and sg["sideway_confirm_count"] >= 2 and not in_grace and self.ea_bridge.auto_trading_enabled:
+                sg["status"] = "PENDING_USER"
+                sg["prompt_id"] = int(sg.get("prompt_id") or 0) + 1
+                sg["prompt_ts"] = now_ts
+                sg["deadline_ts"] = now_ts + 30
+        elif status == "PENDING_USER":
+            # If market already broke cleanly into a trend while waiting, return to NORMAL automatically
+            if not is_sideway_now and sg["breakout_confirm_count"] >= 2:
+                sg["status"] = "NORMAL"
+                sg["prompt_ts"] = 0
+                sg["deadline_ts"] = 0
+            # Server-side 30s Safe Default: if user did not click within 30s -> auto-pause & wait for breakout!
+            elif int(sg.get("deadline_ts") or 0) > 0 and now_ts >= int(sg["deadline_ts"]):
+                sg["status"] = "PAUSED_WAIT_BREAKOUT"
+                sg["prompt_ts"] = 0
+                sg["deadline_ts"] = 0
+        elif status == "CONTINUE_ALLOWED":
+            # Remain allowed until market leaves Sideway into trend (>= 2 scans) OR 25-min allow window expires
+            if not is_sideway_now and sg["breakout_confirm_count"] >= 2:
+                sg["status"] = "NORMAL"
+                sg["allow_until_ts"] = 0
+            elif is_sideway_now and int(sg.get("allow_until_ts") or 0) > 0 and now_ts >= int(sg["allow_until_ts"]):
+                sg["status"] = "PENDING_USER"
+                sg["prompt_id"] = int(sg.get("prompt_id") or 0) + 1
+                sg["prompt_ts"] = now_ts
+                sg["deadline_ts"] = now_ts + 30
+        elif status == "PAUSED_WAIT_BREAKOUT":
+            # Option 1: Auto-Resume trading as soon as chart breaks out of Sideway into a clear Trend!
+            if not is_sideway_now and sg["breakout_confirm_count"] >= 2:
+                sg["status"] = "NORMAL"
+                sg["prompt_ts"] = 0
+                sg["deadline_ts"] = 0
+                sg["just_resumed_ts"] = now_ts
+                sg["just_resumed_note_th"] = (
+                    f"🚀 กราฟหลุดกรอบ Sideway เข้าสู่เทรนด์ชัดเจน ({tr_reg or tr_bias}) — ระบบกลับมาออกไม้อัตโนมัติแล้ว!"
+                )
+
+        rem_sec = max(0, int(sg.get("deadline_ts") or 0) - now_ts) if sg["status"] == "PENDING_USER" else 0
+        out = dict(sg)
+        out["remaining_sec"] = rem_sec
+        out["block_new_orders"] = sg["status"] in ("PENDING_USER", "PAUSED_WAIT_BREAKOUT")
+        out["server_ts"] = now_ts
+        return out
+
+    def apply_sideway_decision(self, decision: str) -> Dict[str, Any]:
+        """Handle user decision from the 30s Sideway Popup or Card 3 quick toggle."""
+        dec = str(decision or "pause").strip().lower()
+        now_ts = int(time.time())
+        sg = self.sideway_guard
+        if dec in ("continue", "resume"):
+            if sg.get("is_sideway_now"):
+                sg["status"] = "CONTINUE_ALLOWED"
+                sg["allow_until_ts"] = now_ts + 1500  # 25 min uninterrupted during this Sideway
+            else:
+                sg["status"] = "NORMAL"
+                sg["allow_until_ts"] = 0
+            sg["prompt_ts"] = 0
+            sg["deadline_ts"] = 0
+            msg = "▶️ รับทราบครับ! อนุญาตให้ระบบออกไม้ทำงานต่อในช่วง Sideway นี้"
+        else:
+            sg["status"] = "PAUSED_WAIT_BREAKOUT"
+            sg["prompt_ts"] = 0
+            sg["deadline_ts"] = 0
+            sg["allow_until_ts"] = 0
+            msg = "⏸️ หยุดการออกไม้ใหม่ชั่วคราวแล้ว — เฝ้ารอกราฟหลุดกรอบ Sideway เพื่อกลับมาออกไม้อัตโนมัติ"
+        out = dict(sg)
+        out["remaining_sec"] = 0
+        out["block_new_orders"] = sg["status"] in ("PENDING_USER", "PAUSED_WAIT_BREAKOUT")
+        out["message"] = msg
+        return out
+
+    def _apply_ai_memory_to_setup(
+        self,
+        setup: Optional[Dict[str, Any]],
+        structure: Dict[str, Any],
+        mtf: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Score a setup with OnlineTradeMemoryTrainer and apply bounded confluence & lot adjustments."""
+        if not setup:
+            return {}
+        pred = self.ai_memory.predict_setup_quality(
+            trade_setup=setup,
+            structure_res=structure,
+            mtf_res=mtf,
+        )
+        conf_delta = int(pred.get("confluence_delta") or 0)
+        lot_mult = float(pred.get("lot_multiplier") or 1.0)
+        base_conf = int(setup.get("confluence_score") or 65)
+        setup["confluence_score"] = max(20, min(98, base_conf + conf_delta))
+        base_alloc = float(setup.get("allocation_factor") or 1.0)
+        setup["allocation_factor"] = round(max(0.40, min(1.40, base_alloc * lot_mult)), 2)
+        setup["ai_memory_eval"] = pred
+        setup["ai_features"] = pred.get("features") or {}
+        if pred.get("insight_th"):
+            factors = list(setup.get("confluence_factors") or [])
+            if pred["insight_th"] not in factors:
+                factors.append(pred["insight_th"])
+            setup["confluence_factors"] = factors
+        return pred
+
+    @property
+    def broker_symbol(self) -> str:
+        """Return live broker-mapped symbol from connected MT5 EA (e.g. GOLD instead of XAUUSD)."""
+        hb_sym = (self.ea_bridge.account_info.get("symbol") or "").strip()
+        if hb_sym:
+            if self.symbol == "XAUUSD" and any(k in hb_sym.upper() for k in ("GOLD", "XAU")):
+                return hb_sym
+            if "BTC" in self.symbol and any(k in hb_sym.upper() for k in ("BTC", "BITCOIN")):
+                return hb_sym
+        pref_sym = getattr(self.hub, "preferred_symbol", None)
+        if pref_sym:
+            if self.symbol == "XAUUSD" and any(k in pref_sym.upper() for k in ("GOLD", "XAU")):
+                return pref_sym
+            if "BTC" in self.symbol and any(k in pref_sym.upper() for k in ("BTC", "BITCOIN")):
+                return pref_sym
+        return self.symbol
 
     def toggle_robot_mode(self, enabled: Optional[bool] = None) -> bool:
-        rs_cfg = self.config.setdefault("robot_scalper", {})
-        if enabled is None:
-            new_val = not bool(rs_cfg.get("enabled", False))
-        else:
-            new_val = bool(enabled)
-        rs_cfg["enabled"] = new_val
-        if new_val:
-            self.timeframe = "M1"
-            self.config["default_timeframe"] = "M1"
-            self.ea_bridge.set_auto_trading(True)
-            # Cancel any stale pending orders from other modes so robot can trade immediately
-            if self.order_manager.has_active_order():
-                act = self.order_manager.active_order
-                if act and act.get("status") == "PENDING":
-                    self.order_manager.cancel_active_order(reason="ROBOT_MODE_ACTIVATED")
-        else:
-            if self.order_manager.has_active_order():
-                act = self.order_manager.active_order
-                if act and act.get("status") == "PENDING" and act.get("trading_style") == "robot_scalper":
-                    self.order_manager.cancel_active_order(reason="ROBOT_MODE_DEACTIVATED")
+        """Deprecated: Robot scalper mode has been removed permanently due to high drawdown risk."""
+        self.config["robot_scalper"] = {"enabled": False}
         save_config(self.config)
-        return new_val
+        return False
 
     def toggle_rapid_fire_mode(self, enabled: Optional[bool] = None) -> bool:
         rf_cfg = self.config.setdefault("rapid_fire_test", {})
@@ -154,7 +349,7 @@ class TradingAssistantCore:
     ) -> Dict[str, Any]:
         tf = (timeframe or self.timeframe).upper()
         self.timeframe = tf
-        if trading_style in ("intraday", "scalping", "micro_scalp", "robot_scalper", "rapid_fire_test"):
+        if trading_style in ("intraday", "scalping", "micro_scalp", "rapid_fire_test"):
             self.trading_style = trading_style
             self.config["trading_style"] = trading_style
 
@@ -163,21 +358,16 @@ class TradingAssistantCore:
             and (trading_style is None or trading_style == "rapid_fire_test")
         ) or (trading_style == "rapid_fire_test")
 
-        is_robot = (
-            bool((self.config.get("robot_scalper") or {}).get("enabled", False))
-            and (trading_style is None or trading_style == "robot_scalper")
-        ) or (trading_style == "robot_scalper")
+        effective_style = "rapid_fire_test" if is_rapid else self.trading_style
 
-        effective_style = "rapid_fire_test" if is_rapid else ("robot_scalper" if is_robot else self.trading_style)
-
-        # In rapid fire or robot mode, prioritize M1 as the primary timeframe for fast execution unless explicitly requested
-        if (is_rapid or is_robot) and (not timeframe or timeframe == "M5"):
+        # In rapid fire mode, prioritize M1 as the primary timeframe for fast execution unless explicitly requested
+        if is_rapid and (not timeframe or timeframe == "M5"):
             tf = "M1"
             self.timeframe = "M1"
 
         is_btc = "BTC" in self.symbol
         feed = self.hub.get_bars(tf, force_refresh=force_refresh, symbol=self.symbol)
-        raw_bars = feed["bars"]
+        raw_bars = (feed.get("bars") or [])[-600:]
         is_mt5_feed = str(feed.get("source", "")).startswith("mt5_broker")
         offset = 0.0 if is_mt5_feed else float(self.config.get("broker_price_offset_btc" if is_btc else "broker_price_offset") or 0.0)
         def_spread_pts = 1500.0 if is_btc else 25.0
@@ -198,7 +388,8 @@ class TradingAssistantCore:
             for b in raw_bars
         ]
 
-        mtf_bars = self.hub.get_mtf_bars(primary_tf=tf, primary_bars=chart_bars, offset_usd=offset)
+        mtf_bars = self.hub.get_mtf_bars(primary_tf=tf, primary_bars=chart_bars[-300:], offset_usd=offset)
+        mtf_bars = {k: v[-300:] for k, v in mtf_bars.items()}
         structure = analyze_structure(chart_bars, timeframe=tf, mtf_bars_by_tf=mtf_bars)
         mtf = analyze_multi_timeframe(mtf_bars, primary_tf=tf, current_price=structure["current_price"])
         macro = self.hub.get_macro_correlation(chart_bars, timeframe=tf)
@@ -212,9 +403,13 @@ class TradingAssistantCore:
             trading_style=effective_style,
             symbol=self.symbol,
         )
-        replays_cnt = max(35000, int(self.config.get("simulation_replays") or 35000))
-        self.config["simulation_replays"] = replays_cnt
-        bars_ahead_cnt = 8 if effective_style == "rapid_fire_test" else (10 if effective_style == "robot_scalper" else (14 if effective_style == "micro_scalp" else (18 if effective_style == "scalping" else int(self.config.get("simulation_bars_ahead") or 36))))
+        if effective_style == "rapid_fire_test":
+            replays_cnt = min(1500, int(self.config.get("simulation_replays_rapid") or 1000))
+        elif effective_style == "micro_scalp":
+            replays_cnt = min(2500, int(self.config.get("simulation_replays_scalp") or 2500))
+        else:
+            replays_cnt = min(2500, int(self.config.get("simulation_replays") or 2500))
+        bars_ahead_cnt = 8 if effective_style == "rapid_fire_test" else (14 if effective_style == "micro_scalp" else (18 if effective_style == "scalping" else int(self.config.get("simulation_bars_ahead") or 36)))
         sim_seed = int(self.config.get("simulation_seed") or 19)
         min_win_prob = float(self.config.get("min_win_prob_pct") or 50.0)
         self.config["min_win_prob_pct"] = min_win_prob
@@ -243,6 +438,10 @@ class TradingAssistantCore:
             news=news,
         )
         structure["volume_flow"] = market_flow
+        if "ema_series" in structure and isinstance(structure["ema_series"], dict):
+            for k in ("ema20", "ema50", "ema200"):
+                if k in structure["ema_series"] and isinstance(structure["ema_series"][k], list):
+                    structure["ema_series"][k] = structure["ema_series"][k][-200:]
 
         # Only invoke Gemini AI when scanning for a new trade entry (or when explicitly forced),
         # saving AI resources when an order is already active and managed by deterministic lifecycle rules.
@@ -274,7 +473,197 @@ class TradingAssistantCore:
         else:
             gemini_raw = None
 
-        now_day = int(time.time()) // 86400
+        now_ts_eval = int(time.time())
+        now_day = now_ts_eval // 86400
+        ea_acc = self.ea_bridge.account_info or {}
+        is_mt5_live = bool(self.ea_bridge.is_connected and float(ea_acc.get("balance") or 0.0) > 0.0)
+        live_bal = float(ea_acc.get("balance") or 0.0) if is_mt5_live else float(self.config.get("account_balance") or 5000.0)
+        live_eq = float(ea_acc.get("equity") or live_bal) if is_mt5_live else live_bal
+
+        # Anchored Balance at the exact moment user configured Profit/Loss targets
+        anchor_bal = float(self.config.get("pnl_anchor_balance") or 0.0)
+        anchor_ts = int(self.config.get("pnl_anchor_ts") or 0)
+        anchor_bkk = str(self.config.get("pnl_anchor_bkk") or "")
+        if anchor_bal <= 0.0 and live_bal > 0.0:
+            anchor_bal = round(live_bal, 2)
+            anchor_ts = now_ts_eval
+            anchor_bkk = _fmt_bkk(anchor_ts)
+            self.config["pnl_anchor_balance"] = anchor_bal
+            self.config["pnl_anchor_ts"] = anchor_ts
+            self.config["pnl_anchor_bkk"] = anchor_bkk
+            save_config(self.config)
+
+        # Calculate session PnL cleanly from Anchored Balance (not polluted by old deals before setup)
+        if is_mt5_live and anchor_bal > 0.0:
+            daily_realized_pnl_usd = round(live_bal - anchor_bal, 2)
+            session_equity_pnl_usd = round(live_eq - anchor_bal, 2)
+        else:
+            since_ts = anchor_ts if anchor_ts > 0 else (now_day * 86400)
+            today_closed = [
+                o for o in getattr(self.order_manager, "order_history", [])
+                if int(o.get("closed_ts") or o.get("created_ts") or 0) >= since_ts
+                and not str(o.get("order_id") or "").startswith("test_")
+                and o.get("close_reason") not in ("TEST_CLEANUP", "SYSTEM_INIT")
+                and bool(o.get("broker_ticket") or o.get("broker_deal_id"))
+            ]
+            daily_realized_pnl_usd = round(sum(float(o.get("realized_pnl_usd") or 0.0) for o in today_closed), 2)
+            session_equity_pnl_usd = daily_realized_pnl_usd
+
+        raw_target_cfg = self.config.get("daily_profit_target_usd")
+        daily_profit_target_usd = float(raw_target_cfg) if raw_target_cfg is not None else 10.0
+        daily_target_enabled = bool(self.config.get("daily_profit_target_enabled", True))
+        effective_profit_usd = max(daily_realized_pnl_usd, session_equity_pnl_usd)
+        target_balance_goal = round(anchor_bal + daily_profit_target_usd, 2)
+        daily_profit_reached = bool(
+            daily_target_enabled
+            and daily_profit_target_usd > 0.0
+            and effective_profit_usd >= daily_profit_target_usd
+        )
+
+        # Record ONLY genuine recent newly closed losing trades (within 30 min & after anchor_ts)
+        # Never re-ingest stale historical MT5 deals on server restart or after user System Reset!
+        rec_loss_cutoff = max(anchor_ts, int(getattr(self.loss_memory, "last_reset_ts", 0) or 0), now_ts_eval - 1800)
+        recorded_any_loss = False
+        for o in getattr(self.order_manager, "order_history", [])[-20:]:
+            o_closed_ts = int(o.get("closed_ts") or o.get("created_ts") or 0)
+            if (
+                not o.get("loss_pattern_recorded")
+                and o_closed_ts >= rec_loss_cutoff
+                and float(o.get("realized_pnl_usd") or 0.0) < -0.01
+            ):
+                o["loss_pattern_recorded"] = True
+                self.loss_memory.record_loss_order(o, market_context={"structure": structure})
+                recorded_any_loss = True
+        if recorded_any_loss:
+            self.order_manager.save_to_disk()
+
+        # Anchored Portfolio Loss Limit (always calculated from Balance at the time user set it!)
+        raw_loss_pct = self.config.get("max_consecutive_loss_pct")
+        threshold_pct = float(raw_loss_pct) if raw_loss_pct is not None else 20.0
+        raw_max_loss_usd = self.config.get("max_loss_usd")
+        max_loss_usd = (
+            round(float(raw_max_loss_usd), 2)
+            if raw_max_loss_usd is not None and float(raw_max_loss_usd) > 0.0
+            else round(anchor_bal * (threshold_pct / 100.0), 2)
+        )
+        stop_floor_balance = round(max(0.0, anchor_bal - max_loss_usd), 2)
+        worst_val = min(live_bal, live_eq)
+        anchor_drawdown_usd = round(max(0.0, anchor_bal - worst_val), 2)
+        anchor_drawdown_pct = round((anchor_drawdown_usd / max(1.0, anchor_bal)) * 100.0, 2)
+        anchor_loss_tripped = bool(
+            max_loss_usd > 0.0
+            and (anchor_drawdown_usd >= max_loss_usd or anchor_drawdown_pct >= threshold_pct)
+        )
+
+        acc_bal = anchor_bal if anchor_bal > 0.0 else live_bal
+        consec_info = self.loss_memory.update_consecutive_losses(
+            order_history=getattr(self.order_manager, "order_history", []),
+            balance=acc_bal,
+            threshold_pct=threshold_pct,
+        )
+        adaptive_tuning = consec_info.get("adaptive_tuning") or self.loss_memory.compute_adaptive_tuning(
+            int(consec_info.get("consecutive_loss_count") or 0)
+        )
+
+        # Background Adaptive Auto-Analysis & Strategy Improvement when losing streak >= 3 trades
+        # (Replaces DD Circuit Breaker lock — analyzes in background and adapts entry/allocation automatically!)
+        streak_cnt = int(consec_info.get("consecutive_loss_count") or 0)
+        if streak_cnt >= 3:
+            streak_orders = []
+            for o in reversed(getattr(self.order_manager, "order_history", [])):
+                if str(o.get("order_id", "")).startswith("test_") or o.get("close_reason") in ("TEST_CLEANUP", "SYSTEM_INIT"):
+                    continue
+                pnl = float(o.get("realized_pnl_usd") or 0.0)
+                if pnl < -0.01:
+                    streak_orders.append(o)
+                    if len(streak_orders) == min(streak_cnt, 5):
+                        break
+                elif pnl > 0.01:
+                    break
+            if len(streak_orders) >= 3:
+                self.loss_memory.record_consecutive_loss_streak(
+                    streak_orders, market_context={"structure": structure}
+                )
+            prev_analyzed_cnt = int((self.loss_memory.latest_reanalysis or {}).get("consecutive_losses") or 0)
+            prev_analyzed_ts = int((self.loss_memory.latest_reanalysis or {}).get("timestamp") or 0)
+            if not self.loss_memory.latest_reanalysis or prev_analyzed_cnt != streak_cnt or (now_ts_eval - prev_analyzed_ts) >= 300:
+                self.loss_memory.run_deep_reanalysis(
+                    symbol=self.symbol,
+                    timeframe=tf,
+                    structure=structure,
+                    mtf=mtf,
+                    macro=macro,
+                    account_balance=acc_bal,
+                )
+
+        # Single Source of Truth for Portfolio Loss Limit = Dashboard Anchored Stop Floor (`anchor_loss_tripped`).
+        # If an attached MT5 EA still has its old duplicate Kill Switch tripped while Dashboard Stop Floor is safe,
+        # automatically send RESET_KILL_SWITCH to keep MT5 unblocked!
+        if ea_acc.get("kill_switch_tripped") and not anchor_loss_tripped:
+            self.ea_bridge.enqueue_action(
+                action_type="RESET_KILL_SWITCH",
+                payload={"symbol": self.broker_symbol},
+                signal_id=f"auto_unlock_ea_ks_{now_ts_eval // 10}",
+            )
+            ea_acc["kill_switch_tripped"] = False
+
+        # Anchored Portfolio Loss Floor Enforcement (only when user's configured Stop Floor from Anchor Balance is hit)
+        self.config["circuit_breaker_20pct_tripped"] = False
+        if anchor_loss_tripped:
+            consec_info["reason"] = (
+                f"🛑 แตะลิมิตขาดทุนพอร์ต -${anchor_drawdown_usd:.2f} (-{anchor_drawdown_pct:.1f}%) "
+                f"จาก Balance ตอนตั้ง ${anchor_bal:.2f} (Floor ${stop_floor_balance:.2f})"
+            )
+            if self.ea_bridge.auto_trading_enabled:
+                self.ea_bridge.set_auto_trading(False)
+            for act in list(self.order_manager.active_orders):
+                if act.get("status") == "PENDING":
+                    self.order_manager.cancel_active_order(reason="ANCHOR_LOSS_LIMIT_REACHED", order_id=act.get("order_id"))
+                    bt = act.get("broker_ticket")
+                    if bt:
+                        self.ea_bridge.enqueue_action("CLOSE_ORDER", {"ticket": int(bt), "symbol": self.broker_symbol})
+            if int(ea_acc.get("open_positions_count") or 0) > 0 or int(ea_acc.get("pending_orders_count") or 0) > 0:
+                self.ea_bridge.enqueue_action(
+                    "CLOSE_ALL",
+                    {"symbol": self.broker_symbol, "magic": 797979},
+                    signal_id=f"loss_limit_close_{now_ts_eval // 5}",
+                )
+
+        # Daily Profit Target Enforcement: Lock profit, close open positions if equity reached target, pause Auto-Trading!
+        if daily_profit_reached:
+            if self.ea_bridge.auto_trading_enabled:
+                self.ea_bridge.set_auto_trading(False)
+            for act in list(self.order_manager.active_orders):
+                if act.get("status") == "PENDING":
+                    self.order_manager.cancel_active_order(reason="DAILY_PROFIT_TARGET_REACHED", order_id=act.get("order_id"))
+                    bt = act.get("broker_ticket")
+                    if bt:
+                        self.ea_bridge.enqueue_action("CLOSE_ORDER", {"ticket": int(bt), "symbol": self.broker_symbol})
+            if session_equity_pnl_usd >= daily_profit_target_usd and (int(ea_acc.get("open_positions_count") or 0) > 0 or int(ea_acc.get("pending_orders_count") or 0) > 0):
+                self.ea_bridge.enqueue_action(
+                    "CLOSE_ALL",
+                    {"symbol": self.broker_symbol, "magic": 797979},
+                    signal_id=f"profit_lock_close_{now_ts_eval // 5}",
+                )
+
+        # Sideway Guard State Machine: Auto-pause new orders & prompt user (30s safe default -> wait for breakout)
+        sw_guard = self.update_sideway_guard(structure, now_ts_eval)
+        sideway_paused = bool(sw_guard.get("block_new_orders", False))
+
+        # Online AI Trade Memory: continuously train on any newly closed real trades (both WIN and LOSS!)
+        try:
+            self.ai_memory.ingest_order_history(getattr(self.order_manager, "order_history", []))
+        except Exception:
+            pass
+        ai_mem_eval = self._apply_ai_memory_to_setup(smc.get("trade_setup"), structure, mtf)
+
+        # Evaluate candidate setup against loss memory
+        loss_eval = self.loss_memory.evaluate_setup_risk(
+            trade_setup=smc.get("trade_setup") or {},
+            structure_res=structure,
+            symbol=self.symbol,
+        )
+
         trades_today_count = sum(
             1
             for o in getattr(self.order_manager, "order_history", [])
@@ -287,7 +676,6 @@ class TradingAssistantCore:
             if not self.order_manager.has_active_order()
             else 0.0
         )
-        ea_acc = self.ea_bridge.account_info or {}
         def_contract_size = 1.0 if is_btc else 100.0
         contract_size = float(self.config.get("contract_size_btc" if is_btc else "contract_size") or def_contract_size)
         cfg_for_risk = dict(
@@ -297,10 +685,21 @@ class TradingAssistantCore:
             broker_price_offset=0.0,
             trading_style=effective_style,
             min_win_prob_pct=min_win_prob,
-            current_daily_loss_pct=float(ea_acc.get("daily_dd_pct") or 0.0),
+            current_daily_loss_pct=max(float(ea_acc.get("daily_dd_pct") or 0.0), anchor_drawdown_pct),
             kill_switch_tripped=bool(ea_acc.get("kill_switch_tripped", False)),
             trades_today_count=trades_today_count,
             open_portfolio_risk_usd=open_portfolio_risk_usd,
+            current_daily_profit_usd=effective_profit_usd,
+            consecutive_loss_usd=consec_info["consecutive_loss_usd"],
+            consecutive_loss_count=consec_info["consecutive_loss_count"],
+            circuit_breaker_20pct_tripped=False,
+            anchor_loss_limit_reached=anchor_loss_tripped,
+            max_loss_usd=max_loss_usd,
+            stop_floor_balance=stop_floor_balance,
+            adaptive_tuning=adaptive_tuning,
+            loss_pattern_eval=loss_eval,
+            ai_memory_eval=ai_mem_eval,
+            sideway_paused=sideway_paused,
         )
         risk_ticket = evaluate_risk_and_size(
             trade_setup=smc["trade_setup"],
@@ -328,6 +727,7 @@ class TradingAssistantCore:
             contract_size=contract_size,
             config=self.config,
             symbol=self.symbol,
+            market_context={"structure": structure, "smc": smc, "bars": chart_bars},
         )
 
         # Pre-News Position Shield: Cancel PENDING limit orders & move winning FILLED to Breakeven
@@ -385,10 +785,11 @@ class TradingAssistantCore:
                             )
 
         min_conf = int((self.config.get("ai") or {}).get("auto_trigger_min_confluence") or 55)
+
         if self.order_manager.has_active_order():
-            act = self.order_manager.active_order
-            if act and act.get("status") == "PENDING" and act.get("trading_style") != effective_style:
-                self.order_manager.cancel_active_order(reason="STYLE_CHANGED")
+            for act in list(self.order_manager.active_orders):
+                if act.get("status") == "PENDING" and act.get("trading_style") != effective_style:
+                    self.order_manager.cancel_active_order(reason="STYLE_CHANGED", order_id=act.get("order_id"))
 
         active_ord = self.order_manager.get_active_order_dict(cur_p) if self.order_manager.has_active_order() else None
         is_same_style_order = bool(active_ord and active_ord.get("trading_style") == effective_style)
@@ -453,106 +854,262 @@ class TradingAssistantCore:
                         else f"⏳ รอเกี่ยวคำสั่ง {active_ord['order_type']} @ {active_ord['entry_mt5']:.2f}"
                     )
                 )
-        else:
-            if (
-                risk_ticket.get("win_prob_passed", False)
-                and risk_ticket.get("verdict") in ("PASS", "CAUTION")
-                and smc["trade_setup"].get("confluence_score", 0) >= min_conf
-            ):
-                if not self.order_manager.has_active_order():
-                    self.order_manager.register_trade_setup(
-                        risk_ticket=risk_ticket,
-                        smc_setup=smc["trade_setup"],
-                        current_price=cur_p,
-                        timeframe=tf,
-                        trading_style=effective_style,
+
+        # ---------------- Unified Multi-Strategy Engine ----------------
+        # Simultaneously evaluates enabled channels (SMC_SWING, RAPID_FIRE)
+        primary_strat = "RAPID_FIRE" if effective_style == "rapid_fire_test" else "SMC_SWING"
+
+        # Channel 1: Primary Setup Registration (allows both ACTIVE_IN_ZONE and WAIT_RETRACEMENT pending limit OB setups!)
+        eff_min_conf = min_conf + int(adaptive_tuning.get("min_confluence_boost") or 0)
+        if (
+            not daily_profit_reached
+            and not anchor_loss_tripped
+            and not sideway_paused
+            and not loss_eval.get("is_high_risk")
+            and risk_ticket.get("win_prob_passed", False)
+            and risk_ticket.get("verdict") in ("PASS", "CAUTION")
+            and smc["trade_setup"].get("confluence_score", 0) >= eff_min_conf
+        ):
+            existing_sides = {
+                str(o.get("side")).upper()
+                for o in self.order_manager.active_orders
+                if str(o.get("symbol", self.symbol)).upper() == self.symbol.upper()
+            }
+            cand_side = str(risk_ticket.get("side") or "").upper()
+            # Direction Harmony Guard: never allow opposing simultaneous positions on same symbol
+            if (not existing_sides or cand_side in existing_sides) and not self.order_manager.has_active_order(symbol=self.symbol, strategy_mode=primary_strat):
+                self.order_manager.register_trade_setup(
+                    risk_ticket=risk_ticket,
+                    smc_setup=smc["trade_setup"],
+                    current_price=cur_p,
+                    timeframe=tf,
+                    trading_style=effective_style,
+                    symbol=self.symbol,
+                    strategy_mode=primary_strat,
+                )
+                existing_sides.add(cand_side)
+                if not order_event:
+                    order_event = self.order_manager.last_event
+
+        # Channel 2: Rapid Fire / Harvester (Parallel Channel — MTF S/R + Candlestick + Chart Patterns + Adaptive)
+        is_rapid_cfg = bool((self.config.get("rapid_fire_test") or {}).get("enabled", False))
+        if (
+            not daily_profit_reached
+            and not anchor_loss_tripped
+            and not sideway_paused
+            and is_rapid_cfg
+            and primary_strat != "RAPID_FIRE"
+            and not self.order_manager.has_active_order(symbol=self.symbol, strategy_mode="RAPID_FIRE")
+        ):
+            try:
+                rapid_smc = analyze_smc(
+                    chart_bars,
+                    timeframe=tf,
+                    spread_usd=spread_usd,
+                    structure_res=structure,
+                    mtf_res=mtf,
+                    macro_res=macro,
+                    trading_style="rapid_fire_test",
+                    symbol=self.symbol,
+                    adaptive_tuning=adaptive_tuning,
+                )
+                rapid_setup = rapid_smc.get("trade_setup")
+                rapid_ai_eval = self._apply_ai_memory_to_setup(rapid_setup, structure, mtf)
+                rapid_side = str((rapid_setup or {}).get("side") or "").upper()
+                rapid_ready = str((rapid_setup or {}).get("status") or "").upper() == "ACTIVE_IN_ZONE"
+                existing_sides = {
+                    str(o.get("side")).upper()
+                    for o in self.order_manager.active_orders
+                    if str(o.get("symbol", self.symbol)).upper() == self.symbol.upper()
+                }
+                # Direction Harmony Guard + MTF S/R Wall & Candlestick Gate + Independent Loss Eval & Simulation
+                if rapid_setup and rapid_ready and rapid_side and (not existing_sides or rapid_side in existing_sides):
+                    rapid_loss_eval = self.loss_memory.evaluate_setup_risk(
+                        trade_setup=rapid_setup,
+                        structure_res=structure,
                         symbol=self.symbol,
                     )
-                risk_ticket["active_order"] = self.order_manager.get_active_order_dict(cur_p)
-                order_event = self.order_manager.last_event
-            else:
-                risk_ticket["active_order"] = active_ord
+                    if not rapid_loss_eval.get("is_high_risk"):
+                        rapid_sim = run_simulation(
+                            bars=chart_bars,
+                            trade_setup=rapid_setup,
+                            structure_res=structure,
+                            replays=1000,
+                            bars_ahead=12,
+                            seed=sim_seed,
+                        )
+                        cfg_rapid = dict(
+                            cfg_for_risk,
+                            trading_style="rapid_fire_test",
+                            loss_pattern_eval=rapid_loss_eval,
+                            ai_memory_eval=rapid_ai_eval,
+                        )
+                        rapid_ticket = evaluate_risk_and_size(trade_setup=rapid_setup, simulation=rapid_sim, news_status=news, config=cfg_rapid)
+                        if rapid_ticket.get("win_prob_passed") and rapid_ticket.get("verdict") in ("PASS", "CAUTION"):
+                            self.order_manager.register_trade_setup(
+                                risk_ticket=rapid_ticket,
+                                smc_setup=rapid_setup,
+                                current_price=cur_p,
+                                timeframe=tf,
+                                trading_style="rapid_fire_test",
+                                symbol=self.symbol,
+                                strategy_mode="RAPID_FIRE",
+                            )
+                            existing_sides.add(rapid_side)
+                            if not order_event:
+                                order_event = self.order_manager.last_event
+            except Exception:
+                pass
+
+        # Channel 3: SMC Swing / Intraday (Flagship Model: always evaluates M15 higher timeframe!)
+        if (
+            not daily_profit_reached
+            and not anchor_loss_tripped
+            and not sideway_paused
+            and primary_strat != "SMC_SWING"
+            and not self.order_manager.has_active_order(symbol=self.symbol, strategy_mode="SMC_SWING")
+        ):
+            try:
+                # Fetch M15 higher timeframe bars for real swing Order Blocks and targets
+                swing_feed = self.hub.get_bars("M15", force_refresh=False, symbol=self.symbol)
+                swing_bars = (swing_feed.get("bars") or [])[-600:]
+                if not swing_bars:
+                    swing_bars = chart_bars
+                swing_struct = analyze_structure(swing_bars, timeframe="M15", mtf_bars_by_tf=mtf_bars)
+                swing_smc = analyze_smc(
+                    swing_bars,
+                    timeframe="M15",
+                    spread_usd=spread_usd,
+                    structure_res=swing_struct,
+                    mtf_res=mtf,
+                    macro_res=macro,
+                    trading_style="intraday",
+                    symbol=self.symbol,
+                    adaptive_tuning=adaptive_tuning,
+                )
+                swing_setup = swing_smc.get("trade_setup")
+                swing_ai_eval = self._apply_ai_memory_to_setup(swing_setup, swing_struct, mtf)
+                swing_side = str((swing_setup or {}).get("side") or "").upper()
+                existing_sides = {
+                    str(o.get("side")).upper()
+                    for o in self.order_manager.active_orders
+                    if str(o.get("symbol", self.symbol)).upper() == self.symbol.upper()
+                }
+                # Direction Harmony Guard + Independent M15 Loss Eval & M15 Simulation
+                if swing_setup and swing_side and (not existing_sides or swing_side in existing_sides):
+                    swing_loss_eval = self.loss_memory.evaluate_setup_risk(
+                        trade_setup=swing_setup,
+                        structure_res=swing_struct,
+                        symbol=self.symbol,
+                    )
+                    if not swing_loss_eval.get("is_high_risk"):
+                        swing_sim = run_simulation(
+                            bars=swing_bars,
+                            trade_setup=swing_setup,
+                            structure_res=swing_struct,
+                            replays=1500,
+                            bars_ahead=24,
+                            seed=sim_seed,
+                        )
+                        cfg_swing = dict(
+                            cfg_for_risk,
+                            trading_style="intraday",
+                            loss_pattern_eval=swing_loss_eval,
+                            ai_memory_eval=swing_ai_eval,
+                        )
+                        swing_ticket = evaluate_risk_and_size(trade_setup=swing_setup, simulation=swing_sim, news_status=news, config=cfg_swing)
+                        if swing_ticket.get("win_prob_passed") and swing_ticket.get("verdict") in ("PASS", "CAUTION"):
+                            self.order_manager.register_trade_setup(
+                                risk_ticket=swing_ticket,
+                                smc_setup=swing_setup,
+                                current_price=cur_p,
+                                timeframe="M15",
+                                trading_style="intraday",
+                                symbol=self.symbol,
+                                strategy_mode="SMC_SWING",
+                            )
+                            existing_sides.add(swing_side)
+                            if not order_event:
+                                order_event = self.order_manager.last_event
+            except Exception:
+                pass
+
+        risk_ticket["active_order"] = self.order_manager.get_active_order_dict(cur_p)
 
         # Auto-Trading Dispatch to MT5 EA Bridge when Auto-Trading is ON
         if self.ea_bridge.auto_trading_enabled:
-            # Case 1: Primary active order needing dispatch (never re-enqueue once dispatched/rejected)
-            act_ord = self.order_manager.active_order
-            if act_ord and act_ord.get("status") in ("PENDING", "FILLED") and act_ord.get("order_id"):
-                sig_id = act_ord["order_id"]
-                has_ticket = bool(act_ord.get("broker_ticket"))
-                is_in_queue = any(a.get("signal_id") == sig_id for a in self.ea_bridge.action_queue)
-                already_dispatched = (
-                    sig_id in self.ea_bridge.executed_signal_ids
-                    or bool(act_ord.get("ea_dispatch_status"))
-                )
-                if not has_ticket and not is_in_queue and not already_dispatched:
-                    self.ea_bridge.enqueue_action(
-                        action_type="OPEN_ORDER",
-                        payload={
-                            "side": act_ord["side"],
-                            "order_type": act_ord.get("execution_type", "LIMIT"),
-                            "symbol": act_ord.get("symbol", self.symbol),
-                            "lot": float(act_ord.get("lot_size") or risk_ticket.get("lot_size") or (0.01 if is_btc else 0.10)),
-                            "price": float(act_ord.get("entry_mt5") or cur_p),
-                            "sl": float(act_ord.get("stop_mt5") or 0.0),
-                            "tp": float(act_ord.get("target_mt5") or 0.0),
-                            "tp1": float(act_ord.get("tp1_mt5") or 0.0),
-                            "magic": 797979,
-                            "comment": f"K79-{self.symbol[:3]}-{act_ord['side']}",
-                        },
-                        signal_id=sig_id,
+            # Dispatch all active orders (SMC_SWING, RAPID_FIRE, PROMOTED_RUNNER) needing execution
+            for ord_item in list(self.order_manager.active_orders):
+                if ord_item.get("status") in ("PENDING", "FILLED") and ord_item.get("order_id"):
+                    sig_id = ord_item["order_id"]
+                    has_ticket = bool(ord_item.get("broker_ticket"))
+                    is_in_queue = any(a.get("signal_id") == sig_id for a in self.ea_bridge.action_queue)
+                    already_dispatched = (
+                        sig_id in self.ea_bridge.executed_signal_ids
+                        or bool(ord_item.get("ea_dispatch_status"))
                     )
-            elif (
-                order_event
-                and order_event.get("type") == "NEW_ORDER_REGISTERED"
-                and risk_ticket.get("win_prob_passed", False)
-                and risk_ticket.get("verdict") in ("PASS", "CAUTION")
-            ):
-                sig_id = risk_ticket.get("fingerprint") or f"sig_{int(time.time())}"
-                self.ea_bridge.enqueue_action(
-                    action_type="OPEN_ORDER",
-                    payload={
-                        "side": risk_ticket["side"],
-                        "order_type": risk_ticket.get("execution_type", "LIMIT"),
-                        "symbol": self.symbol,
-                        "lot": float(risk_ticket.get("lot_size") or (0.01 if is_btc else 0.10)),
-                        "price": float(risk_ticket.get("entry_mt5") or cur_p),
-                        "sl": float(risk_ticket.get("stop_mt5") or 0.0),
-                        "tp": float(risk_ticket.get("target_mt5") or 0.0),
-                        "tp1": float(risk_ticket.get("tp1_mt5") or 0.0),
-                        "magic": 797979,
-                        "comment": f"K79-{self.symbol[:3]}-{risk_ticket['side']}",
-                    },
-                    signal_id=sig_id,
-                )
+                    if not has_ticket and not is_in_queue and not already_dispatched:
+                        if daily_profit_reached or anchor_loss_tripped or sideway_paused:
+                            continue
+                        strat_m = str(ord_item.get("strategy_mode") or "SMC_SWING").upper()
+                        comment = ord_item.get("comment") or f"K79-{strat_m[:3]}-{ord_item['side']}"
+                        exec_t = ord_item.get("execution_type", "LIMIT")
+                        entry_val = float(ord_item.get("entry_mt5") or cur_p)
 
-            # Case 2: Multi-orders (scale-in / recovery / rapid-fire) needing dispatch
-            if len(self.order_manager.active_orders) > 1:
-                for sub_o in self.order_manager.active_orders[1:]:
-                    sub_id = sub_o.get("order_id")
-                    is_in_q = any(a.get("signal_id") == sub_id for a in self.ea_bridge.action_queue)
-                    if (
-                        sub_id
-                        and sub_id not in self.ea_bridge.executed_signal_ids
-                        and not is_in_q
-                        and not sub_o.get("broker_ticket")
-                        and not sub_o.get("ea_dispatch_status")
-                        and sub_o.get("status") in ("PENDING", "FILLED")
-                    ):
+                        # Anti-duplicate pending limit guard: check if MT5 already has this pending order
+                        mt5_pendings = (self.ea_bridge.account_info or {}).get("pending_orders") or []
+                        if exec_t == "LIMIT" and mt5_pendings:
+                            matched_po = next(
+                                (
+                                    p for p in mt5_pendings
+                                    if ord_item["side"] in str(p.get("type", "")).upper()
+                                    and abs(float(p.get("open_price") or 0.0) - entry_val) < 1.0
+                                ),
+                                None,
+                            )
+                            if matched_po:
+                                ord_item["broker_ticket"] = int(matched_po["ticket"])
+                                ord_item["ea_dispatch_status"] = "DISPATCHED"
+                                continue
+
+                        ord_item["ea_dispatch_status"] = "DISPATCHED"
                         self.ea_bridge.enqueue_action(
                             action_type="OPEN_ORDER",
                             payload={
-                                "side": sub_o.get("side", act_ord["side"] if act_ord else "BUY"),
-                                "order_type": sub_o.get("execution_type", "MARKET"),
-                                "symbol": sub_o.get("symbol", self.symbol),
-                                "lot": float(sub_o.get("lot_size") or (0.01 if is_btc else 0.10)),
-                                "price": float(sub_o.get("entry_mt5") or cur_p),
-                                "sl": float(sub_o.get("stop_mt5") or 0.0),
-                                "tp": float(sub_o.get("target_mt5") or 0.0),
+                                "side": ord_item["side"],
+                                "order_type": exec_t,
+                                "symbol": self.broker_symbol,
+                                "lot": float(ord_item.get("lot_size") or (0.01 if is_btc else 0.10)),
+                                "price": entry_val,
+                                "sl": float(ord_item.get("stop_mt5") or 0.0),
+                                "tp": float(ord_item.get("target_mt5") or 0.0),
+                                "tp1": float(ord_item.get("tp1_mt5") or 0.0),
                                 "magic": 797979,
-                                "comment": f"K79-{sub_o.get('purpose', 'MULTI')}",
+                                "comment": comment,
                             },
-                            signal_id=sub_id,
+                            signal_id=sig_id,
+                        )
+
+            # Case 2.4: Fast Breakeven Modify on MT5 (Sideway & Scalp Quick Lock)
+            if order_event and order_event.get("type") == "BREAKEVEN_LOCKED":
+                be_oid = order_event.get("order_id")
+                target_ord = next(
+                    (o for o in self.order_manager.active_orders if o.get("order_id") == be_oid),
+                    self.order_manager.active_order,
+                )
+                if target_ord and target_ord.get("broker_ticket") and order_event.get("be_sl"):
+                    new_sl_val = float(order_event["be_sl"])
+                    sig_be = f"{target_ord['order_id']}-BE-LOCK"
+                    if sig_be not in self.ea_bridge.executed_signal_ids:
+                        self.ea_bridge.enqueue_action(
+                            action_type="MODIFY_ORDER",
+                            payload={
+                                "ticket": int(target_ord["broker_ticket"]),
+                                "symbol": target_ord.get("symbol", self.symbol),
+                                "new_sl": new_sl_val,
+                                "new_tp": float(target_ord.get("target_mt5") or 0.0),
+                            },
+                            signal_id=sig_be,
                         )
 
             # Case 2.5: TP1 Partial Close + Move SL to Breakeven
@@ -604,14 +1161,37 @@ class TradingAssistantCore:
                             signal_id=sig_trail,
                         )
 
-            # Case 3: Autonomous Close / Invalidation when disadvantaged, circuit-broken, or exited
+            # Case 2.7: Dynamic Order Morphing / Promotion on MT5 (Rapid / Scalp -> Swing Runner)
+            if order_event and order_event.get("type") == "ORDER_PROMOTED_TO_RUNNER":
+                prom_oid = order_event.get("order_id")
+                target_ord = next(
+                    (o for o in self.order_manager.active_orders if o.get("order_id") == prom_oid),
+                    None,
+                )
+                if target_ord and target_ord.get("broker_ticket"):
+                    sig_prom = f"{target_ord['order_id']}-PROMOTED"
+                    if sig_prom not in self.ea_bridge.executed_signal_ids:
+                        self.ea_bridge.enqueue_action(
+                            action_type="MODIFY_ORDER",
+                            payload={
+                                "ticket": int(target_ord["broker_ticket"]),
+                                "symbol": target_ord.get("symbol", self.symbol),
+                                "new_sl": float(order_event.get("new_sl") or target_ord.get("stop_mt5")),
+                                "new_tp": float(order_event.get("new_tp") or target_ord.get("target_mt5")),
+                            },
+                            signal_id=sig_prom,
+                        )
+
+            # Case 3: Autonomous Close / Invalidation (NEVER force-close for virtual SL/TP/BE — MT5 broker handles hard SL/TP natively!)
             if order_event and order_event.get("type") in (
                 "ORDER_CLOSED_DISADVANTAGE",
                 "BUNDLE_CIRCUIT_BREAKER",
                 "ROBOT_BASKET_CUT",
-                "TRADE_CLOSED_SL",
-                "TRADE_CLOSED_TP2",
-                "TRADE_CLOSED_BREAKEVEN",
+                "TRADE_CLOSED_REVERSAL_PROFIT_LOCK",
+                "ORDER_CLOSED_REVERSAL_PROFIT_LOCK",
+                "TRADE_CLOSED_SIDEWAY_STAGNATION_GUARD",
+                "ORDER_CLOSED_SIDEWAY_STAGNATION_GUARD",
+                "TRADE_CLOSED_TIME_DECAY",
                 "ORDER_CANCELLED",
             ):
                 ord_obj = order_event.get("order") or {}
@@ -678,7 +1258,7 @@ class TradingAssistantCore:
 
             for sym in symbols_to_scan:
                 sym_feed = self.hub.get_bars("M5", symbol=sym)
-                sym_bars = sym_feed.get("bars") or []
+                sym_bars = (sym_feed.get("bars") or [])[-250:]
                 if len(sym_bars) < 30:
                     continue
 
@@ -842,7 +1422,7 @@ class TradingAssistantCore:
             for o in self.order_manager.order_history
             if not str(o.get("order_id") or "").startswith("test_")
             and o.get("close_reason") not in ("TEST_CLEANUP", "SYSTEM_INIT")
-        ][-15:]
+        ][-50:]
 
         live_quote = feed.get("live_quote")
         state = {
@@ -860,7 +1440,7 @@ class TradingAssistantCore:
             "active_order": self.order_manager.get_active_order_dict(cur_p),
             "order_event": order_event,
             "order_history": clean_history,
-            "bars": chart_bars,
+            "bars": chart_bars[-300:],
             "structure": structure,
             "chart_patterns": structure.get("chart_patterns"),
             "market_flow": market_flow,
@@ -881,6 +1461,38 @@ class TradingAssistantCore:
             },
             "news": news,
             "ai_advisory": ai_advisory,
+            "ai_memory_trainer": self.ai_memory.get_dashboard_summary(),
+            "ai_memory_eval": ai_mem_eval,
+            "sideway_guard": sw_guard,
+            "daily_profit_tracking": {
+                "anchor_balance": round(anchor_bal, 2),
+                "anchor_ts": anchor_ts,
+                "anchor_bkk": anchor_bkk,
+                "daily_profit_target_usd": round(daily_profit_target_usd, 2),
+                "daily_profit_target_enabled": daily_target_enabled,
+                "daily_realized_pnl_usd": round(daily_realized_pnl_usd, 2),
+                "session_equity_pnl_usd": round(session_equity_pnl_usd, 2),
+                "target_balance_goal": target_balance_goal,
+                "daily_profit_target_reached": daily_profit_reached,
+                "progress_pct": round(min(100.0, (effective_profit_usd / daily_profit_target_usd * 100.0)), 1) if (daily_profit_target_usd > 0 and effective_profit_usd > 0) else 0.0,
+            },
+            "circuit_breaker_20pct": {
+                "tripped": bool(anchor_loss_tripped),
+                "anchor_loss_limit_reached": bool(anchor_loss_tripped),
+                "anchor_balance": round(anchor_bal, 2),
+                "anchor_bkk": anchor_bkk,
+                "max_loss_usd": round(max_loss_usd, 2),
+                "stop_floor_balance": stop_floor_balance,
+                "anchor_drawdown_usd": anchor_drawdown_usd,
+                "anchor_drawdown_pct": anchor_drawdown_pct,
+                "consecutive_loss_count": int(consec_info.get("consecutive_loss_count", 0)),
+                "consecutive_loss_usd": round(float(consec_info.get("consecutive_loss_usd", 0.0)), 2),
+                "consecutive_loss_pct": round(float(consec_info.get("consecutive_loss_pct", 0.0)), 2),
+                "threshold_pct": round(threshold_pct, 2),
+                "adaptive_tuning": adaptive_tuning,
+                "reason": consec_info.get("reason", ""),
+            },
+            "loss_memory": self.loss_memory.get_status(),
             "config": {
                 "account_balance": self.config.get("account_balance", 5000.0),
                 "leverage": float(self.config.get("leverage") or 100.0),
@@ -888,6 +1500,12 @@ class TradingAssistantCore:
                 "min_reward_risk": self.config.get("min_reward_risk", 1.5),
                 "broker_price_offset": offset,
                 "broker_spread_points": int(spread_pts),
+                "daily_profit_target_usd": round(daily_profit_target_usd, 2),
+                "daily_profit_target_enabled": daily_target_enabled,
+                "max_consecutive_loss_pct": round(threshold_pct, 2),
+                "max_loss_usd": round(max_loss_usd, 2),
+                "pnl_anchor_balance": round(anchor_bal, 2),
+                "pnl_anchor_bkk": anchor_bkk,
                 "robot_scalper": self.config.get("robot_scalper", {}),
                 "rapid_fire_test": self.config.get("rapid_fire_test", {}),
                 "cross_asset_enabled": bool(cross_asset_cfg.get("enabled", False)),
@@ -900,7 +1518,25 @@ class TradingAssistantCore:
         self.last_state = state
         return state
 
+    def reanchor_pnl_targets(self) -> float:
+        """Anchor Profit/Loss tracking to current live MT5 Balance at the exact moment of setup."""
+        ea_acc = self.ea_bridge.account_info or {}
+        is_mt5_live = bool(self.ea_bridge.is_connected and float(ea_acc.get("balance") or 0.0) > 0.0)
+        cur_bal = float(ea_acc.get("balance") or 0.0) if is_mt5_live else float(self.config.get("account_balance") or 5000.0)
+        cur_bal = round(max(1.0, cur_bal), 2)
+        now_ts = int(time.time())
+        self.config["pnl_anchor_balance"] = cur_bal
+        self.config["pnl_anchor_ts"] = now_ts
+        self.config["pnl_anchor_bkk"] = _fmt_bkk(now_ts)
+        loss_pct = float(self.config.get("max_consecutive_loss_pct") if self.config.get("max_consecutive_loss_pct") is not None else 20.0)
+        self.config["max_loss_usd"] = round(cur_bal * (loss_pct / 100.0), 2)
+        return cur_bal
+
     def update_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        prev_target = self.config.get("daily_profit_target_usd")
+        prev_loss_pct = self.config.get("max_consecutive_loss_pct")
+        prev_loss_usd = self.config.get("max_loss_usd")
+
         for key in (
             "account_balance",
             "leverage",
@@ -908,9 +1544,58 @@ class TradingAssistantCore:
             "min_reward_risk",
             "broker_price_offset",
             "broker_spread_points",
+            "daily_profit_target_usd",
+            "max_consecutive_loss_pct",
+            "max_loss_usd",
         ):
-            if key in payload and payload[key] is not None:
-                self.config[key] = float(payload[key])
+            if key in payload and payload[key] is not None and str(payload[key]).strip() != "":
+                val = float(payload[key])
+                if key in ("daily_profit_target_usd", "max_loss_usd"):
+                    val = max(0.0, val)
+                elif key == "max_consecutive_loss_pct":
+                    val = max(1.0, min(95.0, val))
+                self.config[key] = round(val, 2)
+
+        if "daily_profit_target_enabled" in payload:
+            self.config["daily_profit_target_enabled"] = bool(payload["daily_profit_target_enabled"])
+        if "auto_trading_enabled" in payload:
+            self.ea_bridge.set_auto_trading(bool(payload["auto_trading_enabled"]))
+        elif "auto_trading" in payload and isinstance(payload["auto_trading"], dict):
+            if "enabled" in payload["auto_trading"]:
+                self.ea_bridge.set_auto_trading(bool(payload["auto_trading"]["enabled"]))
+
+        # Anchor Profit/Loss calculations to live MT5 Balance at the time user sets them!
+        pnl_changed = (
+            bool(payload.get("reanchor_pnl"))
+            or ("daily_profit_target_usd" in payload and self.config.get("daily_profit_target_usd") != prev_target)
+            or ("max_consecutive_loss_pct" in payload and self.config.get("max_consecutive_loss_pct") != prev_loss_pct)
+            or ("max_loss_usd" in payload and self.config.get("max_loss_usd") != prev_loss_usd)
+            or float(self.config.get("pnl_anchor_balance") or 0.0) <= 0.0
+        )
+        if pnl_changed:
+            ea_acc = self.ea_bridge.account_info or {}
+            is_mt5_live = bool(self.ea_bridge.is_connected and float(ea_acc.get("balance") or 0.0) > 0.0)
+            anchor_bal = float(ea_acc.get("balance") or 0.0) if is_mt5_live else float(self.config.get("account_balance") or 5000.0)
+            anchor_bal = round(max(1.0, anchor_bal), 2)
+            now_ts = int(time.time())
+            self.config["pnl_anchor_balance"] = anchor_bal
+            self.config["pnl_anchor_ts"] = now_ts
+            self.config["pnl_anchor_bkk"] = _fmt_bkk(now_ts)
+
+            loss_mode = str(payload.get("loss_input_mode") or "pct").lower()
+            if loss_mode == "usd" and "max_loss_usd" in payload and float(self.config.get("max_loss_usd") or 0.0) > 0.0:
+                usd_lim = round(min(anchor_bal * 0.95, float(self.config["max_loss_usd"])), 2)
+                self.config["max_loss_usd"] = usd_lim
+                self.config["max_consecutive_loss_pct"] = round((usd_lim / anchor_bal) * 100.0, 2)
+            else:
+                pct_lim = float(self.config.get("max_consecutive_loss_pct") if self.config.get("max_consecutive_loss_pct") is not None else 20.0)
+                self.config["max_consecutive_loss_pct"] = round(pct_lim, 2)
+                self.config["max_loss_usd"] = round(anchor_bal * (pct_lim / 100.0), 2)
+
+            if payload.get("reanchor_pnl"):
+                self.loss_memory.reset_circuit_breaker()
+                self.config["circuit_breaker_20pct_tripped"] = False
+
         self.config["simulation_replays"] = max(
             35000, int(self.config.get("simulation_replays") or 35000)
         )
@@ -929,12 +1614,14 @@ class TradingAssistantCore:
                 elif style == "scalping":
                     self.timeframe = "M5"
                     self.config["default_timeframe"] = "M5"
+        gemini_updated = False
         if "gemini_api_key" in payload:
             raw_key = str(payload["gemini_api_key"]).strip()
-            if " " not in raw_key and not raw_key.startswith("[MT5"):
+            if raw_key and " " not in raw_key and not raw_key.startswith("[MT5"):
                 self.config.setdefault("ai", {})["api_key"] = raw_key
+                gemini_updated = True
         save_config(self.config)
-        return self.compute_full_state(force_ai=True)
+        return self.compute_full_state(force_ai=gemini_updated)
 
     def save_config(self) -> None:
         save_config(self.config)
@@ -1023,19 +1710,16 @@ class AssistantServer:
         self.port = port
         self.cores: Dict[str, TradingAssistantCore] = {
             "XAUUSD": TradingAssistantCore("XAUUSD"),
-            "BTCUSD": TradingAssistantCore("BTCUSD"),
         }
         self.core = self.cores["XAUUSD"]
         self.clients: Set[WebSocketClient] = set()
         self.auto_replay = False
+        self._is_computing: Dict[str, bool] = {}
         self._last_ws_broadcast_ts = 0.0
         self._last_tv_tick_ts = 0.0
 
     def get_core(self, symbol: Optional[str] = None) -> TradingAssistantCore:
-        sym = (symbol or "XAUUSD").upper()
-        if "BTC" in sym:
-            return self.cores["BTCUSD"]
-        return self.cores.get(sym, self.cores["XAUUSD"])
+        return self.cores["XAUUSD"]
 
     async def broadcast(self, message: Dict[str, Any], symbol: Optional[str] = None) -> None:
         target_sym = (symbol or message.get("symbol") or (message.get("risk_ticket") or {}).get("symbol") or "XAUUSD").upper()
@@ -1228,7 +1912,7 @@ class AssistantServer:
         """Poll real spot Bid/Ask and trigger updates for subscribed symbol clients."""
         loop_counter = 0
         while True:
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(0.5)
             has_ea_any = any(c.ea_bridge.auto_trading_enabled or c.ea_bridge.is_connected or c.order_manager.has_active_order() for c in self.cores.values())
             if not self.clients and not has_ea_any:
                 continue
@@ -1305,6 +1989,10 @@ class AssistantServer:
                             contract_size=1.0 if is_btc else 100.0,
                             config=core_inst.config,
                             symbol=sym_name,
+                            market_context=(
+                                {"structure": core_inst.last_state.get("structure"), "smc": core_inst.last_state.get("smc")}
+                                if core_inst.last_state else None
+                            ),
                         )
                         if ingested["new_bar_closed"] or ev or loop_counter % 10 == 0:
                             state = await asyncio.to_thread(
@@ -1356,22 +2044,25 @@ class AssistantServer:
                             symbol=sym_name,
                         )
 
-                # Periodic autonomous setup scan: evaluate setups every 2-16 seconds when auto trading is ON
+                # Periodic autonomous setup scan: evaluate setups every 2-8 seconds when auto trading is ON
                 is_rapid_on = bool((core_inst.config.get("rapid_fire_test") or {}).get("enabled", False))
-                is_robot_on = bool((core_inst.config.get("robot_scalper") or {}).get("enabled", False))
-                scan_mod = 1 if is_rapid_on else (2 if is_robot_on else (3 if core_inst.trading_style == "micro_scalp" else 8))
+                scan_mod = 4 if is_rapid_on else (6 if core_inst.trading_style == "micro_scalp" else 10)
                 should_scan = (
                     core_inst.ea_bridge.auto_trading_enabled
-                    and (is_rapid_on or is_robot_on or not core_inst.order_manager.has_active_order())
+                    and (is_rapid_on or not core_inst.order_manager.has_active_order())
                     and (loop_counter % scan_mod == 0)
+                    and not self._is_computing.get(sym_name, False)
                 )
                 if should_scan:
+                    self._is_computing[sym_name] = True
                     try:
                         state = await asyncio.to_thread(core_inst.compute_full_state, None, False, False)
                         if has_sub:
                             await self.broadcast(state, symbol=sym_name)
                     except Exception as e:
                         logger.warning(f"Autonomous periodic evaluation failed for {sym_name}: {e}")
+                    finally:
+                        self._is_computing[sym_name] = False
 
     async def handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -1467,17 +2158,22 @@ class AssistantServer:
 
         # If no active order exists, register one so Web UI tracks it and displays PnL
         if not act:
+            req_exec_type = str(rt.get("execution_type") or "LIMIT").upper()
+            if req_exec_type not in ("MARKET", "LIMIT"):
+                req_exec_type = "LIMIT"
+            entry_p = float(rt.get("entry_mt5") or cur_p)
             sl_dist = 150.0 if is_btc else 5.0
             tp_dist = 300.0 if is_btc else 10.0
-            stop_p = float(rt.get("stop_mt5") or (cur_p - sl_dist if side == "BUY" else cur_p + sl_dist))
-            target_p = float(rt.get("target_mt5") or (cur_p + tp_dist if side == "BUY" else cur_p - tp_dist))
-            tp1_p = float(rt.get("tp1_mt5") or (cur_p + sl_dist if side == "BUY" else cur_p - sl_dist))
+            stop_p = float(rt.get("stop_mt5") or (entry_p - sl_dist if side == "BUY" else entry_p + sl_dist))
+            target_p = float(rt.get("target_mt5") or (entry_p + tp_dist if side == "BUY" else entry_p - tp_dist))
+            tp1_p = float(rt.get("tp1_mt5") or (entry_p + sl_dist if side == "BUY" else entry_p - sl_dist))
             lot = float(rt.get("lot_size") or (0.01 if is_btc else 0.10))
+            order_desc = f"{side} NOW (Market)" if req_exec_type == "MARKET" else f"{side} LIMIT @ {entry_p:.2f}"
             core.order_manager.register_trade_setup(
                 risk_ticket={
                     "symbol": core.symbol,
                     "side": side,
-                    "entry_mt5": cur_p,
+                    "entry_mt5": entry_p,
                     "stop_mt5": stop_p,
                     "tp1_mt5": tp1_p,
                     "target_mt5": target_p,
@@ -1485,9 +2181,9 @@ class AssistantServer:
                     "contract_size": 1.0 if is_btc else 100.0,
                     "actual_risk_usd": float(rt.get("actual_risk_usd") or 50.0),
                     "potential_profit_usd": float(rt.get("potential_profit_usd") or 100.0),
-                    "reward_risk": 2.0,
-                    "order_type": f"{side} NOW (Market)",
-                    "execution_type": "MARKET",
+                    "reward_risk": float(rt.get("reward_risk") or 2.0),
+                    "order_type": order_desc,
+                    "execution_type": req_exec_type,
                 },
                 trade_setup=last_st.get("smc", {}).get("trade_setup") or {},
                 current_price=cur_p,
@@ -1502,8 +2198,8 @@ class AssistantServer:
         # Discard so manual dispatch can re-queue even if already queued
         core.ea_bridge.executed_signal_ids.discard(sig_id)
 
-        exec_type = (act.get("execution_type") if act else None) or "MARKET"
-        sym = core.symbol
+        exec_type = (act.get("execution_type") if act else None) or rt.get("execution_type") or "LIMIT"
+        sym = core.broker_symbol
         action = core.ea_bridge.enqueue_action(
             action_type="OPEN_ORDER",
             payload={
@@ -1620,7 +2316,7 @@ class AssistantServer:
         # Discard previous executed record so manual dispatch always queues fresh
         core.ea_bridge.executed_signal_ids.discard(sig_id)
 
-        sym = core.symbol
+        sym = core.broker_symbol
         action = core.ea_bridge.enqueue_action(
             action_type="OPEN_ORDER",
             payload={
@@ -1790,6 +2486,16 @@ class AssistantServer:
             core.order_manager.close_all_orders(current_price=cp)
             state = await asyncio.to_thread(core.compute_full_state, None, True, False)
             await self.broadcast(state, symbol=core.symbol)
+        elif action in ("reload", "sync_mt5"):
+            cp = float(cmd.get("current_price") or core.hub.latest_spot.get("price") or 0.0)
+            ea_acc = core.ea_bridge.account_info or {}
+            core.order_manager.force_sync_with_mt5(
+                open_positions=ea_acc.get("open_positions") or [],
+                pending_orders=ea_acc.get("pending_orders") or [],
+                current_price=cp,
+            )
+            state = await asyncio.to_thread(core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=core.symbol)
 
     async def handle_http_request(
         self,
@@ -1804,7 +2510,11 @@ class AssistantServer:
 
         if path == "/api/state" and method == "GET":
             tf = (query.get("tf") or [core.timeframe])[0]
-            state = core.compute_full_state(timeframe=tf)
+            force = (query.get("force") or ["false"])[0].lower() in ("1", "true")
+            if core.last_state and not force and core.last_state.get("timeframe") == tf:
+                await self.send_http_json(writer, 200, core.last_state)
+                return
+            state = await asyncio.to_thread(core.compute_full_state, tf)
             await self.send_http_json(writer, 200, state)
             return
 
@@ -1812,9 +2522,12 @@ class AssistantServer:
             payload = safe_json_loads(body_bytes)
             sym = payload.get("symbol") or sym_req
             target_core = self.get_core(sym)
-            state = target_core.update_settings(payload)
-            await self.broadcast(state, symbol=target_core.symbol)
-            await self.send_http_json(writer, 200, state)
+            try:
+                state = await asyncio.to_thread(target_core.update_settings, payload)
+                await self.broadcast(state, symbol=target_core.symbol)
+                await self.send_http_json(writer, 200, state)
+            except Exception as e:
+                await self.send_http_json(writer, 500, {"status": "error", "message": str(e)})
             return
 
         if path == "/api/replay" and method == "POST":
@@ -1886,6 +2599,59 @@ class AssistantServer:
                     "CLOSE_ALL", {"symbol": target_core.symbol, "magic": 797979}
                 )
                 target_core.order_manager.close_all_orders(current_price=cp)
+            elif action == "close_ticket":
+                t = int(payload.get("ticket") or 0)
+                if t:
+                    target_core.ea_bridge.enqueue_action(
+                        "CLOSE_ORDER", {"ticket": t, "symbol": target_core.broker_symbol}
+                    )
+            elif action == "clean_duplicate_pending":
+                seen = set()
+                cancelled = 0
+                mt5_pendings = (target_core.ea_bridge.account_info or {}).get("pending_orders") or []
+                for po in list(mt5_pendings):
+                    key = (str(po.get("type")), round(float(po.get("open_price") or 0.0), 1))
+                    if key in seen:
+                        target_core.ea_bridge.enqueue_action(
+                            "CLOSE_ORDER", {"ticket": int(po["ticket"]), "symbol": target_core.broker_symbol}
+                        )
+                        cancelled += 1
+                    else:
+                        seen.add(key)
+                state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
+                await self.broadcast(state, symbol=target_core.symbol)
+                await self.send_http_json(
+                    writer,
+                    200,
+                    {
+                        "status": "ok",
+                        "message": f"ล้างคำสั่ง Pending Limit ที่ซ้ำซ้อนเรียบร้อยแล้ว ({cancelled} รายการ)",
+                        "cancelled_count": cancelled,
+                        "state": state,
+                    },
+                )
+                return
+
+            elif action in ("reload", "sync_mt5"):
+                ea_acc = target_core.ea_bridge.account_info or {}
+                sync_res = target_core.order_manager.force_sync_with_mt5(
+                    open_positions=ea_acc.get("open_positions") or [],
+                    pending_orders=ea_acc.get("pending_orders") or [],
+                    current_price=cp,
+                )
+                state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
+                await self.broadcast(state, symbol=target_core.symbol)
+                await self.send_http_json(
+                    writer,
+                    200,
+                    {
+                        "status": "ok",
+                        "message": f"ซิงค์สถานะกับ MT5 สำเร็จ: ล้างไม้ค้าง {sync_res['purged_count']} ไม้ (MT5 มี {sync_res['mt5_open_count']} ไม้)",
+                        "sync_result": sync_res,
+                        "state": state,
+                    },
+                )
+                return
 
             if action in ("close", "cancel"):
                 target_core.ea_bridge.enqueue_action(
@@ -1911,6 +2677,325 @@ class AssistantServer:
             await self.send_http_json(writer, 200, state)
             return
 
+        if path in ("/api/order/reload", "/api/ea/sync") and method in ("GET", "POST"):
+            sym = sym_req
+            if method == "POST" and body_bytes:
+                payload = safe_json_loads(body_bytes)
+                sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            cp = float(target_core.hub.latest_spot.get("price") or 0.0)
+            ea_acc = target_core.ea_bridge.account_info or {}
+            sync_res = target_core.order_manager.force_sync_with_mt5(
+                open_positions=ea_acc.get("open_positions") or [],
+                pending_orders=ea_acc.get("pending_orders") or [],
+                current_price=cp,
+            )
+            # Enqueue RESET_KILL_SWITCH to MT5 EA and unlatch local kill switch
+            target_core.ea_bridge.enqueue_action(
+                action_type="RESET_KILL_SWITCH",
+                payload={"symbol": target_core.broker_symbol},
+                signal_id=f"reset_ks_{int(time.time())}",
+            )
+            if target_core.ea_bridge.account_info:
+                target_core.ea_bridge.account_info["kill_switch_tripped"] = False
+
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "message": f"ซิงค์สถานะกับ MT5 สำเร็จ: ล้างไม้ค้าง {sync_res['purged_count']} ไม้ (MT5 มี {sync_res['mt5_open_count']} ไม้, รีเซ็ต Kill Switch สำเร็จ)",
+                    "sync_result": sync_res,
+                },
+            )
+
+            async def _bg_reload_update(tc=target_core):
+                try:
+                    st = await asyncio.to_thread(tc.compute_full_state, None, True, False)
+                    await self.broadcast(st, symbol=tc.symbol)
+                except Exception as e:
+                    logger.warning(f"Background reload sync update failed: {e}")
+
+            asyncio.create_task(_bg_reload_update())
+            return
+
+        if path in ("/api/order/purge_ghosts", "/api/order/clear_ghosts") and method in ("GET", "POST"):
+            sym = sym_req
+            if method == "POST" and body_bytes:
+                payload = safe_json_loads(body_bytes)
+                sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            cp = float(target_core.hub.latest_spot.get("price") or 0.0)
+            ea_acc = target_core.ea_bridge.account_info or {}
+
+            # 1. Force purge any active orders on server that do not exist in MT5
+            sync_res = target_core.order_manager.force_sync_with_mt5(
+                open_positions=ea_acc.get("open_positions") or [],
+                pending_orders=ea_acc.get("pending_orders") or [],
+                current_price=cp,
+            )
+            # 2. Clear orphaned action queue in ea_bridge
+            target_core.ea_bridge.action_queue.clear()
+
+            # 3. Enqueue RESET_KILL_SWITCH to MT5 EA and clear local kill switch
+            target_core.ea_bridge.enqueue_action(
+                action_type="RESET_KILL_SWITCH",
+                payload={"symbol": target_core.broker_symbol},
+                signal_id=f"reset_ks_{int(time.time())}",
+            )
+            if target_core.ea_bridge.account_info:
+                target_core.ea_bridge.account_info["kill_switch_tripped"] = False
+
+            state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=target_core.symbol)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "message": f"ล้างไม้ผีเรียบร้อย (เคลียร์ไม้ตกค้าง {sync_res['purged_count']} ไม้ • MT5 เหลือ {sync_res['mt5_open_count']} ไม้)",
+                    "purged_count": sync_res["purged_count"],
+                    "purged_orders": sync_res["purged_orders"],
+                    "mt5_open_count": sync_res["mt5_open_count"],
+                    "state": state,
+                },
+            )
+            return
+
+        if path == "/api/daily_target/set" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            if "target_usd" in payload:
+                target_core.config["daily_profit_target_usd"] = round(max(0.0, float(payload["target_usd"])), 2)
+            if "enabled" in payload:
+                target_core.config["daily_profit_target_enabled"] = bool(payload["enabled"])
+            target_core.reanchor_pnl_targets()
+            target_core.save_config()
+            state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=target_core.symbol)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "daily_profit_target_usd": target_core.config.get("daily_profit_target_usd"),
+                    "daily_profit_target_enabled": target_core.config.get("daily_profit_target_enabled"),
+                    "state": state,
+                },
+            )
+            return
+
+        if path == "/api/ai_memory/reset" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            rst = target_core.ai_memory.reset_memory()
+            state = await asyncio.to_thread(target_core.compute_full_state, None, False, False)
+            await self.broadcast(state, symbol=target_core.symbol)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "cleared_trained_trades": rst.get("cleared_trained_trades", 0),
+                    "message": f"🧹 รีเซ็ต AI Trade Memory เรียบร้อย (ล้างข้อมูลเทรนเก่า {rst.get('cleared_trained_trades', 0)} ไม้ เริ่มเรียนรู้ใหม่ตั้งแต่ต้น)",
+                    "state": state,
+                },
+            )
+            return
+
+        if path == "/api/sideway/decision" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            decision = str(payload.get("decision") or "pause").strip().lower()
+            target_core = self.get_core(sym)
+            sg_res = target_core.apply_sideway_decision(decision)
+            state = await asyncio.to_thread(target_core.compute_full_state, None, False, False)
+            await self.broadcast(state, symbol=target_core.symbol)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "decision": decision,
+                    "sideway_guard": sg_res,
+                    "message": sg_res.get("message", "บันทึกการตัดสินใจแล้ว"),
+                    "state": state,
+                },
+            )
+            return
+
+        if path == "/api/system/reset" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            now_rst = int(time.time())
+
+            # 1. Clear all loss-pattern vetoes, consecutive streaks & adaptive blocks
+            loss_rst = target_core.loss_memory.full_reset()
+
+            # 2. Re-anchor portfolio profit/loss targets to live MT5 balance & clear guards
+            target_core.config["circuit_breaker_20pct_tripped"] = False
+            if hasattr(target_core, "reanchor_pnl_targets"):
+                target_core.reanchor_pnl_targets()
+            else:
+                ea_bal = float((target_core.ea_bridge.account_info or {}).get("balance") or target_core.config.get("account_balance") or 0.0)
+                if ea_bal > 0:
+                    target_core.config["account_balance"] = round(ea_bal, 2)
+                    target_core.config["pnl_anchor_balance"] = round(ea_bal, 2)
+                    target_core.config["pnl_anchor_ts"] = now_rst
+                    target_core.config["pnl_anchor_bkk"] = _fmt_bkk(now_rst)
+                    loss_pct = float(target_core.config.get("max_consecutive_loss_pct") or 20.0)
+                    target_core.config["max_loss_usd"] = round(ea_bal * (loss_pct / 100.0), 2)
+
+            # 3. Clear stuck EA queues, stale signal locks & kill switch (never closes real MT5 positions!)
+            cleared_queue = len(target_core.ea_bridge.action_queue)
+            target_core.ea_bridge.action_queue.clear()
+            target_core.ea_bridge.executed_signal_ids.clear()
+            if target_core.ea_bridge.account_info:
+                target_core.ea_bridge.account_info["kill_switch_tripped"] = False
+            target_core.ea_bridge.enqueue_action(
+                action_type="RESET_KILL_SWITCH",
+                payload={"symbol": target_core.broker_symbol},
+                signal_id=f"sys_reset_{now_rst}",
+            )
+
+            # 4. Purge ghost server-side orders not present in MT5 (keep any real open MT5 positions untouched!)
+            live_pos_tickets = {
+                int(p.get("ticket"))
+                for p in ((target_core.ea_bridge.account_info or {}).get("positions") or [])
+                if p.get("ticket")
+            }
+            live_pend_tickets = {
+                int(p.get("ticket"))
+                for p in ((target_core.ea_bridge.account_info or {}).get("pending_orders") or [])
+                if p.get("ticket")
+            }
+            live_all_tickets = live_pos_tickets | live_pend_tickets
+            kept_orders = []
+            purged_ghosts = 0
+            for o in list(target_core.order_manager.active_orders):
+                bt = o.get("broker_ticket")
+                if bt and int(bt) in live_all_tickets:
+                    kept_orders.append(o)
+                else:
+                    purged_ghosts += 1
+            target_core.order_manager.active_orders = kept_orders
+            target_core.order_manager.active_order = kept_orders[0] if kept_orders else None
+            # Clamp any legacy future MT5 server-time closed_ts in history so they never re-trigger streaks
+            for ho in getattr(target_core.order_manager, "order_history", []):
+                h_ts = int(ho.get("closed_ts") or 0)
+                if h_ts > now_rst:
+                    ho["closed_ts"] = now_rst - 1
+                ho["loss_pattern_recorded"] = True
+            target_core.order_manager.save_to_disk()
+
+            # 5. Re-enable Auto-Trading, clear AI cooldown & sideway pause, and save config
+            target_core.ea_bridge.set_auto_trading(True)
+            target_core.config.setdefault("auto_trading", {})["enabled"] = True
+            target_core.sideway_guard["status"] = "NORMAL"
+            target_core.sideway_guard["prompt_ts"] = 0
+            target_core.sideway_guard["deadline_ts"] = 0
+            target_core.sideway_guard["sideway_confirm_count"] = 0
+            target_core.sideway_guard["reset_grace_until_ts"] = now_rst + 120
+            if hasattr(target_core, "last_ai_eval_ts"):
+                target_core.last_ai_eval_ts = 0.0
+            if hasattr(target_core, "cached_ai"):
+                target_core.cached_ai = None
+            target_core.save_config()
+
+            # 6. Immediate fresh evaluation & live broadcast
+            state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=target_core.symbol)
+            live_bal_now = float(target_core.config.get("account_balance") or 0.0)
+            msg_th = (
+                f"🔄 รีเซ็ตระบบสำเร็จ! ปลดล็อก Veto {loss_rst['cleared_patterns']} รูปแบบ, "
+                f"ล้างคิวค้าง {cleared_queue} / ไม้ผี {purged_ghosts}, "
+                f"ตั้งฐาน Balance ใหม่ที่ ${live_bal_now:.2f} และพร้อมออกออเดอร์ทันที"
+            )
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "message": msg_th,
+                    "reset_summary": {
+                        "cleared_patterns": loss_rst["cleared_patterns"],
+                        "cleared_queue": cleared_queue,
+                        "purged_ghosts": purged_ghosts,
+                        "kept_mt5_orders": len(kept_orders),
+                        "new_anchor_balance": live_bal_now,
+                    },
+                    "state": state,
+                },
+            )
+            return
+
+        if path == "/api/circuit_breaker/reset" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            target_core.loss_memory.reset_circuit_breaker()
+            target_core.config["circuit_breaker_20pct_tripped"] = False
+            target_core.reanchor_pnl_targets()
+            target_core.ea_bridge.set_auto_trading(True)
+            target_core.save_config()
+            target_core.ea_bridge.enqueue_action(
+                action_type="RESET_KILL_SWITCH",
+                payload={"symbol": target_core.broker_symbol},
+                signal_id=f"reset_cb_{int(time.time())}",
+            )
+            if target_core.ea_bridge.account_info:
+                target_core.ea_bridge.account_info["kill_switch_tripped"] = False
+            state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
+            await self.broadcast(state, symbol=target_core.symbol)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "message": "รีเซ็ต Circuit Breaker และเปิดให้ระบบทำการวิเคราะห์/เทรดรอบใหม่เรียบร้อยแล้ว",
+                    "state": state,
+                },
+            )
+            return
+
+        if path == "/api/reanalysis/run" and method == "POST":
+            payload = safe_json_loads(body_bytes)
+            sym = payload.get("symbol") or sym_req
+            target_core = self.get_core(sym)
+            state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
+            structure = state.get("structure") or {}
+            mtf = state.get("mtf") or {}
+            macro = state.get("macro") or {}
+            acc_bal = float(target_core.config.get("account_balance") or 5000.0)
+            report = target_core.loss_memory.run_deep_reanalysis(
+                symbol=sym,
+                timeframe=target_core.timeframe,
+                structure=structure,
+                mtf=mtf,
+                macro=macro,
+                account_balance=acc_bal,
+            )
+            state["loss_memory"] = target_core.loss_memory.get_status()
+            await self.broadcast(state, symbol=target_core.symbol)
+            await self.send_http_json(
+                writer,
+                200,
+                {
+                    "status": "ok",
+                    "report": report,
+                    "state": state,
+                },
+            )
+            return
+
+        if path == "/api/loss_memory/status" and method == "GET":
+            target_core = self.get_core(sym_req)
+            await self.send_http_json(writer, 200, target_core.loss_memory.get_status())
+            return
+
         # --- MT5 EA Bridge HTTP Endpoints ---
         if path == "/api/ea/poll" and method in ("GET", "POST"):
             actions = []
@@ -1928,7 +3013,7 @@ class AssistantServer:
                 "auto_trading_enabled": auto_trading_any,
                 "has_actions": len(actions) > 0,
                 "actions": actions,
-                "next_poll_ms": 200 if len(actions) > 0 else 500,
+                "next_poll_ms": 100 if len(actions) > 0 else 150,
                 "server_time": int(time.time()),
             }
             await self.send_http_json(writer, 200, resp_doc)
@@ -1947,8 +3032,8 @@ class AssistantServer:
             if info.get("spread_points") and float(info["spread_points"]) > 0:
                 target_core.config["broker_spread_points"] = float(info["spread_points"])
             if (
-                target_core.config.get("auto_sync_broker_offset")
-                and len(target_core.ea_bridge.basis_samples) >= 3
+                target_core.config.get("auto_sync_broker_offset", True)
+                and len(target_core.ea_bridge.basis_samples) >= 2
             ):
                 target_core.config["broker_price_offset"] = float(info.get("dynamic_offset_usd") or 0.0)
             if info.get("symbol"):
@@ -1984,7 +3069,7 @@ class AssistantServer:
                     for o in target_core.order_manager.order_history
                     if not str(o.get("order_id") or "").startswith("test_")
                     and o.get("close_reason") not in ("TEST_CLEANUP", "SYSTEM_INIT")
-                ][-15:],
+                ][-50:],
             }
             await self.broadcast(ea_status_msg, symbol=target_core.symbol)
             await self.send_http_json(
@@ -2004,9 +3089,16 @@ class AssistantServer:
             target_core = self.get_core(ea_sym)
             rec = target_core.ea_bridge.record_execution(payload)
             target_core.order_manager.bind_execution_report(rec)
-            state = await asyncio.to_thread(target_core.compute_full_state)
-            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, {"status": "ok", "execution": rec})
+
+            async def _bg_exec_update(tc=target_core):
+                try:
+                    st = await asyncio.to_thread(tc.compute_full_state)
+                    await self.broadcast(st, symbol=tc.symbol)
+                except Exception as e:
+                    print(f"[EA-EXEC] Background execution state update failed: {e}")
+
+            asyncio.create_task(_bg_exec_update())
             return
 
         if path == "/api/ea/toggle_auto" and method == "POST":
@@ -2018,8 +3110,6 @@ class AssistantServer:
                 new_val = target_core.ea_bridge.toggle_auto_trading()
             else:
                 new_val = target_core.ea_bridge.set_auto_trading(bool(req_enable))
-            state = await asyncio.to_thread(target_core.compute_full_state)
-            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(
                 writer,
                 200,
@@ -2029,6 +3119,15 @@ class AssistantServer:
                     "ea_bridge": target_core.ea_bridge.get_status_dict(),
                 },
             )
+
+            async def _bg_toggle_update(tc=target_core):
+                try:
+                    st = await asyncio.to_thread(tc.compute_full_state)
+                    await self.broadcast(st, symbol=tc.symbol)
+                except Exception as e:
+                    logger.warning(f"Background toggle state update failed: {e}")
+
+            asyncio.create_task(_bg_toggle_update())
             return
 
         if path == "/api/ea/send_order" and method == "POST":
@@ -2036,9 +3135,16 @@ class AssistantServer:
             sym = payload.get("symbol") or sym_req
             res = self.dispatch_order_to_mt5(symbol=sym)
             target_core = self.get_core(sym)
-            state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
-            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, res)
+
+            async def _bg_send_update(tc=target_core):
+                try:
+                    st = await asyncio.to_thread(tc.compute_full_state, None, True, False)
+                    await self.broadcast(st, symbol=tc.symbol)
+                except Exception as e:
+                    logger.warning(f"Background send_order state update failed: {e}")
+
+            asyncio.create_task(_bg_send_update())
             return
 
         if path == "/api/ea/test_order" and method == "POST":
@@ -2049,9 +3155,16 @@ class AssistantServer:
             lot = float(payload.get("lot")) if payload.get("lot") else None
             res = self.dispatch_test_order(side=side, order_type=order_type, lot=lot, symbol=sym)
             target_core = self.get_core(sym)
-            state = await asyncio.to_thread(target_core.compute_full_state, None, True, False)
-            await self.broadcast(state, symbol=target_core.symbol)
             await self.send_http_json(writer, 200, res)
+
+            async def _bg_test_update(tc=target_core):
+                try:
+                    st = await asyncio.to_thread(tc.compute_full_state, None, True, False)
+                    await self.broadcast(st, symbol=tc.symbol)
+                except Exception as e:
+                    logger.warning(f"Background test_order state update failed: {e}")
+
+            asyncio.create_task(_bg_test_update())
             return
 
         if path == "/api/cross_asset/toggle" and method == "POST":
@@ -2080,28 +3193,22 @@ class AssistantServer:
             return
 
         if path == "/api/robot/toggle" and method == "POST":
-            payload = safe_json_loads(body_bytes)
-            sym = payload.get("symbol") or sym_req
-            target_core = self.get_core(sym)
-            req_enable = payload.get("enabled")
-            new_val = target_core.toggle_robot_mode(req_enable)
-            state = await asyncio.to_thread(target_core.compute_full_state)
-            await self.broadcast(state, symbol=target_core.symbol)
+            target_core = self.get_core(sym_req)
+            target_core.toggle_robot_mode(False)
             await self.send_http_json(
                 writer,
                 200,
                 {
-                    "status": "ok",
-                    "robot_scalper_enabled": new_val,
-                    "robot_scalper": target_core.config.get("robot_scalper", {}),
+                    "status": "deprecated",
+                    "robot_scalper_enabled": False,
+                    "message": "โหมด Robot Scalp ถูกถอดออกจากระบบอย่างถาวรเนื่องจากความเสี่ยงสูง",
+                    "robot_scalper": {"enabled": False},
                 },
             )
             return
 
         if path == "/api/robot/status" and method == "GET":
-            sym = (query.get("symbol") or ["XAUUSD"])[0]
-            target_core = self.get_core(sym)
-            await self.send_http_json(writer, 200, target_core.config.get("robot_scalper", {}))
+            await self.send_http_json(writer, 200, {"enabled": False, "status": "deprecated"})
             return
 
         if path == "/api/rapid_fire/toggle" and method == "POST":
@@ -2135,7 +3242,7 @@ class AssistantServer:
             await self.send_http_json(writer, 200, target_core.ea_bridge.get_status_dict())
             return
 
-        rel_path = "btc.html" if path in ("/btc", "/btc.html") else ("index.html" if path in ("/", "") else path.lstrip("/"))
+        rel_path = "index.html" if path in ("/", "", "/btc", "/btc.html") else path.lstrip("/")
         file_path = os.path.abspath(os.path.join(WEB_DIR, rel_path))
         if not file_path.startswith(WEB_DIR) or not os.path.isfile(file_path):
             await self.send_http_json(writer, 404, {"error": f"Not found: {path}"})
@@ -2156,7 +3263,11 @@ class AssistantServer:
         ).encode("utf-8") + data
         writer.write(resp)
         await writer.drain()
-        writer.close()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
 
     async def send_http_json(
         self, writer: asyncio.StreamWriter, status: int, doc: Dict[str, Any]
@@ -2172,12 +3283,14 @@ class AssistantServer:
         ).encode("utf-8") + raw
         writer.write(resp)
         await writer.drain()
-        writer.close()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
 
     async def serve_forever(self) -> None:
-        for c in self.cores.values():
-            c.compute_full_state(force_refresh=True)
-        listen_host = None if self.host in ("0.0.0.0", "", None) else self.host
+        listen_host = self.host if self.host else "0.0.0.0"
         try:
             server = await asyncio.start_server(
                 self.handle_client, listen_host, self.port, reuse_address=True
@@ -2220,10 +3333,12 @@ class AssistantServer:
                 print(f"❌ Failed to bind to port {self.port}: {exc}")
                 print(f"👉 Please close the process using port {self.port} or run with: python app.py --port 8001")
                 raise
+
+        for c in self.cores.values():
+            c.compute_full_state(force_refresh=True)
         tick_task = asyncio.create_task(self.tick_loop())
         tv_task = asyncio.create_task(self.tv_ws_loop())
         ws_task = asyncio.create_task(self.binance_ws_loop())
-        btc_ws_task = asyncio.create_task(self.binance_btc_ws_loop())
 
         import socket
         try:
@@ -2235,21 +3350,31 @@ class AssistantServer:
             lan_ip = "127.0.0.1"
 
         print("=" * 64)
-        print("🚀 KAIROS-79 (Precision Gold & Bitcoin Timing System) Online")
+        print("🚀 KAIROS-79 (Precision Gold Intelligence & MT5 Execution System) Online")
         print(f"🟡 Gold (XAU/USD) Dashboard:  http://localhost:{self.port}/")
-        print(f"₿  Bitcoin (BTC/USD) Page:    http://localhost:{self.port}/btc")
         print(f"🌐 Web Dashboard (LAN/VPS):  http://{lan_ip}:{self.port}")
         print(f"🤖 MT5 EA Bridge URL:        http://{lan_ip}:{self.port} (or http://127.0.0.1:{self.port})")
         print(f"Active Data Feed:            {self.core.last_state.get('data_source') if self.core.last_state else 'initializing'}")
         print("=" * 64)
+        loop = asyncio.get_running_loop()
+        def _win_exc_handler(l, context):
+            exc = context.get("exception")
+            if isinstance(exc, OSError) and getattr(exc, "winerror", None) in (64, 10054, 121):
+                return
+            l.default_exception_handler(context)
+        loop.set_exception_handler(_win_exc_handler)
+
         try:
             async with server:
                 await server.serve_forever()
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            pass
+        except Exception as e:
+            logger.error(f"Server serve error: {e}", exc_info=True)
         finally:
             tick_task.cancel()
             tv_task.cancel()
             ws_task.cancel()
-            btc_ws_task.cancel()
 
 
 def main(argv: Optional[List[str]] = None) -> int:

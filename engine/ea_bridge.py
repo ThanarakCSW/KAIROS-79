@@ -292,11 +292,18 @@ class EABridgeManager:
         status = str(exec_data.get("status") or "SUCCESS").upper()
         signal_id = exec_data.get("signal_id") or ""
         ticket = exec_data.get("ticket")
+        is_hist = bool(
+            exec_data.get("is_history_sync")
+            or str(exec_data.get("action_id", "")).startswith("HIST-")
+            or str(exec_data.get("action_id", "")).startswith("SYNC-")
+            or str(exec_data.get("comment", "")).upper() == "HISTORY_SYNC"
+        )
         rec = {
             "received_at": now_ts,
             "action_id": exec_data.get("action_id"),
             "signal_id": signal_id,
             "status": status,
+            "is_history_sync": is_hist,
             "order_type": exec_data.get("order_type") or "",
             "ticket": ticket,
             "deal": exec_data.get("deal"),
@@ -338,6 +345,12 @@ class EABridgeManager:
         acc = self.account_info
         recent_ts = max(self.last_heartbeat_ts, self.last_poll_ts)
         last_seen = round(time.time() - recent_ts, 1) if recent_ts > 0 else None
+        live_execs = [
+            e for e in self.execution_history
+            if not e.get("is_history_sync")
+            and not str(e.get("action_id", "")).startswith("HIST-")
+            and not str(e.get("action_id", "")).startswith("SYNC-")
+        ]
         return {
             "auto_trading_enabled": self.auto_trading_enabled,
             "is_connected": conn,
@@ -364,7 +377,7 @@ class EABridgeManager:
             "dynamic_offset_usd": acc.get("dynamic_offset_usd", 0.0),
             "pending_actions_count": len(self.action_queue),
             "recent_executions_count": len(self.execution_history),
-            "last_execution": self.execution_history[-1] if self.execution_history else None,
+            "last_execution": live_execs[-1] if live_execs else None,
             "last_heartbeat_ago_sec": round(time.time() - self.last_heartbeat_ts, 1)
             if self.last_heartbeat_ts > 0
             else None,

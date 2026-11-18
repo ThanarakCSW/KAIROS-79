@@ -5,11 +5,13 @@
 //+------------------------------------------------------------------+
 #property copyright   "Copyright 2026, KAIROS-79 AI Team"
 #property link        "https://github.com/ThanarakCSW/KAIROS-79"
-#property version     "1.06"
-#property description "KAIROS-79 MetaTrader 5 Bridge Expert Advisor (EA) v1.06 (Cross-Asset Breadth)"
+#property version     "1.08"
+#property description "KAIROS-79 MetaTrader 5 Bridge Expert Advisor (EA) v1.08 (Ultra-Fast 100ms & Multi-Strategy)"
 #property description "Connects MT5 on Windows/VPS directly to KAIROS-79 AI Web Platform with Multi-Symbol Support."
 #property description "Supports Auto ON/OFF, Hard SL, Daily Kill Switch, OnTradeTransaction Deal Sync, and Step Trailing."
 #property strict
+
+#define EA_VERSION "1.08"
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
@@ -18,8 +20,8 @@
 //--- EA Inputs
 input group "=== KAIROS-79 Server Connection ==="
 input string   InpServerUrl         = "http://127.0.0.1:8000"; // Server URL (or VPS Public IP)
-input int      InpPollIntervalMs    = 500;                     // Command Poll Interval (ms)
-input int      InpHeartbeatIntervalSec = 2;                    // Heartbeat Interval (seconds)
+input int      InpPollIntervalMs    = 100;                     // Command Poll Interval (ms) - Ultra-Fast 100ms
+input int      InpHeartbeatIntervalSec = 1;                    // Heartbeat Interval (seconds)
 
 input group "=== Trading Safety & Execution ==="
 input ulong    InpMagicNumber       = 797979;                  // Magic Number for KAIROS-79
@@ -32,7 +34,8 @@ input group "=== Institutional Risk & Protection Guards ==="
 input double   InpMaxSpreadUsd         = 0.80;   // Max Allowed Spread in USD ($0.80)
 input double   InpMaxSlippageUsd       = 0.50;   // Max Allowed Slippage in USD ($0.50)
 input double   InpMaxMarketDevUsd      = 3.00;   // Max Market Price Deviation from Signal ($ USD)
-input double   InpMaxDailyLossPct      = 4.0;    // Emergency Daily Drawdown Kill Switch (%)
+input double   InpMaxDailyLossPct      = 0.0;    // Disabled (0.0) — Single Loss Limit controlled by Dashboard Portfolio Stop Floor
+input double   InpMinDailyLossUsdFloor = 0.0;    // Unused when InpMaxDailyLossPct = 0.0
 input double   InpMaxLotPerOrder       = 2.00;   // Max Lot Cap per Single Order
 input int      InpMaxOpenPositions     = 10;     // Max Concurrent Open Positions (Supports Rapid-Fire Test & Scaling)
 input bool     InpEnforceHardSL        = true;   // Enforce Hard SL on Every Position (Naked Guard)
@@ -62,7 +65,8 @@ int            g_last_http_code = 0;
 string         g_last_error_desc = "Initializing connection...";
 ulong          g_last_success_ms = 0;
 long           g_last_server_time = 0;
-int            g_next_poll_ms = 500;
+int            g_next_poll_ms = 100;
+ulong          g_last_poll_ms = 0;
 
 string         g_processed_action_ids[100];
 int            g_processed_idx = 0;
@@ -265,7 +269,7 @@ bool SendHttpRequest(const string method, const string endpoint, const string po
    char post_bytes[];
    char result_bytes[];
    string result_headers;
-   int timeout_ms = 2500;
+   int timeout_ms = 5000;
 
    if(StringLen(post_data) > 0)
       StringToCharArray(post_data, post_bytes, 0, StringLen(post_data), CP_UTF8);
@@ -452,8 +456,8 @@ void SendHeartbeat()
 
    string ks_str = g_daily_kill_switch_tripped ? "true" : "false";
    string part1 = StringFormat(
-      "{\"ea_version\":\"1.04\",\"account_id\":%I64d,\"broker\":\"%s\",\"server\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"free_margin\":%.2f,\"margin_level_pct\":%.2f",
-      acc_id, broker, server, currency, balance, equity, margin, free_mgn, mgn_level
+      "{\"ea_version\":\"%s\",\"account_id\":%I64d,\"broker\":\"%s\",\"server\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"free_margin\":%.2f,\"margin_level_pct\":%.2f",
+      EA_VERSION, acc_id, broker, server, currency, balance, equity, margin, free_mgn, mgn_level
    );
    string part2 = StringFormat(
       ",\"spread_points\":%.1f,\"symbol\":\"%s\",\"bid\":%.2f,\"ask\":%.2f,\"price\":%.2f,\"daily_dd_pct\":%.2f,\"kill_switch_tripped\":%s,\"open_positions\":%s,\"pending_orders\":%s}",
@@ -522,16 +526,65 @@ void SendDealExecutionReport(
    double swap,
    double commission,
    const string comment,
-   const string deal_reason_str
+   const string deal_reason_str,
+   bool is_history_sync = false
 )
 {
+   long deal_time = 0;
+   if(deal > 0 && HistoryDealSelect(deal))
+   {
+      deal_time = HistoryDealGetInteger(deal, DEAL_TIME);
+      if(deal_time > 0 && (TimeCurrent() - (datetime)deal_time) > 15)
+         is_history_sync = true;
+   }
+
+   string act_prefix = is_history_sync ? "HIST" : "DEAL";
    string payload = StringFormat(
-      "{\"action_id\":\"DEAL-%I64u\",\"signal_id\":\"\",\"status\":\"DEAL_CLOSED\",\"deal\":%I64u,\"ticket\":%I64u,\"symbol\":\"%s\",\"side\":\"%s\",\"order_type\":\"DEAL\",\"lot\":%.2f,\"fill_price\":%.2f,\"profit\":%.2f,\"swap\":%.2f,\"commission\":%.2f,\"comment\":\"%s\",\"close_reason\":\"%s\",\"error_code\":0,\"error_msg\":\"OK\"}",
-      deal, deal, position_id, sym, side, lot, fill_price, profit, swap, commission, comment, deal_reason_str
+      "{\"action_id\":\"%s-%I64u\",\"signal_id\":\"\",\"status\":\"DEAL_CLOSED\",\"is_history_sync\":%s,\"deal\":%I64u,\"ticket\":%I64u,\"symbol\":\"%s\",\"side\":\"%s\",\"order_type\":\"DEAL\",\"lot\":%.2f,\"fill_price\":%.2f,\"profit\":%.2f,\"swap\":%.2f,\"commission\":%.2f,\"comment\":\"%s\",\"close_reason\":\"%s\",\"deal_time\":%I64d,\"error_code\":0,\"error_msg\":\"OK\"}",
+      act_prefix, deal, (is_history_sync ? "true" : "false"), deal, position_id, sym, side, lot, fill_price, profit, swap, commission, comment, deal_reason_str, deal_time
    );
 
    string resp = "";
    SendHttpRequest("POST", "/api/ea/execution", payload, resp);
+}
+
+//+------------------------------------------------------------------+
+//| Sync Historical Real Deals from MT5 to KAIROS-79 Server          |
+//+------------------------------------------------------------------+
+void SyncHistoryDeals()
+{
+   datetime from_time = (datetime)MathMax(0, (long)TimeCurrent() - 86400 * 2); // past 48 hours
+   if(!HistorySelect(from_time, TimeCurrent())) return;
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal <= 0 || IsDealProcessed(deal)) continue;
+      long deal_entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+      long deal_magic = HistoryDealGetInteger(deal, DEAL_MAGIC);
+      if(InpMagicNumber != 0 && deal_magic != InpMagicNumber) continue;
+      string sym = HistoryDealGetString(deal, DEAL_SYMBOL);
+      if(sym != "" && sym != g_symbol) continue;
+      if(deal_entry == DEAL_ENTRY_OUT || deal_entry == DEAL_ENTRY_OUT_BY)
+      {
+         MarkDealProcessed(deal);
+         ulong pos_id = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+         double profit = HistoryDealGetDouble(deal, DEAL_PROFIT);
+         double swap = HistoryDealGetDouble(deal, DEAL_SWAP);
+         double comm = HistoryDealGetDouble(deal, DEAL_COMMISSION);
+         double price = HistoryDealGetDouble(deal, DEAL_PRICE);
+         double vol = HistoryDealGetDouble(deal, DEAL_VOLUME);
+         long deal_type = HistoryDealGetInteger(deal, DEAL_TYPE);
+         long deal_reason = HistoryDealGetInteger(deal, DEAL_REASON);
+         string comment = HistoryDealGetString(deal, DEAL_COMMENT);
+         string reason_str = "DEAL_CLOSE";
+         if(deal_reason == DEAL_REASON_SL) reason_str = "DEAL_SL";
+         else if(deal_reason == DEAL_REASON_TP) reason_str = "DEAL_TP";
+         else if(deal_reason == DEAL_REASON_CLIENT) reason_str = "DEAL_MANUAL";
+         string side_str = (deal_type == DEAL_TYPE_BUY) ? "BUY" : ((deal_type == DEAL_TYPE_SELL) ? "SELL" : "");
+         SendDealExecutionReport(deal, pos_id, sym, side_str, vol, price, profit, swap, comm, comment, reason_str, true);
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -563,6 +616,56 @@ ulong ResolveOpenedTicket(ulong raw_order, ulong raw_deal, bool is_market)
 }
 
 //+------------------------------------------------------------------+
+//| Resolve Target Symbol from Request or Broker/Chart Mapping       |
+//+------------------------------------------------------------------+
+string ResolveTargetSymbol(const string sym_req)
+{
+   if(sym_req == "" || sym_req == g_symbol)
+      return g_symbol;
+
+   // 1. Direct check: can we get a tick on the requested symbol directly?
+   if(SymbolInfoInteger(sym_req, SYMBOL_SELECT) || SymbolSelect(sym_req, true))
+   {
+      MqlTick test_tick;
+      if(SymbolInfoTick(sym_req, test_tick) && test_tick.ask > 0.0 && test_tick.bid > 0.0)
+         return sym_req;
+   }
+
+   string req_u = sym_req;
+   StringToUpper(req_u);
+   string g_u = g_symbol;
+   StringToUpper(g_u);
+
+   // 2. Gold alias mapping (XAUUSD <-> GOLD / GOLDmicro / XAUUSD# etc.)
+   bool req_is_gold = (StringFind(req_u, "XAU") >= 0 || StringFind(req_u, "GOLD") >= 0);
+   bool chart_is_gold = (StringFind(g_u, "XAU") >= 0 || StringFind(g_u, "GOLD") >= 0);
+   if(req_is_gold && chart_is_gold)
+   {
+      PrintFormat("ℹ️ Mapping requested Gold symbol '%s' to chart symbol '%s'", sym_req, g_symbol);
+      return g_symbol;
+   }
+
+   // 3. Bitcoin alias mapping (BTCUSD <-> BITCOIN / BTCUSD# etc.)
+   bool req_is_btc = (StringFind(req_u, "BTC") >= 0 || StringFind(req_u, "BITCOIN") >= 0);
+   bool chart_is_btc = (StringFind(g_u, "BTC") >= 0 || StringFind(g_u, "BITCOIN") >= 0);
+   if(req_is_btc && chart_is_btc)
+   {
+      PrintFormat("ℹ️ Mapping requested BTC symbol '%s' to chart symbol '%s'", sym_req, g_symbol);
+      return g_symbol;
+   }
+
+   // 4. Fallback to chart symbol if chart has market tick
+   MqlTick chart_tick;
+   if(SymbolInfoTick(g_symbol, chart_tick))
+   {
+      PrintFormat("⚠️ Requested symbol '%s' not tradable on broker, falling back to chart symbol '%s'", sym_req, g_symbol);
+      return g_symbol;
+   }
+
+   return sym_req;
+}
+
+//+------------------------------------------------------------------+
 //| Execute OPEN_ORDER Action from KAIROS-79                         |
 //+------------------------------------------------------------------+
 void ExecuteOpenOrder(const string action_json)
@@ -572,7 +675,7 @@ void ExecuteOpenOrder(const string action_json)
    string side        = JsonExtractString(action_json, "side");
    string order_type  = JsonExtractString(action_json, "order_type");
    string sym_req     = JsonExtractString(action_json, "symbol");
-   string target_sym  = (sym_req != "") ? sym_req : g_symbol;
+   string target_sym  = ResolveTargetSymbol(sym_req);
    double lot         = JsonExtractDouble(action_json, "lot", 0.01);
    double price       = JsonExtractDouble(action_json, "price", 0.0);
    double sl          = JsonExtractDouble(action_json, "sl", 0.0);
@@ -683,25 +786,55 @@ void ExecuteOpenOrder(const string action_json)
    double fill_p = 0.0;
    double slip_pts = 0.0;
 
-   // Check minimum stop distance (StopsLevel + FreezeLevel + spread buffer)
+   // Check broker minimum stop distance for pending orders
    long stops_lvl = SymbolInfoInteger(target_sym, SYMBOL_TRADE_STOPS_LEVEL);
    long freeze_lvl = SymbolInfoInteger(target_sym, SYMBOL_TRADE_FREEZE_LEVEL);
-   double min_stop_dist = MathMax((double)MathMax(stops_lvl, freeze_lvl) * pt, spread_usd + 0.25);
+   double broker_min_dist = MathMax((double)MathMax(stops_lvl, freeze_lvl) * pt, pt);
+   double min_stop_dist = MathMax(broker_min_dist, spread_usd + 0.25);
 
    // Determine whether to execute as Market or Pending Limit
-   bool execute_as_market = (order_type == "MARKET" || price <= 0.0);
-   if(!execute_as_market)
+   bool execute_as_market = (order_type == "MARKET");
+   if(order_type == "LIMIT")
    {
-      if(side == "BUY" && price >= (tick.ask - min_stop_dist))
+      execute_as_market = false;
+      if(price <= 0.0)
       {
-         PrintFormat("⚡ BUY Limit @ %.2f is within StopsLevel of Ask (%.2f) -> Executing as MARKET BUY", price, tick.ask);
-         execute_as_market = true;
+         price = (side == "BUY") ? NormalizeDouble(tick.ask - 2.0 * min_stop_dist, digits) : NormalizeDouble(tick.bid + 2.0 * min_stop_dist, digits);
       }
-      else if(side == "SELL" && price <= (tick.bid + min_stop_dist))
+      // Ensure Limit order price strictly complies with MT5 pending order rule:
+      // BUY LIMIT must be < Ask; SELL LIMIT must be > Bid.
+      if(side == "BUY" && price >= (tick.ask - broker_min_dist))
       {
-         PrintFormat("⚡ SELL Limit @ %.2f is within StopsLevel of Bid (%.2f) -> Executing as MARKET SELL", price, tick.bid);
-         execute_as_market = true;
+         if(allow_mkt_fallback)
+         {
+            PrintFormat("⚡ BUY Limit @ %.2f is at/above Ask (%.2f) -> Fallback to MARKET BUY", price, tick.ask);
+            execute_as_market = true;
+         }
+         else
+         {
+            double adjusted_p = NormalizeDouble(tick.ask - broker_min_dist, digits);
+            PrintFormat("ℹ️ BUY Limit price adjusted %.2f -> %.2f to place strictly as Limit (< Ask %.2f)", price, adjusted_p, tick.ask);
+            price = adjusted_p;
+         }
       }
+      else if(side == "SELL" && price <= (tick.bid + broker_min_dist))
+      {
+         if(allow_mkt_fallback)
+         {
+            PrintFormat("⚡ SELL Limit @ %.2f is at/below Bid (%.2f) -> Fallback to MARKET SELL", price, tick.bid);
+            execute_as_market = true;
+         }
+         else
+         {
+            double adjusted_p = NormalizeDouble(tick.bid + broker_min_dist, digits);
+            PrintFormat("ℹ️ SELL Limit price adjusted %.2f -> %.2f to place strictly as Limit (> Bid %.2f)", price, adjusted_p, tick.bid);
+            price = adjusted_p;
+         }
+      }
+   }
+   else if(price <= 0.0)
+   {
+      execute_as_market = true;
    }
 
    // Market Deviation Check for non-manual signals
@@ -716,28 +849,60 @@ void ExecuteOpenOrder(const string action_json)
       }
    }
 
-   // Pre-validate & Enforce Hard Stop Loss
+   // Pre-validate & Enforce Hard Stop Loss with Spread Cushion (NEVER clamp SL to $0.01 away!)
    double ref_p = execute_as_market ? (side == "BUY" ? tick.bid : tick.ask) : price;
+   double entry_ref = execute_as_market ? (side == "BUY" ? tick.ask : tick.bid) : price;
+   double intended_sl_dist = (price > 0.0 && sl > 0.0) ? MathAbs(price - sl) : 0.0;
+   double intended_tp_dist = (price > 0.0 && tp > 0.0) ? MathAbs(tp - price) : 0.0;
+   double safe_min_sl = MathMax(min_stop_dist, spread_usd + 1.50);
+   double safe_min_tp = MathMax(min_stop_dist, spread_usd + 0.80);
+
    if(InpEnforceHardSL && sl <= 0.0)
    {
-      sl = (side == "BUY") ? (ref_p - InpEmergencySLUsd) : (ref_p + InpEmergencySLUsd);
+      sl = (side == "BUY") ? (ref_p - MathMax(InpEmergencySLUsd, safe_min_sl)) : (ref_p + MathMax(InpEmergencySLUsd, safe_min_sl));
       sl = NormalizeDouble(sl, digits);
       PrintFormat("🛡️ Enforced Hard Emergency SL @ %.2f (no SL was provided)", sl);
    }
    if(sl > 0.0)
    {
-      if(side == "BUY" && sl > (ref_p - min_stop_dist))
-         sl = NormalizeDouble(ref_p - min_stop_dist, digits);
-      else if(side == "SELL" && sl < (ref_p + min_stop_dist))
-         sl = NormalizeDouble(ref_p + min_stop_dist, digits);
+      double eff_sl_dist = MathMax(intended_sl_dist, safe_min_sl);
+      if(side == "BUY")
+      {
+         // BUY SL triggers on BID: must sit at least safe_min_sl BELOW current Bid
+         if(sl > (ref_p - safe_min_sl))
+         {
+            double new_sl = NormalizeDouble(ref_p - eff_sl_dist, digits);
+            PrintFormat("🛡️ BUY SL Protected: %.2f -> %.2f (Bid=%.2f, Spread=$%.2f, Dist=$%.2f)", sl, new_sl, ref_p, spread_usd, eff_sl_dist);
+            sl = new_sl;
+         }
+      }
+      else if(side == "SELL")
+      {
+         // SELL SL triggers on ASK (= Bid + Spread): add full spread cushion so Bid candles never prematurely stop out!
+         if(sl < (ref_p + safe_min_sl))
+         {
+            double new_sl = NormalizeDouble(ref_p + eff_sl_dist, digits);
+            PrintFormat("🛡️ SELL SL Protected: %.2f -> %.2f (Ask=%.2f, Spread=$%.2f, Dist=$%.2f)", sl, new_sl, ref_p, spread_usd, eff_sl_dist);
+            sl = new_sl;
+         }
+         else if(execute_as_market && (sl - tick.ask) < eff_sl_dist)
+         {
+            double new_sl = NormalizeDouble(tick.ask + eff_sl_dist, digits);
+            if(new_sl > sl) sl = new_sl;
+         }
+      }
    }
    if(tp > 0.0)
    {
-      double tp_ref = execute_as_market ? (side == "BUY" ? tick.ask : tick.bid) : price;
-      if(side == "BUY" && tp < (tp_ref + min_stop_dist))
-         tp = NormalizeDouble(tp_ref + min_stop_dist, digits);
-      else if(side == "SELL" && tp > (tp_ref - min_stop_dist))
-         tp = NormalizeDouble(tp_ref - min_stop_dist, digits);
+      double eff_tp_dist = MathMax(intended_tp_dist, safe_min_tp);
+      if(side == "BUY" && tp < (entry_ref + safe_min_tp))
+      {
+         tp = NormalizeDouble(entry_ref + eff_tp_dist, digits);
+      }
+      else if(side == "SELL" && tp > (entry_ref - safe_min_tp))
+      {
+         tp = NormalizeDouble(entry_ref - eff_tp_dist, digits);
+      }
    }
 
    // Detect supported expiration mode
@@ -815,16 +980,25 @@ void ExecuteOpenOrder(const string action_json)
          }
       }
 
-      // Retry Strategy B: Invalid Stops/Price (10016 / 10014 / 10015) -> Open and immediately verify Hard SL attached
+      // Retry Strategy B: Invalid Stops/Price (10016 / 10014 / 10015) -> Open/Place and verify Hard SL attached
       if(!ok && (err == 10016 || err == 10014 || err == 10015))
       {
-         PrintFormat("⚠️ Broker rejected initial Stops/Price (Error %d: %s). Opening & enforcing SL immediately...", err, desc);
+         PrintFormat("⚠️ Broker rejected initial Stops/Price (Error %d: %s). Retrying without initial SL/TP and modifying...", err, desc);
          if(execute_as_market)
             ok = (side == "BUY") ? m_trade.Buy(lot, target_sym, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, target_sym, 0.0, 0.0, 0.0, comment);
-         else if(allow_mkt_fallback)
+         else
          {
-            execute_as_market = true;
-            ok = (side == "BUY") ? m_trade.Buy(lot, target_sym, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, target_sym, 0.0, 0.0, 0.0, comment);
+            if(side == "BUY")
+               ok = m_trade.BuyLimit(lot, price, target_sym, 0.0, 0.0, exp_mode, 0, comment);
+            else
+               ok = m_trade.SellLimit(lot, price, target_sym, 0.0, 0.0, exp_mode, 0, comment);
+
+            if(!ok && allow_mkt_fallback)
+            {
+               Print("⚠️ Limit retry failed, fallback to Market as allow_market_fallback=true");
+               execute_as_market = true;
+               ok = (side == "BUY") ? m_trade.Buy(lot, target_sym, 0.0, 0.0, 0.0, comment) : m_trade.Sell(lot, target_sym, 0.0, 0.0, 0.0, comment);
+            }
          }
 
          if(ok)
@@ -1124,6 +1298,25 @@ void ExecutePartialClose(const string action_json)
 }
 
 //+------------------------------------------------------------------+
+//| Execute RESET_KILL_SWITCH Action from KAIROS-79                  |
+//+------------------------------------------------------------------+
+void ExecuteResetKillSwitch(const string action_json)
+{
+   string action_id = JsonExtractString(action_json, "action_id");
+   if(IsActionProcessed(action_id)) return;
+   MarkActionProcessed(action_id);
+
+   double cur_eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(cur_eq <= 0.0) cur_eq = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   g_daily_kill_switch_tripped = false;
+   g_day_start_equity = cur_eq;
+   g_current_daily_dd_pct = 0.0;
+   PrintFormat("🔄 KAIROS-79 Daily Kill Switch RESET. Equity re-anchored to $%.2f", cur_eq);
+   SendExecutionReport(action_id, "", "RESET_SUCCESS", 0, "", 0, 0, 0, 0, 0, 0, "Kill switch reset successfully", 0, "OK", "", g_symbol);
+}
+
+//+------------------------------------------------------------------+
 //| Check Daily Drawdown Kill Switch (UTC/Server Midnight Reset)     |
 //+------------------------------------------------------------------+
 void CheckDailyDrawdownGuard()
@@ -1144,13 +1337,21 @@ void CheckDailyDrawdownGuard()
 
    if(g_day_start_equity > 0.0 && equity > 0.0)
    {
-      double dd_pct = ((g_day_start_equity - equity) / g_day_start_equity) * 100.0;
+      double loss_usd = g_day_start_equity - equity;
+      double dd_pct = (loss_usd / g_day_start_equity) * 100.0;
       g_current_daily_dd_pct = (dd_pct > 0.0) ? dd_pct : 0.0;
-      if(InpMaxDailyLossPct > 0.0 && g_current_daily_dd_pct >= InpMaxDailyLossPct)
+      // Duplicate EA Kill Switch disabled by default (InpMaxDailyLossPct <= 0.0):
+      // Portfolio Loss Limit is controlled solely by the KAIROS-79 Dashboard Stop Floor!
+      if(InpMaxDailyLossPct <= 0.0)
+      {
+         g_daily_kill_switch_tripped = false;
+      }
+      else if(g_current_daily_dd_pct >= InpMaxDailyLossPct && loss_usd >= InpMinDailyLossUsdFloor)
       {
          if(!g_daily_kill_switch_tripped)
          {
-            PrintFormat("🛑 DAILY KILL SWITCH TRIPPED: DD %.2f%% >= %.2f%%", g_current_daily_dd_pct, InpMaxDailyLossPct);
+            PrintFormat("🛑 DAILY KILL SWITCH TRIPPED: DD %.2f%% (Loss $%.2f) >= %.2f%% (Floor $%.2f)",
+                        g_current_daily_dd_pct, loss_usd, InpMaxDailyLossPct, InpMinDailyLossUsdFloor);
          }
          g_daily_kill_switch_tripped = true;
       }
@@ -1232,6 +1433,7 @@ void CheckLocalPositionGuards()
 //+------------------------------------------------------------------+
 void PollServerActions()
 {
+   g_last_poll_ms = GetTickCount64();
    string resp = "";
    if(!SendHttpRequest("GET", "/api/ea/poll", "", resp))
       return;
@@ -1242,7 +1444,7 @@ void PollServerActions()
    if(srv_t > 0) g_last_server_time = srv_t;
 
    int next_poll = (int)JsonExtractLong(resp, "next_poll_ms", g_next_poll_ms);
-   if(next_poll >= 150 && next_poll <= 2000 && next_poll != g_next_poll_ms)
+   if(next_poll >= 80 && next_poll <= 2000 && next_poll != g_next_poll_ms)
    {
       g_next_poll_ms = next_poll;
       EventSetMillisecondTimer(g_next_poll_ms);
@@ -1315,6 +1517,10 @@ void PollServerActions()
       {
          ExecutePartialClose(action_json);
       }
+      else if(act_type == "RESET_KILL_SWITCH" || act_type == "RESET_GUARD")
+      {
+         ExecuteResetKillSwitch(action_json);
+      }
 
       search_pos = end_obj + 1;
    }
@@ -1340,8 +1546,8 @@ void UpdateChartHUD()
                               : "⚠️ MT5 Algo Trading: DISABLED (Click Algo Trading button!)";
 
    string kill_text = g_daily_kill_switch_tripped
-                      ? StringFormat("🛑 TRIPPED (DD %.2f%% >= %.2f%%)", g_current_daily_dd_pct, InpMaxDailyLossPct)
-                      : StringFormat("🟢 ARMED (DD %.2f%% / Max %.2f%%)", g_current_daily_dd_pct, InpMaxDailyLossPct);
+                      ? StringFormat("🛑 TRIPPED (DD %.2f%% >= %.2f%%, Floor $%.2f)", g_current_daily_dd_pct, InpMaxDailyLossPct, InpMinDailyLossUsdFloor)
+                      : StringFormat("🟢 ARMED (DD %.2f%% / Max %.2f%%, Floor $%.2f)", g_current_daily_dd_pct, InpMaxDailyLossPct, InpMinDailyLossUsdFloor);
 
    string rollover_text = (InpEnableRolloverGuard && IsInRolloverWindow()) ? "🌙 ACTIVE (Blocked)" : "✅ Clear";
 
@@ -1381,7 +1587,7 @@ void UpdateChartHUD()
    }
 
    string hud = "========================================\n"
-              + "  🤖 KAIROS-79 EA Bridge v1.06\n"
+              + "  🤖 KAIROS-79 EA Bridge v1.08 (Ultra-Fast 100ms)\n"
               + "========================================\n"
               + "  Server URL:     " + g_server_url + "\n"
               + "  Status:         " + conn_text + "\n"
@@ -1430,6 +1636,7 @@ int OnInit()
    // Initial heartbeat & check
    g_last_heartbeat_ms = GetTickCount64();
    SendHeartbeat();
+   SyncHistoryDeals();
    UpdateChartHUD();
 
    // Set millisecond timer
@@ -1478,11 +1685,17 @@ void OnTimer()
 void OnTick()
 {
    ulong now_ms = GetTickCount64();
-   if(now_ms - g_last_tick_guard_ms >= 500)
+   if(now_ms - g_last_tick_guard_ms >= 200)
    {
       g_last_tick_guard_ms = now_ms;
       CheckDailyDrawdownGuard();
       CheckLocalPositionGuards();
+   }
+
+   // Ultra-Fast Action Poll on Tick (throttled to g_next_poll_ms e.g. 100ms)
+   if(g_server_online && (now_ms - g_last_poll_ms >= (ulong)g_next_poll_ms))
+   {
+      PollServerActions();
    }
 }
 
@@ -1529,7 +1742,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             PrintFormat("💰 Real MT5 Deal #%I64u Position #%I64u: PnL=$%.2f, Swap=$%.2f, Comm=$%.2f, Reason=%s",
                deal, pos_id, profit, swap, comm, reason_str);
 
-            SendDealExecutionReport(deal, pos_id, sym, side_str, vol, price, profit, swap, comm, comment, reason_str);
+            SendDealExecutionReport(deal, pos_id, sym, side_str, vol, price, profit, swap, comm, comment, reason_str, false);
          }
       }
    }

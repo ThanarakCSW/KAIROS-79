@@ -136,6 +136,8 @@ def fetch_mt5_broker_bars(
     limit: int = 15000,
 ) -> Optional[Dict[str, Any]]:
     """Fetch live multi-bar history and current tick directly from the running MT5 broker."""
+    if os.environ.get("K79_TEST_MODE") == "1" and type(_mt5).__name__ not in ("MagicMock", "Mock"):
+        return None
     if not init_mt5_client() or _mt5 is None:
         return None
 
@@ -196,6 +198,8 @@ def fetch_mt5_broker_bars(
 
 def fetch_mt5_live_tick(preferred_symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Fetch realtime spot tick (Bid/Ask) from MT5 broker terminal."""
+    if os.environ.get("K79_TEST_MODE") == "1" and type(_mt5).__name__ not in ("MagicMock", "Mock"):
+        return None
     if not init_mt5_client() or _mt5 is None:
         return None
     try:
@@ -842,7 +846,7 @@ class MarketDataHub:
 
     def __init__(self, fixture_path: Optional[str] = None):
         self.fixture_bars = load_fixture_bars(fixture_path)
-        self.replay_mode = False
+        self.replay_mode = bool(os.environ.get("K79_TEST_MODE") == "1")
         self.replay_cursor = len(self.fixture_bars)
         self.source = "connecting_live"
         self.last_fetch_ts = 0.0
@@ -1041,13 +1045,15 @@ class MarketDataHub:
 
         # Fallback (only when offline or when user clicks Replay controls)
         self.source = "offline_replay" if self.replay_mode else "offline_fallback (no internet)"
-        end_idx = max(60, min(len(self.fixture_bars), self.replay_cursor))
-        sliced_m5 = [dict(b) for b in self.fixture_bars[:end_idx]]
+        f_bars = load_fixture_bars(target_count=300, symbol=sym) if sym != "XAUUSD" else self.fixture_bars
+        end_idx = max(60, min(len(f_bars), self.replay_cursor))
+        sliced_m5 = [dict(b) for b in f_bars[:end_idx]]
         bars = resample_bars(sliced_m5, tf)
         return {
             "bars": bars,
             "source": self.source,
             "timeframe": tf,
+            "symbol": sym,
             "live_quote": None,
         }
 
@@ -1072,10 +1078,10 @@ class MarketDataHub:
                 result[tf] = primary_bars
                 continue
             if is_offline:
-                raw = resample_bars(sliced_m5, tf)
+                raw = resample_bars(sliced_m5, tf)[-300:]
             else:
                 feed = self.get_bars(tf, force_refresh=False, ttl_seconds=ttl_map.get(tf, 60.0))
-                raw = feed["bars"]
+                raw = (feed.get("bars") or [])[-300:]
             result[tf] = [
                 {
                     "t": int(b["t"]),

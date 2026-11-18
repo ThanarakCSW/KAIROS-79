@@ -73,10 +73,11 @@ def evaluate_risk_and_size(
     lot_step = float(config.get("lot_step") or 0.01)
 
     trading_style = str(trade_setup.get("trading_style") or config.get("trading_style") or "intraday").lower()
-    is_rapid = trading_style == "rapid_fire_test" or bool((config.get("rapid_fire_test") or {}).get("enabled"))
-    is_robot = trading_style == "robot_scalper" or bool((config.get("robot_scalper") or {}).get("enabled"))
-    is_micro = trading_style == "micro_scalp"
-    is_scalp = trading_style in ("scalping", "micro_scalp", "robot_scalper", "rapid_fire_test")
+    is_smc_swing = str(trade_setup.get("strategy_mode", "")).upper() == "SMC_SWING" or trading_style == "intraday"
+    is_rapid = (not is_smc_swing) and (trading_style == "rapid_fire_test" or str(trade_setup.get("strategy_mode", "")).upper() == "RAPID_FIRE")
+    is_robot = (not is_smc_swing) and (trading_style == "robot_scalper" or str(trade_setup.get("strategy_mode", "")).upper() == "ROBOT_SCALP")
+    is_micro = (not is_smc_swing) and (trading_style == "micro_scalp")
+    is_scalp = (not is_smc_swing) and (trading_style in ("scalping", "micro_scalp", "robot_scalper", "rapid_fire_test"))
     min_rr = float(config.get("min_reward_risk") or 1.5)
     if is_rapid:
         min_rr = min(min_rr, 0.20)
@@ -127,27 +128,105 @@ def evaluate_risk_and_size(
     breakeven_offset = 5.0 if is_crypto else (0.00015 if is_forex else 0.15)
     breakeven_sl_mt5 = r_sym(entry_mt5 + breakeven_offset if side == "BUY" else entry_mt5 - breakeven_offset)
 
-    risk_budget_usd = round(balance * (risk_pct / 100.0), 2)
-    loss_per_1lot = sl_distance_usd * contract_size
-    if is_rapid:
-        rf_cfg = config.get("rapid_fire_test") or {}
-        cfg_lot = float(rf_cfg.get("lot_size") or 0.01)
-        lot_size = min(cfg_lot, 0.01) if min_lot <= 0.01 else min_lot
-    elif is_robot:
+    probs = simulation.get("probabilities", {})
+    ev_r = float(simulation.get("expected_value_r") or 0.0)
+    win_pct = float(probs.get("win_pct") or 0.0)
+    sweep_pct = float(probs.get("sweep_risk_pct") or 0.0)
+
+    alloc_factor = float(trade_setup.get("allocation_factor") or 1.0)
+    adapt_cfg = config.get("adaptive_tuning") or {}
+    adapt_lot_scale = float(adapt_cfg.get("lot_scale") or 1.0)
+    eff_alloc = max(0.35, min(1.40, alloc_factor if is_rapid else (alloc_factor * adapt_lot_scale)))
+
+    confluence_score = int(trade_setup.get("confluence_score") or 65)
+    candle_sig = trade_setup.get("candle_signal") or {}
+    candle_aligned = bool(candle_sig.get("aligned", False))
+    candle_str = int(candle_sig.get("strength") or 0)
+    vol_scale = trade_setup.get("volume_tpsl_scaling") or {}
+    delta_aligned = bool(vol_scale.get("delta_aligned", False))
+    is_counter_trend = bool(trade_setup.get("is_counter_trend", False))
+
+    # Smart Conviction-Based Dynamic Lot Allocation (Tier A+ / A / B / C)
+    leverage = max(1.0, float(config.get("leverage") or 100.0))
+    max_margin_lot = floor_lot((balance * 0.25 * leverage) / max(1.0, contract_size * entry_mt5), lot_step=lot_step, max_lot=max_lot)
+    max_allowed_lot = floor_lot((balance * leverage) / max(1.0, contract_size * entry_mt5), lot_step=lot_step, max_lot=max_lot)
+    loss_per_1lot = max(0.01, sl_distance_usd * contract_size)
+    max_loss_cfg = float(config.get("max_loss_usd") or 0.0)
+
+    # Determine Conviction Tier from Confluence + Candlestick + Monte Carlo + Adaptive state
+    in_defensive_adapt = adapt_lot_scale < 0.85
+    if (
+        not in_defensive_adapt
+        and confluence_score >= 85
+        and eff_alloc >= 1.15
+        and win_pct >= 57.0
+        and (candle_aligned or delta_aligned)
+        and not (is_counter_trend and candle_str < 82)
+    ):
+        lot_tier = "A+"
+        lot_tier_th = "Tier A+ (สไนเปอร์ความเชื่อมั่นสูงมาก)"
+        tier_risk_mult = 1.85
+        micro_max_risk_pct = 10.0
+        micro_lot_cap = 0.03
+    elif (
+        not in_defensive_adapt
+        and confluence_score >= 76
+        and eff_alloc >= 1.00
+        and win_pct >= 53.0
+    ):
+        lot_tier = "A"
+        lot_tier_th = "Tier A (สัญญาณแข็งแกร่ง)"
+        tier_risk_mult = 1.38
+        micro_max_risk_pct = 8.0
+        micro_lot_cap = 0.02
+    elif not in_defensive_adapt and confluence_score >= 65 and eff_alloc >= 0.85:
+        lot_tier = "B"
+        lot_tier_th = "Tier B (มาตรฐาน)"
+        tier_risk_mult = 1.00
+        micro_max_risk_pct = 5.5
+        micro_lot_cap = 0.02
+    else:
+        lot_tier = "C"
+        lot_tier_th = "Tier C (ระมัดระวัง/ปรับลดความเสี่ยง)"
+        tier_risk_mult = 0.65
+        micro_max_risk_pct = 4.5
+        micro_lot_cap = 0.01
+
+    risk_budget_usd = round(balance * (risk_pct / 100.0) * tier_risk_mult * max(0.5, min(1.25, adapt_lot_scale)), 2)
+
+    if is_robot:
         robot_cfg = config.get("robot_scalper") or {}
-        # Strictly locked to 0.01 lot per order as requested by user
-        # Volume expansion must be done by splitting into multiple orders ("ซอยไม้")
         cfg_lot = float(robot_cfg.get("lot_size") or 0.01)
         lot_size = min(cfg_lot, 0.01) if min_lot <= 0.01 else min_lot
     else:
-        raw_lot = risk_budget_usd / loss_per_1lot if loss_per_1lot > 0 else 0.0
-        lot_size = floor_lot(raw_lot, lot_step=lot_step, max_lot=max_lot)
+        # Micro-account intelligent scaling (< $250 balance on Gold) vs standard proportional scaling (>= $250)
+        is_micro_account = (not is_crypto) and (not is_forex) and balance < 250.0
+        if is_micro_account:
+            # Cap single-trade risk safely within tier % of balance AND <= 50% of anchored max_loss_usd
+            tier_risk_cap_usd = balance * (micro_max_risk_pct / 100.0)
+            if max_loss_cfg > 0.0:
+                tier_risk_cap_usd = min(tier_risk_cap_usd, max_loss_cfg * 0.50)
+            smart_budget_usd = max(risk_budget_usd, tier_risk_cap_usd)
+            raw_lot = smart_budget_usd / loss_per_1lot
+            sized_lot = floor_lot(raw_lot, lot_step=lot_step, max_lot=min(max_lot, micro_lot_cap, max_margin_lot))
+            # Ensure minimum 0.01 lot can still execute when 0.01 risk is safely within micro ceiling (<= 10.5% balance)
+            min_lot_risk = min_lot * loss_per_1lot
+            if sized_lot < min_lot and min_lot <= max_margin_lot and min_lot_risk <= max(balance * 0.105, 8.50):
+                lot_size = min_lot
+            else:
+                lot_size = sized_lot
+        else:
+            # Standard accounts (>= $250): strict proportional risk budget with 4.5% hard single-trade cap
+            hard_cap_usd = balance * 0.045
+            if max_loss_cfg > 0.0:
+                hard_cap_usd = min(hard_cap_usd, max_loss_cfg * 0.45)
+            eff_budget = min(risk_budget_usd, hard_cap_usd)
+            raw_lot = eff_budget / loss_per_1lot
+            lot_size = floor_lot(raw_lot, lot_step=lot_step, max_lot=min(max_lot, max_margin_lot))
 
-    leverage = max(1.0, float(config.get("leverage") or 100.0))
     margin_required_usd = round((lot_size * contract_size * entry_mt5) / leverage, 2)
     free_margin_usd = round(balance - margin_required_usd, 2)
     margin_level_pct = round((balance / margin_required_usd) * 100.0, 1) if margin_required_usd > 0 else 9999.0
-    max_allowed_lot = floor_lot((balance * leverage) / (contract_size * entry_mt5), lot_step=lot_step, max_lot=max_lot)
 
     actual_risk_usd = round(lot_size * sl_distance_usd * contract_size, 2)
     potential_profit_usd = round(lot_size * tp_distance_usd * contract_size, 2)
@@ -155,10 +234,22 @@ def evaluate_risk_and_size(
     spread_cost_usd = round(lot_size * spread_usd * contract_size, 2)
     spread_to_sl_pct = round((spread_usd / sl_distance_usd) * 100.0, 1)
 
-    probs = simulation.get("probabilities", {})
-    ev_r = float(simulation.get("expected_value_r") or 0.0)
-    win_pct = float(probs.get("win_pct") or 0.0)
-    sweep_pct = float(probs.get("sweep_risk_pct") or 0.0)
+    lot_allocation = {
+        "tier": lot_tier,
+        "tier_label_th": lot_tier_th,
+        "lot_size": lot_size,
+        "confluence_score": confluence_score,
+        "allocation_factor": round(eff_alloc, 2),
+        "win_pct": round(win_pct, 1),
+        "actual_risk_usd": actual_risk_usd,
+        "actual_risk_pct": round((actual_risk_usd / max(1.0, balance)) * 100.0, 2),
+        "adaptive_defensive": in_defensive_adapt,
+        "reason_th": (
+            f"⚖️ จัดสรร Lot อัจฉริยะ [{lot_tier_th}]: {lot_size:.2f} Lot "
+            f"(Score {confluence_score}, Win {win_pct:.0f}%, เสี่ยง ${actual_risk_usd:.2f} = "
+            f"{(actual_risk_usd / max(1.0, balance)) * 100.0:.1f}% ของพอร์ต)"
+        ),
+    }
 
     reject_reasons: List[str] = []
     caution_warnings: List[str] = []
@@ -171,10 +262,21 @@ def evaluate_risk_and_size(
 
     if min_win_prob > 0.0:
         if is_scalp:
-            if win_pct <= min_win_prob:
+            # For Rapid Fire with strong live Confluence + Candlestick confirmation, allow 44%+ unbiased reversal edge
+            rapid_reversal_ok = bool(
+                is_rapid
+                and confluence_score >= 75
+                and (candle_aligned or delta_aligned)
+                and win_pct >= 44.0
+            )
+            if win_pct <= min_win_prob and not rapid_reversal_ok:
                 win_prob_passed = False
                 reject_reasons.append(
                     f"สถิติจริงจาก Monte Carlo พบโอกาสชนะ {win_pct:.1f}% (ยังไม่เกิน {min_win_prob:.0f}%) — ห้ามรีบเปิดออเดอร์ ให้รอดักโซนล่วงหน้า"
+                )
+            elif win_pct <= min_win_prob and rapid_reversal_ok:
+                caution_warnings.append(
+                    f"โอกาสชนะ Monte Carlo {win_pct:.1f}% (อนุญาตเข้าไม้ Rapid ด้วยสัญญาณแท่งเทียน/Confluence {confluence_score} คะแนน)"
                 )
             else:
                 passed_checks.append(
@@ -236,9 +338,7 @@ def evaluate_risk_and_size(
             f"ขนาดไม้คงที่ {lot_size:.2f} Lot ต่อออเดอร์ตามวินัยหุ่นยนต์ (เน้นการซอยไม้เพื่อกระจายความเสี่ยง)"
         )
     else:
-        passed_checks.append(
-            f"ขนาดไม้ {lot_size:.2f} Lot คุมความเสี่ยงที่ ${actual_risk_usd:.2f} ({actual_risk_usd / balance * 100:.2f}% ของพอร์ต)"
-        )
+        passed_checks.append(lot_allocation["reason_th"])
 
     # 4. News blackout & Pre-news shield check
     if not is_rapid and (news_status.get("in_news_blackout") or news_status.get("is_imminent_news")):
@@ -306,14 +406,46 @@ def evaluate_risk_and_size(
             f"Margin ใช้ ${margin_required_usd:.2f} ({margin_required_usd / balance * 100:.1f}%) คงเหลือ Free Margin ${free_margin_usd:.2f} (Leverage 1:{int(leverage)})"
         )
 
-    # 9. Daily Drawdown Kill Switch check
-    max_daily_loss_pct = float(config.get("max_daily_loss_pct") or 0.0)
-    current_daily_loss_pct = float(config.get("current_daily_loss_pct") or 0.0)
-    kill_switch_tripped = bool(config.get("kill_switch_tripped", False))
-    if kill_switch_tripped or (max_daily_loss_pct > 0.0 and current_daily_loss_pct >= max_daily_loss_pct):
+    # 9.0 Daily Profit Target Gate (เป้ากำไรรายวัน)
+    daily_profit_target_usd = float(config.get("daily_profit_target_usd") or 0.0)
+    daily_profit_target_enabled = bool(config.get("daily_profit_target_enabled", daily_profit_target_usd > 0))
+    current_daily_profit_usd = float(config.get("current_daily_profit_usd") or 0.0)
+    if daily_profit_target_enabled and daily_profit_target_usd > 0.0 and current_daily_profit_usd >= daily_profit_target_usd:
         reject_reasons.append(
-            f"ถึงเพดานขาดทุนรายวันแล้ว ({current_daily_loss_pct:.2f}% >= {max_daily_loss_pct:.2f}%) — Kill Switch ทำงาน หยุดเทรดชั่วคราว"
+            f"🏆 บรรลุเป้าหมายกำไรรายวันแล้ว (${current_daily_profit_usd:.2f} >= ${daily_profit_target_usd:.2f}) — หยุดเทรดพักพอร์ตเพื่อล็อกกำไรของวันนี้ตามวินัย (Daily Target Reached)"
         )
+    elif daily_profit_target_enabled and daily_profit_target_usd > 0.0:
+        passed_checks.append(
+            f"🎯 เป้ากำไรรายวัน ${daily_profit_target_usd:.2f} (ปัจจุบันทำได้ ${current_daily_profit_usd:.2f})"
+        )
+
+    # 9.1 Anchored Portfolio Loss Limit (User-configured Stop Floor from Balance at Setup)
+    # Note: DD Circuit Breaker lock on consecutive losses is replaced by Background Adaptive Auto-Tuning (>= 3 losses)
+    anchor_loss_reached = bool(config.get("anchor_loss_limit_reached", False))
+    if anchor_loss_reached:
+        max_loss_usd = float(config.get("max_loss_usd") or 0.0)
+        stop_floor = float(config.get("stop_floor_balance") or 0.0)
+        reject_reasons.append(
+            f"🛑 แตะลิมิตขาดทุนพอร์ตที่ตั้งไว้ (-${max_loss_usd:.2f} / Stop Floor ${stop_floor:.2f}) — หยุดเปิดไม้ใหม่เพื่อรักษาทุนตามแผน"
+        )
+    elif adapt_cfg.get("active"):
+        caution_warnings.append(
+            f"🧬 {adapt_cfg.get('label_th', 'โหมดวิเคราะห์ปรับปรุงอัตโนมัติทำงานอยู่')}"
+        )
+
+    # 9.2 Loss Pattern Memory Filter (จดจำและหลีกเลี่ยงรูปแบบที่เคยขาดทุน)
+    loss_pattern_eval = config.get("loss_pattern_eval") or {}
+    if loss_pattern_eval.get("is_high_risk"):
+        reject_reasons.append(
+            loss_pattern_eval.get("warning_message")
+            or f"🧠 AI สกัดกั้นตามฐานความจำการขาดทุน: รูปแบบนี้เคยแพ้ซ้ำ {loss_pattern_eval.get('loss_count')} ครั้ง — งดเข้าไม้เพื่อเลี่ยงการแพ้ซ้ำ"
+        )
+    elif loss_pattern_eval.get("match_found"):
+        caution_warnings.append(
+            f"🧠 AI แจ้งเตือน: รูปแบบนี้เคยบันทึกประวัติแพ้ {loss_pattern_eval.get('loss_count')} ครั้ง (โปรดใช้ความระมัดระวัง)"
+        )
+
+    # 9.3 Duplicate EA Kill Switch disabled — Section 9.1 (Dashboard Anchored Portfolio Loss Limit) is the sole authority.
 
     # 10. Max Trades Per Day check
     max_trades_per_day = int(config.get("max_trades_per_day") or 0)
@@ -361,9 +493,21 @@ def evaluate_risk_and_size(
                             )
                             break
 
+    if config.get("sideway_paused"):
+        caution_warnings.append(
+            "⏸️ หยุดการออกไม้ใหม่ชั่วคราว: กราฟกำลังเข้าสู่ภาวะ Sideway — เฝ้ารอจังหวะหลุดกรอบเข้าสู่เทรนด์"
+        )
+
+    ai_mem_eval = trade_setup.get("ai_memory_eval") or config.get("ai_memory_eval") or {}
+    if ai_mem_eval.get("insight_th"):
+        if ai_mem_eval.get("risk_level") == "HIGH_CAUTION":
+            caution_warnings.append(ai_mem_eval["insight_th"])
+        else:
+            passed_checks.append(ai_mem_eval["insight_th"])
+
     if is_rapid:
         verdict = "PASS"
-        badge_th = "🧪 โหมดทดสอบยิงถี่ Demo (RAPID-FIRE PASS)"
+        badge_th = "⚡ โหมด Rapid Scalp สไนเปอร์ความถี่สูง (RAPID SCALP PASS)"
     elif reject_reasons:
         verdict = "REJECT"
         if not win_prob_passed:
@@ -400,6 +544,7 @@ def evaluate_risk_and_size(
         "verdict": verdict,
         "badge_th": badge_th,
         "lot_size": lot_size,
+        "lot_allocation": lot_allocation,
         "entry_mt5": entry_mt5,
         "stop_mt5": stop_mt5,
         "tp1_mt5": tp1_mt5,
@@ -430,6 +575,7 @@ def evaluate_risk_and_size(
         "spread_cost_usd": spread_cost_usd,
         "spread_to_sl_pct": spread_to_sl_pct,
         "reject_reasons": reject_reasons,
+        "reason": reject_reasons[0] if reject_reasons else "",
         "caution_warnings": caution_warnings,
         "passed_checks": passed_checks,
     }

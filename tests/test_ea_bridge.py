@@ -680,7 +680,8 @@ class TestEABridge(unittest.TestCase):
             })
             core.order_manager.bind_execution_report(rec)
             core.compute_full_state(timeframe="M5")
-            self.assertEqual(len(core.ea_bridge.action_queue), 0)
+            # The rejected signal must never be re-enqueued
+            self.assertNotIn(sig_id, [a.get("signal_id") for a in core.ea_bridge.action_queue])
         finally:
             if os.path.exists(tmp_state):
                 os.remove(tmp_state)

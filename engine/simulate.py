@@ -107,9 +107,20 @@ def run_simulation(
     recent_pool = pool[-30:] if len(pool) >= 30 else pool
     recent_mean_dc = sum(x["dc"] for x in recent_pool) / len(recent_pool)
 
-    # Purely empirical market drift from observed EMA slopes & recent 30-bar returns (NEVER biased by trade side or confluence score)
+    # Purely empirical market drift from observed EMA slopes & recent 30-bar returns
     ema_slope_drift = (slope20 * 0.55 + slope50 * 0.45) * 0.06 * atr_val
     raw_drift = (ema_slope_drift * 0.65) + (recent_mean_dc * 0.35)
+    # For confirmed Candlestick Reversal / Liquidity Sweep turning points, damp stale opposing pre-reversal EMA slope
+    # so Monte Carlo evaluates unbiased volatility geometry instead of extrapolating the exhausted pre-reversal trend.
+    entry_style = str(trade_setup.get("entry_style") or "").upper()
+    setup_arch = str(trade_setup.get("setup_archetype") or "").upper()
+    is_reversal_setup = entry_style == "CANDLE_REVERSAL" or setup_arch in (
+        "RAPID_CANDLE_REVERSAL",
+        "CANDLE_REVERSAL_SMC",
+        "SESSION_SWEEP",
+    )
+    if is_reversal_setup and ((is_buy and raw_drift < 0.0) or ((not is_buy) and raw_drift > 0.0)):
+        raw_drift *= 0.15
     drift_per_bar = max(-atr_val * 0.18, min(atr_val * 0.18, raw_drift))
 
     rng = random.Random(seed)

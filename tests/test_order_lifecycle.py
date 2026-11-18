@@ -712,6 +712,210 @@ class TestOrderLifecycle(unittest.TestCase):
         self.assertEqual(len(self.manager.order_history), 2)
         self.assertEqual(self.manager.order_history[-1]["close_reason"], "ROBOT_BASKET_DRAWDOWN_CUT")
 
+    def test_early_reversal_profit_lock_secures_gains_before_sl(self):
+        """Verify that when an order is in profit and market reverses (rejection wick or profit giveback),
+        the Reversal Profit Sentinel closes the trade immediately to lock in profits rather than hitting SL."""
+        ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2645.00,
+            "tp1_mt5": 2655.00,
+            "target_mt5": 2660.00,
+            "lot_size": 0.10,
+            "actual_risk_usd": 50.0,
+            "potential_profit_usd": 100.0,
+            "order_type": "BUY NOW",
+            "execution_type": "MARKET",
+        }
+        self.manager.register_trade_setup(risk_ticket=ticket, current_price=2650.00)
+        self.assertEqual(self.manager.active_order["status"], "FILLED")
+
+        # 1. Price runs into strong profit: hits 2653.50 (+3.50 * 0.10 * 100 = +$35.00 = +0.70R)
+        ev1 = self.manager.update_price_tick(current_price=2653.50, high=2653.80, low=2650.00)
+        self.assertEqual(self.manager.active_order["highest_pnl_r"], 0.70)
+
+        # 2. Market pulls back sharply from 2653.50 down to 2651.50 (+0.30R, giveback > 50% from 0.70R peak)
+        ev2 = self.manager.update_price_tick(current_price=2651.50, high=2653.50, low=2651.20)
+        self.assertIsNotNone(ev2)
+        self.assertEqual(ev2["type"], "TRADE_CLOSED_REVERSAL_PROFIT_LOCK")
+        self.assertFalse(self.manager.has_active_order())
+        self.assertEqual(len(self.manager.order_history), 1)
+        closed = self.manager.order_history[0]
+        self.assertEqual(closed["close_reason"], "REVERSAL_PROFIT_LOCK")
+        self.assertGreater(closed["realized_pnl_usd"], 0)
+        self.assertIn("ชิงปิดทำกำไรล่วงหน้า", closed["management_note_th"])
+
+    def test_dynamic_order_morphing_promotes_rapid_to_runner(self):
+        """Verify that a profitable rapid fire/robot scalp order morphs to a PROMOTED_RUNNER,
+        locking in profit on SL and expanding TP to swing target."""
+        ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2648.50,
+            "tp1_mt5": 2651.50,
+            "target_mt5": 2652.50,
+            "lot_size": 0.01,
+            "actual_risk_usd": 1.50,
+            "potential_profit_usd": 2.50,
+            "order_type": "BUY NOW",
+            "execution_type": "MARKET",
+            "trading_style": "rapid_fire_test",
+        }
+        self.manager.register_trade_setup(risk_ticket=ticket, current_price=2650.00, strategy_mode="RAPID_FIRE")
+        self.assertEqual(self.manager.active_order["strategy_mode"], "RAPID_FIRE")
+
+        # Price rallies to 2651.20 (+1.20 / 1.50 = +0.80R) with Bullish trend confirmation
+        mkt_ctx = {"structure": {"current_bias": "BULLISH", "swing_target": 2665.00}}
+        ev = self.manager.update_price_tick(
+            current_price=2651.20,
+            high=2651.30,
+            low=2650.80,
+            market_context=mkt_ctx,
+        )
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["type"], "ORDER_PROMOTED_TO_RUNNER")
+        act = self.manager.active_order
+        self.assertEqual(act["strategy_mode"], "PROMOTED_RUNNER")
+        self.assertTrue(act["is_promoted_runner"])
+        self.assertGreater(act["stop_mt5"], 2650.00)  # SL moved into profit
+        self.assertEqual(act["target_mt5"], 2665.00)  # TP expanded to swing target
+
+    def test_unified_multi_strategy_concurrent_orders(self):
+        """Verify SMC_SWING and RAPID_FIRE can both run and be active concurrently."""
+        t_smc = {
+            "side": "BUY", "entry_mt5": 2650.00, "stop_mt5": 2640.00, "tp1_mt5": 2660.00, "target_mt5": 2670.00,
+            "lot_size": 0.10, "actual_risk_usd": 100.0, "potential_profit_usd": 200.0, "execution_type": "LIMIT",
+        }
+        t_rapid = {
+            "side": "BUY", "entry_mt5": 2653.00, "stop_mt5": 2651.50, "tp1_mt5": 2654.50, "target_mt5": 2655.50,
+            "lot_size": 0.01, "actual_risk_usd": 1.50, "potential_profit_usd": 2.50, "execution_type": "MARKET",
+        }
+        t_runner = {
+            "side": "BUY", "entry_mt5": 2655.00, "stop_mt5": 2652.00, "tp1_mt5": 2665.00, "target_mt5": 2675.00,
+            "lot_size": 0.02, "actual_risk_usd": 6.0, "potential_profit_usd": 40.0, "execution_type": "MARKET",
+        }
+
+        o1 = self.manager.register_trade_setup(t_smc, current_price=2651.00, strategy_mode="SMC_SWING")
+        o2 = self.manager.register_trade_setup(t_rapid, current_price=2653.00, strategy_mode="RAPID_FIRE")
+        o3 = self.manager.register_trade_setup(t_runner, current_price=2655.00, strategy_mode="PROMOTED_RUNNER")
+
+        self.assertEqual(len(self.manager.active_orders), 3)
+        modes = [o["strategy_mode"] for o in self.manager.active_orders]
+        self.assertEqual(modes, ["SMC_SWING", "RAPID_FIRE", "PROMOTED_RUNNER"])
+        comments = [o["comment"] for o in self.manager.active_orders]
+        self.assertEqual(comments, ["K79-SMC-BUY", "K79-RAP-BUY", "K79-RUN-BUY"])
+
+    def test_rapid_sideway_fast_breakeven(self):
+        """Verify that Rapid Fire order in sideway locks Breakeven ultra fast at +0.25R."""
+        ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2649.00,
+            "tp1_mt5": 2650.60,
+            "target_mt5": 2650.60,
+            "lot_size": 0.01,
+            "actual_risk_usd": 1.00,
+            "potential_profit_usd": 0.60,
+            "order_type": "BUY NOW",
+            "execution_type": "MARKET",
+            "is_sideway": True,
+            "trading_style": "rapid_fire_test",
+        }
+        self.manager.register_trade_setup(risk_ticket=ticket, current_price=2650.00, strategy_mode="RAPID_FIRE")
+        self.assertTrue(self.manager.active_order["is_sideway"])
+
+        # Price moves up to +0.26R: 2650.00 + (1.00 * 0.26) = 2650.26 (low stays above entry)
+        ev = self.manager.update_price_tick(current_price=2650.26, high=2650.30, low=2650.15)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["type"], "BREAKEVEN_LOCKED")
+        self.assertTrue(self.manager.active_order["sl_moved_breakeven"])
+        self.assertGreaterEqual(self.manager.active_order["stop_mt5"], 2650.00)
+        self.assertIn("ไซด์เวย์เก็บเร็ว", self.manager.active_order["management_note_th"])
+
+    def test_rapid_sideway_stagnation_guard(self):
+        """Verify that Rapid Fire order held >= 180s in sideway with flt_r <= -0.20R is cut to prevent dragging."""
+        ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2649.00,
+            "tp1_mt5": 2650.60,
+            "target_mt5": 2650.60,
+            "lot_size": 0.01,
+            "actual_risk_usd": 1.00,
+            "potential_profit_usd": 0.60,
+            "order_type": "BUY NOW",
+            "execution_type": "MARKET",
+            "is_sideway": True,
+            "trading_style": "rapid_fire_test",
+        }
+        self.manager.register_trade_setup(risk_ticket=ticket, current_price=2650.00, strategy_mode="RAPID_FIRE")
+        # Simulate position held for 200s (> 180s)
+        self.manager.active_order["filled_ts"] = time.time() - 200
+        # Price dips to -0.22R (2649.78)
+        ev = self.manager.update_price_tick(current_price=2649.78, high=2650.00, low=2649.75)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["type"], "TRADE_CLOSED_SIDEWAY_STAGNATION_GUARD")
+        self.assertFalse(self.manager.has_active_order())
+        self.assertEqual(len(self.manager.order_history), 1)
+        closed = self.manager.order_history[0]
+        self.assertEqual(closed["close_reason"], "SIDEWAY_STAGNATION_GUARD")
+        self.assertIn("ตัดปิดไม้หน่วง Sideway", closed["management_note_th"])
+
+    def test_rapid_sideway_no_multi_orders(self):
+        """Verify check_and_apply_auto_multi_order returns None in sideway (no DCA or scale allowed)."""
+        ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2649.00,
+            "tp1_mt5": 2650.60,
+            "target_mt5": 2650.60,
+            "lot_size": 0.01,
+            "actual_risk_usd": 1.00,
+            "potential_profit_usd": 0.60,
+            "order_type": "BUY NOW",
+            "execution_type": "MARKET",
+            "is_sideway": True,
+            "trading_style": "rapid_fire_test",
+        }
+        self.manager.register_trade_setup(risk_ticket=ticket, current_price=2650.00, strategy_mode="RAPID_FIRE")
+        # In sideway, check_and_apply_auto_multi_order should strictly return None
+        res = self.manager.check_and_apply_auto_multi_order(
+            current_price=2649.50,
+            structure={"trend": {"regime": "RANGING", "bias": "NEUTRAL"}},
+            smc={},
+        )
+        self.assertIsNone(res)
+
+    def test_rapid_sideway_peak_giveback(self):
+        """Verify that Rapid Fire order in sideway with peak >= +0.28R giving back 30% locks profit immediately."""
+        ticket = {
+            "side": "BUY",
+            "entry_mt5": 2650.00,
+            "stop_mt5": 2649.00,
+            "tp1_mt5": 2650.60,
+            "target_mt5": 2650.60,
+            "lot_size": 0.01,
+            "actual_risk_usd": 1.00,
+            "potential_profit_usd": 0.60,
+            "order_type": "BUY NOW",
+            "execution_type": "MARKET",
+            "is_sideway": True,
+            "trading_style": "rapid_fire_test",
+        }
+        self.manager.register_trade_setup(risk_ticket=ticket, current_price=2650.00, strategy_mode="RAPID_FIRE")
+        # Peak profit reaches +0.30R (2650.30), low stays safely above entry
+        self.manager.update_price_tick(current_price=2650.30, high=2650.32, low=2650.25)
+        self.assertGreaterEqual(self.manager.active_order["highest_pnl_r"], 0.30)
+
+        # Price retraces to +0.20R (0.20 <= 0.30 * 0.70 = 0.21)
+        ev = self.manager.update_price_tick(current_price=2650.20, high=2650.30, low=2650.18)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["type"], "TRADE_CLOSED_REVERSAL_PROFIT_LOCK")
+        self.assertFalse(self.manager.has_active_order())
+        closed = self.manager.order_history[-1]
+        self.assertEqual(closed["close_reason"], "REVERSAL_PROFIT_LOCK")
+        self.assertIn("ตลาดพักตัว/ไซด์เวย์", closed["management_note_th"])
+
 
 if __name__ == "__main__":
     unittest.main()
